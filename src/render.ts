@@ -56,6 +56,31 @@ export interface Captions {
   lines: CaptionLine[];
 }
 
+/** A sound effect placed on the timeline (soundboard). */
+export interface SoundItem {
+  id: string;
+  file: string;        // absolute path in the library
+  name: string;
+  startMs: number;     // timeline time
+  lengthMs: number;    // how much of the sound plays (<= source length)
+  sourceMs: number;    // full length of the file
+  volume: number;      // 0..2
+}
+
+/** A picture (meme) over the video. */
+export interface ImageItem {
+  id: string;
+  file: string;
+  name: string;
+  startMs: number;
+  endMs: number;
+  x: number;       // 0..1 centre
+  y: number;       // 0..1 centre
+  scale: number;   // width as a share of the canvas width
+  aspect: number;  // natural width / height
+  animated: boolean;
+}
+
 export interface Timeline {
   width: number;   // 1080
   height: number;  // 1920
@@ -63,6 +88,8 @@ export interface Timeline {
   clips: VideoClip[];
   texts: TextItem[];
   captions: Captions;
+  sounds?: SoundItem[];
+  images?: ImageItem[];
 }
 
 export const DEFAULT_TEXT: TextStyle = {
@@ -239,12 +266,51 @@ export function renderArgs(spec: RenderSpec): string[] {
   });
   f.push(`${tl.clips.map((_, i) => `[v${i}][a${i}]`).join('')}concat=n=${tl.clips.length}:v=1:a=1[cv][ca]`);
   let v = 'cv';
+  let input = tl.clips.length;
+  const total = timelineDuration(tl);
+
+  // meme pictures over the video, each only while it is on the timeline
+  (tl.images ?? []).forEach((im, k) => {
+    const a = Math.max(0, im.startMs), b = Math.min(total, im.endMs);
+    if (b <= a) return;
+    const dur = ((b - a) / 1000).toFixed(3);
+    if (im.animated) args.push('-ignore_loop', '0', '-t', dur, '-i', im.file);
+    else args.push('-loop', '1', '-t', dur, '-framerate', String(F), '-i', im.file);
+    const w = Math.max(2, Math.round((W * im.scale) / 2) * 2);
+    const x = Math.round(im.x * W - w / 2);
+    const hgt = Math.round(w / im.aspect);
+    const y = Math.round(im.y * H - hgt / 2);
+    const st = (a / 1000).toFixed(3), en = (b / 1000).toFixed(3);
+    f.push(`[${input}:v]scale=${w}:-2,format=rgba,setpts=PTS-STARTPTS+${st}/TB[im${k}]`);
+    f.push(`[${v}][im${k}]overlay=x=${x}:y=${y}:enable='between(t,${st},${en})':eof_action=pass:format=auto[ov${k}]`);
+    v = `ov${k}`;
+    input++;
+  });
+  if (v !== 'cv') { f.push(`[${v}]format=yuv420p[ovf]`); v = 'ovf'; }
+
   if (spec.assFile) {
     const fd = spec.fontsDir ? `:fontsdir='${filterPath(spec.fontsDir)}'` : '';
-    f.push(`[cv]subtitles=filename='${filterPath(spec.assFile)}'${fd}[sv]`);
+    f.push(`[${v}]subtitles=filename='${filterPath(spec.assFile)}'${fd}[sv]`);
     v = 'sv';
   }
-  args.push('-filter_complex', f.join(';'), '-map', `[${v}]`, '-map', '[ca]',
+
+  // sound effects mixed over the main audio
+  let aOut = 'ca';
+  const sfx = (tl.sounds ?? []).filter((s) => s.startMs < total && s.lengthMs > 0);
+  if (sfx.length) {
+    const labels: string[] = [];
+    sfx.forEach((s, k) => {
+      args.push('-t', (s.lengthMs / 1000).toFixed(3), '-i', s.file);
+      const d = Math.max(0, Math.round(s.startMs));
+      f.push(`[${input}:a]aformat=sample_fmts=fltp:channel_layouts=stereo,aresample=48000,volume=${Number(s.volume.toFixed(3))},adelay=${d}|${d}[sfx${k}]`);
+      labels.push(`[sfx${k}]`);
+      input++;
+    });
+    f.push(`[ca]${labels.join('')}amix=inputs=${sfx.length + 1}:duration=first:dropout_transition=0:normalize=0,alimiter=limit=0.97[mix]`);
+    aOut = 'mix';
+  }
+
+  args.push('-filter_complex', f.join(';'), '-map', `[${v}]`, '-map', `[${aOut}]`,
     ...encoderArgs(spec.encoder, spec.bitrateK),
     '-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart', spec.outPath);
   return args;

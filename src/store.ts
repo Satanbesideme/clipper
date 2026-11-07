@@ -54,7 +54,7 @@ export function newProject(name: string): Project {
     name,
     media: [],
     timeline: {
-      width: 1080, height: 1920, fps: 60, clips: [], texts: [],
+      width: 1080, height: 1920, fps: 60, clips: [], texts: [], sounds: [], images: [],
       captions: { mode: 'word', y: 0.7, style: { ...DEFAULT_CAPTION }, lines: [] },
     },
     createdAt: now,

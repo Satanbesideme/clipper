@@ -300,6 +300,18 @@ fn ensure_dir(path: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn copy_file(src: String, dest: String) -> Result<(), String> {
+    if let Some(parent) = PathBuf::from(&dest).parent() { std::fs::create_dir_all(parent).map_err(|e| e.to_string())?; }
+    std::fs::copy(&src, &dest).map(|_| ()).map_err(|e| e.to_string())
+}
+
+/// Folder of the starter sound effects shipped with the app.
+#[tauri::command]
+fn starter_sfx_dir(app: AppHandle) -> String {
+    app.path().resource_dir().map(|p| p.join("sfx").to_string_lossy().to_string()).unwrap_or_default()
+}
+
+#[tauri::command]
 fn exists(path: String) -> bool {
     PathBuf::from(path).exists()
 }
@@ -338,7 +350,7 @@ fn main() {
         .manage(Jobs::default())
         .invoke_handler(tauri::generate_handler![
             probe, ffmpeg_check, tool_run, ffmpeg_cancel, whisper_available, cpu_count, file_size, download, waveform, data_dir, videos_dir,
-            read_text, write_text, write_bytes, read_bytes, ensure_dir, exists, list_dir, remove_path, reveal
+            read_text, write_text, write_bytes, read_bytes, ensure_dir, copy_file, starter_sfx_dir, exists, list_dir, remove_path, reveal
         ])
         .run(tauri::generate_context!())
         .expect("gagal menjalankan GALSURKU Clipper");
