@@ -36,12 +36,25 @@ jobs:
 
       - name: Unduh whisper.cpp (subtitle otomatis)
         shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          $url = "https://github.com/ggml-org/whisper.cpp/releases/latest/download/whisper-bin-x64.zip"
-          Invoke-WebRequest $url -OutFile whisper.zip
+          $headers = @{ Authorization = "Bearer $env:GH_TOKEN"; "User-Agent" = "galsurku-clipper-ci" }
+          $releases = Invoke-RestMethod "https://api.github.com/repos/ggml-org/whisper.cpp/releases?per_page=15" -Headers $headers
+          $asset = $null
+          foreach ($r in $releases) {
+            $asset = $r.assets | Where-Object { $_.name -match '^whisper-bin-x64.*\.zip$' } | Select-Object -First 1
+            if (-not $asset) { $asset = $r.assets | Where-Object { $_.name -match 'bin-x64.*\.zip$' -and $_.name -notmatch 'blas|cublas|cuda|vulkan|openvino|sycl' } | Select-Object -First 1 }
+            if ($asset) { Write-Host "Pakai $($asset.name) dari $($r.tag_name)"; break }
+          }
+          if (-not $asset) {
+            $releases | ForEach-Object { Write-Host $_.tag_name; $_.assets | ForEach-Object { Write-Host "  $($_.name)" } }
+            throw "Build Windows whisper.cpp tidak ditemukan"
+          }
+          Invoke-WebRequest $asset.browser_download_url -OutFile whisper.zip
           Expand-Archive whisper.zip -DestinationPath whisper-tmp
           $cli = Get-ChildItem whisper-tmp -Recurse -Filter whisper-cli.exe | Select-Object -First 1
-          if (-not $cli) { throw "whisper-cli.exe tidak ada di zip" }
+          if (-not $cli) { Get-ChildItem whisper-tmp -Recurse | ForEach-Object { Write-Host $_.FullName }; throw "whisper-cli.exe tidak ada di zip" }
           New-Item -ItemType Directory -Force src-tauri/whisper | Out-Null
           Copy-Item (Join-Path $cli.DirectoryName "*.exe") src-tauri/whisper/
           Copy-Item (Join-Path $cli.DirectoryName "*.dll") src-tauri/whisper/
