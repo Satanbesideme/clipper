@@ -5,7 +5,7 @@ import {
   type Encoder,
 } from './ffmpeg';
 import {
-  buildAss, groupLines, parseSilences, renderArgs, sourceToTimeline, timelineDuration, wordsFromWhisper,
+  buildAss, filterPath, groupLines, parseSilences, renderArgs, silencesOnTimeline, snapWordsToSpeech, timelineDuration, wordsFromWhisper,
   type CaptionLine, type Range, type Timeline, type Word,
 } from './render';
 import { dataDir, projectDir, uid, type MediaEntry, type ModelSize, type Project } from './store';
@@ -231,10 +231,21 @@ export async function transcribe(p: Project, size: ModelSize, onStatus: (msg: st
       if (sttCancelled) throw new Error('Dibatalkan.');
       onStatus(`Mendengarkan ucapan${tag}…`, done / total);
       await invoke('remove_path', { path: `${base}.json` }).catch(() => undefined);
-      sttJob = uid();
-      await runTool('whisper', whisperArgs(model, wav, base, threads), (_ms, pct) => {
+      const progress = (_ms: number, pct: number) => {
         if (pct >= 0) onStatus(`Mendengarkan ucapan${tag}… ${Math.round(pct)}%`, (done + (b.dur * pct) / 100) / total);
-      }, sttJob);
+      };
+      // precise word timing (DTW); older whisper builds without it fall back to normal timing
+      sttJob = uid();
+      try {
+        if (dtwOk === false) throw new Error('skip');
+        await runTool('whisper', whisperArgs(model, wav, base, threads, size), progress, sttJob);
+        dtwOk = true;
+      } catch (e) {
+        if (sttCancelled) throw e;
+        dtwOk = false;
+        sttJob = uid();
+        await runTool('whisper', whisperArgs(model, wav, base, threads), progress, sttJob);
+      }
       if (sttCancelled) throw new Error('Dibatalkan.');
       let json: string;
       try { json = await invoke<string>('read_text', { path: `${base}.json` }); }
@@ -252,8 +263,53 @@ export async function transcribe(p: Project, size: ModelSize, onStatus: (msg: st
     }
     done += b.dur;
   }
-  onStatus('Menyusun subtitle…', 1);
-  return groupLines(words, uid);
+  onStatus('Merapikan waktu subtitle…', 1);
+  // move words that whisper put in a silence to where the talking actually is
+  let snapped = words;
+  try {
+    const used = [...new Set(clips.map((c) => c.mediaId))].map((id) => media[id]).filter((m) => m?.hasAudio);
+    const sil: Record<string, Range[]> = {};
+    for (const m of used) sil[m.id] = await silencesOf(m, -38);
+    snapped = snapWordsToSpeech(words, silencesOnTimeline(clips, sil));
+  } catch { /* timing polish is optional */ }
+  return groupLines(snapped, uid);
+}
+
+let dtwOk: boolean | undefined;
+
+// ---------- font calibration (export text = preview text) ----------
+
+/**
+ * libass (export) and the preview canvas size the same font number differently, by a factor that
+ * depends on the font. Render a test line with ffmpeg once per font and compare its width with the
+ * width the preview measured, so exported text comes out exactly as large as in the preview.
+ */
+export async function calibrateFont(font: string, bold: boolean, previewWidthAt100: number): Promise<number> {
+  const dir = join(await dataDir(), 'cal');
+  await invoke('ensure_dir', { path: dir });
+  const ass = join(dir, 'cal.ass');
+  const raw = join(dir, 'cal.raw');
+  await invoke('write_text', {
+    path: ass, content: [
+      '[Script Info]', 'ScriptType: v4.00+', 'PlayResX: 1080', 'PlayResY: 240', 'ScaledBorderAndShadow: yes', '',
+      '[V4+ Styles]',
+      'Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding',
+      'Style: Default,Arial,100,&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,0,0,5,0,0,0,1', '',
+      '[Events]', 'Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text',
+      `Dialogue: 0,0:00:00.00,0:00:05.00,Default,,0,0,0,,{\\an5\\pos(540,120)\\fn${font}\\fs100\\b${bold ? 1 : 0}}HHHHHHHHHH`, '',
+    ].join('\n'),
+  });
+  await invoke('remove_path', { path: raw }).catch(() => undefined);
+  await invoke<string>('ffmpeg_log', {
+    args: ['-hide_banner', '-loglevel', 'error', '-y', '-f', 'lavfi', '-i', 'color=c=black:s=1080x240:d=1:r=1',
+      '-vf', `subtitles=filename='${filterPath(ass)}':fontsdir='${filterPath(FONTS_DIR)}',format=gray,scale=1080:1:flags=area`,
+      '-frames:v', '1', '-f', 'rawvideo', '-pix_fmt', 'gray', raw],
+  });
+  const bytes = await invoke<number[]>('read_bytes', { path: raw });
+  const cols = bytes.map((v, i) => (v > 20 ? i : -1)).filter((i) => i >= 0);
+  if (cols.length < 2) return 1;
+  const ratio = previewWidthAt100 / (cols[cols.length - 1] - cols[0] + 1);
+  return ratio > 0.5 && ratio < 3 ? ratio : 1;
 }
 
 // ---------- export queue ----------
@@ -287,7 +343,7 @@ async function uniquePath(dir: string, base: string): Promise<string> {
   return p;
 }
 
-export async function enqueueExport(p: Project, opts: { outDir: string; encoder: Encoder }) {
+export async function enqueueExport(p: Project, opts: { outDir: string; encoder: Encoder; fontScale?: Record<string, number> }) {
   const tl: Timeline = structuredClone(p.timeline);
   if (!tl.clips.length) throw new Error('Timeline masih kosong. Tambahkan video dulu.');
   tl.texts = tl.texts.map((t) => ({ ...t, text: stripEmoji(t.text) })).filter((t) => t.text);
@@ -297,7 +353,8 @@ export async function enqueueExport(p: Project, opts: { outDir: string; encoder:
   let assFile: string | undefined;
   if (tl.texts.length || tl.captions.lines.length) {
     assFile = join(await projectDir(p.id), `export-${id}.ass`);
-    await invoke('write_text', { path: assFile, content: buildAss(tl) });
+    const fs = opts.fontScale ?? {};
+    await invoke('write_text', { path: assFile, content: buildAss(tl, (font, bold) => fs[`${font}|${bold ? 1 : 0}`] ?? 1) });
   }
   const outPath = await uniquePath(opts.outDir, safeName(p.name));
   const media = Object.fromEntries(p.media.map((m) => [m.id, m]));

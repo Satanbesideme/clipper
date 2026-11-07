@@ -16,7 +16,7 @@ import {
 } from './store';
 import {
   ENCODER_LABEL, MODELS, VIDEO_EXT, buildThumbs, cancelExport, detectEncoder, downloadModel, enqueueExport,
-  importMedia, modelReady, onQueueChange, queue, thumbPath, transcribe, silencesOf, probeAudio, cancelTranscribe,
+  importMedia, modelReady, onQueueChange, queue, thumbPath, transcribe, silencesOf, probeAudio, cancelTranscribe, calibrateFont,
 } from './jobs';
 
 // ================= helpers =================
@@ -300,37 +300,50 @@ function renderEditor() {
       }),
       h('div', { class: 'spacer' }),
       h('span', { id: 'busy', class: 'busy muted small' }),
-      h('button', { class: 'primary', id: 'export-btn', onclick: toggleExport }, 'Ekspor'),
+      h('button', { class: 'icon-btn help-btn', title: 'Tombol keyboard', 'aria-label': 'Tombol keyboard', onclick: toggleHelp }, '?'),
+      h('button', { class: 'primary export-btn', id: 'export-btn', onclick: toggleExport }, 'Ekspor'),
     ),
     h('div', { class: 'workspace' },
+      h('nav', { class: 'rail', role: 'tablist', 'aria-label': 'Panel' },
+        ...RAIL.map(([k, icon, label]) => h('button', {
+          role: 'tab', class: tab === k ? 'on' : '', 'aria-selected': tab === k ? 'true' : 'false', 'data-tab': k, title: label,
+          onclick: () => { libEdit = false; switchTab(k); },
+        }, h('span', { class: 'rail-icon', 'aria-hidden': 'true' }, icon), h('span', { class: 'rail-label' }, label))),
+      ),
       h('aside', { class: 'left' },
-        h('nav', { class: 'tabs', role: 'tablist' },
-          ...(['media', 'sound', 'meme', 'text', 'captions'] as LeftTab[]).map((k) => h('button', {
-            role: 'tab', class: tab === k ? 'on' : '', 'aria-selected': tab === k ? 'true' : 'false', 'data-tab': k,
-            onclick: () => { libEdit = false; switchTab(k); },
-          }, k === 'media' ? 'Media' : k === 'sound' ? 'Suara' : k === 'meme' ? 'Meme' : k === 'text' ? 'Teks' : 'Subtitle')),
-        ),
+        h('div', { class: 'left-head', id: 'left-head' }, RAIL.find((r) => r[0] === tab)![2]),
         h('div', { class: 'left-body', id: 'left' }),
       ),
       h('section', { class: 'viewer' },
         h('div', { class: 'stage', id: 'stage' }, preview),
         h('div', { class: 'transport' },
           h('span', { class: 'mono small', id: 'time' }),
-          h('button', { class: 'play', id: 'play', 'aria-label': 'Putar', onclick: togglePlay }, '▶'),
-          h('span', { class: 'muted small', id: 'fmt' }, `${tl().width}×${tl().height} · ${tl().fps} fps`),
+          h('div', { class: 'transport-mid' },
+            h('button', { class: 'icon-btn', title: 'Mundur 1 detik (Shift+←)', 'aria-label': 'Mundur 1 detik', onclick: () => seek(t - 1000) }, '«'),
+            h('button', { class: 'play', id: 'play', 'aria-label': 'Putar', onclick: togglePlay }, '▶'),
+            h('button', { class: 'icon-btn', title: 'Maju 1 detik (Shift+→)', 'aria-label': 'Maju 1 detik', onclick: () => seek(t + 1000) }, '»'),
+          ),
+          h('div', { class: 'transport-right' },
+            h('button', {
+              class: `chip ${safeGuide ? 'on' : ''}`, id: 'safe-btn', title: 'Tandai area yang tertutup tombol dan teks TikTok/Shorts',
+              onclick: (e) => { safeGuide = !safeGuide; (e.currentTarget as HTMLElement).classList.toggle('on', safeGuide); renderFrame(); },
+            }, 'Area aman'),
+            h('span', { class: 'muted small', id: 'fmt' }, `${tl().width}×${tl().height} · ${tl().fps} fps`),
+          ),
         ),
       ),
       h('aside', { class: 'right', id: 'inspector' }),
     ),
+    h('div', { class: 'tl-resize', id: 'tl-resize', title: 'Tarik untuk mengubah tinggi timeline', role: 'separator', 'aria-orientation': 'horizontal' }),
     h('section', { class: 'timeline' },
       h('div', { class: 'tl-tools' },
-        h('button', { class: 'tool', title: 'Urungkan (Ctrl+Z)', onclick: undo }, '↶'),
-        h('button', { class: 'tool', title: 'Ulangi (Ctrl+Y)', onclick: redo }, '↷'),
+        h('button', { class: 'tool icon', title: 'Urungkan (Ctrl+Z)', 'aria-label': 'Urungkan', onclick: undo }, '↶'),
+        h('button', { class: 'tool icon', title: 'Ulangi (Ctrl+Y)', 'aria-label': 'Ulangi', onclick: redo }, '↷'),
         h('span', { class: 'sep' }),
-        h('button', { class: 'tool', title: 'Potong di playhead (Ctrl+B)', onclick: splitHere }, '✂ Split'),
-        h('button', { class: 'tool', title: 'Hapus (Delete)', onclick: deleteSelected }, '🗑 Hapus'),
+        h('button', { class: 'tool', title: 'Potong di playhead (Ctrl+B)', onclick: splitHere }, h('span', { class: 'ti' }, '✂'), 'Split'),
+        h('button', { class: 'tool', title: 'Hapus yang dipilih (Delete)', onclick: deleteSelected }, h('span', { class: 'ti' }, '⌫'), 'Hapus'),
         h('span', { class: 'sep' }),
-        h('button', { class: 'tool', id: 'pause-btn', title: 'Potong semua bagian diam', onclick: togglePausePop }, '⏸ Hapus jeda'),
+        h('button', { class: 'tool', id: 'pause-btn', title: 'Potong semua bagian diam', onclick: togglePausePop }, h('span', { class: 'ti' }, '⏸'), 'Hapus jeda'),
         h('div', { class: 'spacer' }),
         h('button', { class: 'tool', title: 'Perkecil', onclick: () => zoomBy(0.8) }, '−'),
         h('input', { type: 'range', id: 'zoom', min: 0, max: 100, 'aria-label': 'Zoom timeline', oninput: (e) => setZoomFromSlider(Number((e.target as HTMLInputElement).value)) }),
@@ -341,14 +354,81 @@ function renderEditor() {
     ),
     h('div', { class: 'export-pop', id: 'export-pop', hidden: true }),
     h('div', { class: 'export-pop pause-pop', id: 'pause-pop', hidden: true }),
+    h('div', { class: 'export-pop help-pop', id: 'help-pop', hidden: true }),
   );
   setupTimeline();
+  setupResize();
   setupPreviewDrag();
   renderLeft();
   renderInspector();
   setBusy(busy);
   requestAnimationFrame(() => { layoutPreview(); sizeTimeline(); renderFrame(); updateTime(); });
   new ResizeObserver(() => { layoutPreview(); sizeTimeline(); }).observe($('#stage')!);
+}
+
+const RAIL: [LeftTab, string, string][] = [
+  ['media', '▦', 'Media'], ['sound', '♪', 'Suara'], ['meme', '☺', 'Meme'], ['text', 'T', 'Teks'], ['captions', '≋', 'Subtitle'],
+];
+let safeGuide = false;
+
+function readTlHeight() { try { return Number(localStorage.getItem('tlH')) || 300; } catch { return 300; } }
+function setTlHeight(px: number) {
+  const v = Math.round(clamp(px, 170, Math.max(220, window.innerHeight - 380)));
+  document.documentElement.style.setProperty('--tl-h', `${v}px`);
+  try { localStorage.setItem('tlH', String(v)); } catch { /* per-viewer convenience only */ }
+}
+setTlHeight(readTlHeight());
+
+function setupResize() {
+  const bar = $('#tl-resize');
+  if (!bar) return;
+  let start: { y: number; h: number } | null = null;
+  bar.addEventListener('pointerdown', (e) => { start = { y: e.clientY, h: readTlHeight() }; bar.setPointerCapture(e.pointerId); bar.classList.add('drag'); });
+  bar.addEventListener('pointermove', (e) => { if (start) { setTlHeight(start.h - (e.clientY - start.y)); layoutPreview(); sizeTimeline(); } });
+  const end = () => { start = null; bar.classList.remove('drag'); };
+  bar.addEventListener('pointerup', end);
+  bar.addEventListener('pointercancel', end);
+}
+
+function toggleHelp() {
+  const pop = $('#help-pop');
+  if (!pop) return;
+  pop.hidden = !pop.hidden;
+  if (pop.hidden) return;
+  const rows: [string, string][] = [
+    ['Spasi', 'Putar / jeda'], ['Ctrl + B', 'Split di playhead'], ['Delete', 'Hapus yang dipilih'],
+    ['Ctrl + Z / Ctrl + Y', 'Urungkan / ulangi'], ['← / →', 'Mundur / maju 1 frame'], ['Shift + ← / →', 'Mundur / maju 1 detik'],
+    ['1 – 9', 'Pasang suara di playhead'], ['Shift + 1 – 9', 'Pasang meme di playhead'], ['Home / End', 'Ke awal / akhir'],
+    ['Ctrl + scroll (timeline)', 'Zoom timeline'], ['Ctrl + scroll (gambar)', 'Ubah ukuran meme'], ['Esc', 'Batal pilih'],
+  ];
+  pop.replaceChildren(
+    h('div', { class: 'row-between' }, h('h3', {}, 'Tombol keyboard'), h('button', { class: 'icon-btn', 'aria-label': 'Tutup', onclick: toggleHelp }, '✕')),
+    h('div', { class: 'keys' }, ...rows.flatMap(([k, d]) => [h('kbd', {}, k), h('span', {}, d)])),
+  );
+}
+
+/** Highlights the caption line under the playhead in the Subtitle panel and keeps it in view. */
+let lastActiveLine = '';
+function markActiveLine() {
+  if (tab !== 'captions' || !P) return;
+  const line = tl().captions.lines.find((l) => t >= l.startMs && t < l.endMs);
+  const id = line?.id ?? '';
+  if (id === lastActiveLine) return;
+  lastActiveLine = id;
+  document.querySelectorAll('.lines li.now').forEach((el) => el.classList.remove('now'));
+  if (!id) return;
+  const el = document.querySelector(`.lines li[data-line="${id}"]`);
+  el?.classList.add('now');
+  if (playing) el?.scrollIntoView({ block: 'nearest' });
+}
+
+/** Moves caption timing; used by the sync buttons. */
+function nudgeLines(lines: CaptionLine[], ms: number) {
+  for (const l of lines) {
+    l.startMs = Math.max(0, l.startMs + ms);
+    l.endMs = Math.max(l.startMs + 100, l.endMs + ms);
+    l.words = l.words.map((w) => ({ ...w, startMs: Math.max(0, w.startMs + ms), endMs: Math.max(0, w.endMs + ms) }));
+  }
 }
 
 function layoutPreview() {
@@ -518,7 +598,14 @@ function captionPanel(): Node[] {
         h('div', { class: 'label' }, `${cap.lines.length} baris`),
         h('button', { class: 'danger-ghost small', onclick: async () => { if (await dialog().ask('Hapus semua subtitle?', { title: 'Subtitle', kind: 'warning' })) { snapshot(); cap.lines = []; sel = null; changed({ left: true }); } } }, 'Hapus semua'),
       ),
-      h('ol', { class: 'lines' }, ...cap.lines.map((l) => h('li', { class: sel?.kind === 'line' && sel.id === l.id ? 'sel' : '' },
+      h('div', { class: 'sync' },
+        h('span', { class: 'label' }, 'Geser semua'),
+        ...([-200, -50, 50, 200] as const).map((ms) => h('button', {
+          class: 'chip', title: ms < 0 ? 'Subtitle muncul lebih awal' : 'Subtitle muncul lebih lambat',
+          onclick: () => { snapshot(); nudgeLines(cap.lines, ms); changed({ left: true, inspector: false }); toast(`Semua subtitle digeser ${ms > 0 ? '+' : ''}${(ms / 1000).toFixed(2)} dtk.`); },
+        }, `${ms > 0 ? '+' : '−'}${Math.abs(ms / 1000).toFixed(ms % 100 ? 2 : 1)}`)),
+      ),
+      h('ol', { class: 'lines' }, ...cap.lines.map((l) => h('li', { 'data-line': l.id, class: sel?.kind === 'line' && sel.id === l.id ? 'sel' : '' },
         h('button', { class: 'line-time mono', onclick: () => { sel = { kind: 'line', id: l.id }; seek(l.startMs); renderInspector(); renderLeft(); } }, tc(l.startMs)),
         h('input', {
           value: l.words.map((w) => w.text).join(' '), 'aria-label': `Subtitle ${tc(l.startMs)}`,
@@ -754,7 +841,18 @@ function renderInspectorInner() {
         value: line.words.map((w) => w.text).join(' '), 'aria-label': 'Teks subtitle',
         onchange: (e) => { snapshot(); setLineText(line, (e.target as HTMLInputElement).value); changed({ left: true }); },
       }),
-      h('div', { class: 'muted small' }, 'Gaya semua subtitle diatur di tab Subtitle sebelah kiri.'),
+      h('div', { class: 'block' },
+        h('div', { class: 'label' }, 'Waktu baris ini'),
+        h('div', { class: 'sync' },
+          h('button', { class: 'chip', onclick: () => { snapshot(); nudgeLines([line], -100); changed(); } }, '← 0.1'),
+          h('button', { class: 'chip', onclick: () => { snapshot(); nudgeLines([line], 100); changed(); } }, '0.1 →'),
+          h('button', {
+            class: 'chip', title: 'Mulai baris ini di posisi playhead',
+            onclick: () => { snapshot(); nudgeLines([line], Math.round(t) - line.startMs); changed(); },
+          }, 'Mulai di playhead'),
+        ),
+        h('div', { class: 'muted small' }, 'Tarik ujung kotak subtitle di timeline untuk mengatur durasinya. Gaya semua subtitle ada di panel Subtitle.'),
+      ),
       h('button', { class: 'danger-ghost wide', onclick: deleteSelected }, 'Hapus baris ini'),
     );
     return;
@@ -851,6 +949,7 @@ function syncVideo() {
 function seek(ms: number) {
   if (!P) return;
   t = clamp(ms, 0, Math.max(0, timelineDuration(tl()) - 1));
+  setTimeout(markActiveLine, 0);
   syncVideo();
   if (playing && activeVideo) void activeVideo.play().catch(() => undefined);
   renderFrame();
@@ -916,6 +1015,7 @@ function tickInner() {
   renderFrame();
   drawTimeline();
   updateTime();
+  markActiveLine();
 }
 
 interface Box { kind: 'text' | 'captions' | 'image'; id: string; x: number; y: number; w: number; h: number }
@@ -1003,12 +1103,13 @@ function renderFrameInner() {
     let active = -1;
     if (cap.mode === 'word') line.words.forEach((w, i) => { if (t >= w.startMs) active = i; });
     const segs = line.words.map((w, i) => ({ text: w.text, color: i === active ? cap.style.highlight : cap.style.color }));
-    const b = drawText(ctx, wrapSegs(ctx, segs, cap.style, k, W * 0.9), W / 2, cap.y * H, cap.style, k);
+    const b = drawText(ctx, wrapSegs(ctx, segs, cap.style, k, W - 120 * k), W / 2, cap.y * H, cap.style, k);
     boxes.push({ kind: 'captions', id: line.id, ...b });
   }
+  drawSafeGuide(ctx, W, H);
   for (const x of tl().texts) {
     if (t < x.startMs || t >= x.endMs || !x.text.trim()) continue;
-    const lines = x.text.split('\n').flatMap((l) => wrapSegs(ctx, l.split(/\s+/).filter(Boolean).map((w) => ({ text: w, color: x.style.color })), x.style, k, W * 0.92));
+    const lines = x.text.split('\n').flatMap((l) => wrapSegs(ctx, l.split(/\s+/).filter(Boolean).map((w) => ({ text: w, color: x.style.color })), x.style, k, W - 120 * k));
     const b = drawText(ctx, lines, x.x * W, x.y * H, x.style, k);
     boxes.push({ kind: 'text', id: x.id, ...b });
     if (sel?.kind === 'text' && sel.id === x.id) {
@@ -1019,6 +1120,32 @@ function renderFrameInner() {
       ctx.setLineDash([]);
     }
   }
+}
+
+/** Shades where TikTok / YouTube Shorts put their buttons and captions, so nothing important lands there. */
+function drawSafeGuide(ctx: CanvasRenderingContext2D, W: number, H: number) {
+  if (!safeGuide) return;
+  ctx.save();
+  ctx.fillStyle = 'rgba(255,92,92,.18)';
+  ctx.strokeStyle = 'rgba(255,92,92,.7)';
+  ctx.setLineDash([5, 4]);
+  ctx.lineWidth = 1;
+  const zones = [
+    { x: 0, y: 0, w: W, h: H * 0.08, label: 'Atas: judul/tab' },
+    { x: W * 0.84, y: H * 0.38, w: W * 0.16, h: H * 0.44, label: 'Tombol' },
+    { x: 0, y: H * 0.8, w: W, h: H * 0.2, label: 'Nama & deskripsi' },
+  ];
+  ctx.font = `600 ${Math.round(W / 34)}px "Segoe UI", sans-serif`;
+  ctx.textBaseline = 'top';
+  ctx.textAlign = 'left';
+  for (const z of zones) {
+    ctx.fillRect(z.x, z.y, z.w, z.h);
+    ctx.strokeRect(z.x + 0.5, z.y + 0.5, z.w - 1, z.h - 1);
+    ctx.fillStyle = 'rgba(255,255,255,.85)';
+    ctx.fillText(z.label, z.x + 6, z.y + 5, z.w - 10);
+    ctx.fillStyle = 'rgba(255,92,92,.18)';
+  }
+  ctx.restore();
 }
 
 type Seg = { text: string; color: string };
@@ -1734,8 +1861,12 @@ function syncSfx() {
 
 function switchTab(k: LeftTab) {
   tab = k;
-  document.querySelectorAll('.tabs button').forEach((b) => b.classList.toggle('on', (b as HTMLElement).dataset.tab === k));
+  document.querySelectorAll('.rail button').forEach((b) => { const on = (b as HTMLElement).dataset.tab === k; b.classList.toggle('on', on); b.setAttribute('aria-selected', on ? 'true' : 'false'); });
+  const head = $('#left-head');
+  if (head) head.textContent = RAIL.find((r) => r[0] === k)![2];
+  lastActiveLine = '';
   renderLeft();
+  markActiveLine();
 }
 
 async function addToLibrary(paths: string[]) {
@@ -2155,13 +2286,33 @@ function renderExport() {
         pause();
         try {
           await flush();
-          await enqueueExport(P!, { outDir: settings.outDir, encoder: settings.encoder || (await detectEncoder()) });
+          const fontScale = await fontScales();
+          await enqueueExport(P!, { outDir: settings.outDir, encoder: settings.encoder || (await detectEncoder()), fontScale });
         } catch (e) { toast((e as Error).message, 'error'); }
       },
     }, 'Ekspor video'),
     h('div', { id: 'queue' }),
   );
   renderQueue();
+}
+
+/** Size factors so exported text matches the preview; measured once per font on this PC and remembered. */
+async function fontScales(): Promise<Record<string, number>> {
+  const used = new Map<string, TextStyle>();
+  if (tl().captions.lines.length) used.set(`${tl().captions.style.font}|${tl().captions.style.bold ? 1 : 0}`, tl().captions.style);
+  for (const x of tl().texts) used.set(`${x.style.font}|${x.style.bold ? 1 : 0}`, x.style);
+  const known = (settings.fontScale ??= {});
+  const ctx = document.createElement('canvas').getContext('2d')!;
+  for (const [key, st] of used) {
+    if (known[key]) continue;
+    setBusy('Menyesuaikan ukuran font…');
+    ctx.font = fontOf({ ...st, size: 100 }, 1);
+    const w = ctx.measureText('HHHHHHHHHH').width;
+    try { known[key] = await calibrateFont(st.font, st.bold, w); } catch { known[key] = 1; }
+  }
+  setBusy('');
+  await saveSettings(settings);
+  return known;
 }
 
 function renderQueue() {

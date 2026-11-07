@@ -37,10 +37,11 @@ export function speechWavArgs(src: string, inMs: number, outMs: number, out: str
     '-i', src, '-map', '0:a:0', '-vn', '-ac', '1', '-ar', '16000', '-c:a', 'pcm_s16le', out];
 }
 
-export function whisperArgs(model: string, wav: string, outBase: string, threads: number, lang = 'id'): string[] {
-  // -ml 1 + -sow: one segment per word, which gives word timing for the highlight style
+export function whisperArgs(model: string, wav: string, outBase: string, threads: number, dtw?: 'base' | 'small', lang = 'id'): string[] {
+  // -ml 1 + -sow: one segment per word, which gives word timing for the highlight style;
+  // -dtw: token timestamps aligned with the model's attention, much closer to when each word is said
   return ['-m', model, '-f', wav, '-l', lang, '-t', String(Math.max(1, Math.min(8, threads))),
-    '-ml', '1', '-sow', '-oj', '-of', outBase, '-pp'];
+    '-ml', '1', '-sow', ...(dtw ? ['-dtw', dtw] : []), '-oj', '-of', outBase, '-pp'];
 }
 
 export function safeName(s: string): string {

@@ -21,7 +21,7 @@ export interface Project {
 export interface ProjectSummary { id: string; name: string; durationMs: number; clips: number; updatedAt: string; version?: number }
 
 export type ModelSize = 'base' | 'small';
-export interface Settings { outDir: string; encoder: Encoder | ''; model: ModelSize; watermark?: Watermark | null }
+export interface Settings { outDir: string; encoder: Encoder | ''; model: ModelSize; watermark?: Watermark | null; fontScale?: Record<string, number> }
 
 let dataDirCache = '';
 export async function dataDir(): Promise<string> {
@@ -100,7 +100,7 @@ export async function loadSettings(): Promise<Settings> {
     const vids = await invoke<string>('videos_dir');
     outDir = join(vids || (await dataDir()), 'GALSURKU Clipper');
   }
-  return { outDir, encoder: s.encoder ?? '', model: s.model ?? 'small', watermark: s.watermark ?? null };
+  return { outDir, encoder: s.encoder ?? '', model: s.model ?? 'small', watermark: s.watermark ?? null, fontScale: s.fontScale ?? {} };
 }
 
 export async function saveSettings(s: Settings) {

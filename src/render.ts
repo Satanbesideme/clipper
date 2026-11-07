@@ -237,10 +237,10 @@ export function assEscape(s: string): string {
   return s.replace(/\\/g, '\u29F5').replace(/[{}]/g, (c) => (c === '{' ? '(' : ')')).replace(/\r?\n/g, '\\N');
 }
 
-function overrides(st: TextStyle, x: number, y: number, W: number, H: number): string {
+function overrides(st: TextStyle, x: number, y: number, W: number, H: number, scale = 1): string {
   const tags = [
     `\\an5`, `\\pos(${Math.round(x * W)},${Math.round(y * H)})`,
-    `\\fn${st.font.replace(/[\\{}]/g, '')}`, `\\fs${Math.round(st.size)}`, `\\b${st.bold ? 1 : 0}`,
+    `\\fn${st.font.replace(/[\\{}]/g, '')}`, `\\fs${Math.round(st.size * scale)}`, `\\b${st.bold ? 1 : 0}`,
     `\\c${assColor(st.color)}&`, `\\3c&H000000&`, `\\shad0`,
     // with the Boxed style (BorderStyle 3) the border becomes a padded box
     st.box ? `\\3a&H60&\\bord18` : `\\3a&H00&\\bord${st.outline}`,
@@ -249,7 +249,7 @@ function overrides(st: TextStyle, x: number, y: number, W: number, H: number): s
 }
 
 /** Captions + free text as one ASS file on a W x H canvas. */
-export function buildAss(tl: Timeline): string {
+export function buildAss(tl: Timeline, fontScale: (font: string, bold: boolean) => number = () => 1): string {
   const W = tl.width, H = tl.height;
   const lines: string[] = [
     '[Script Info]', 'ScriptType: v4.00+', `PlayResX: ${W}`, `PlayResY: ${H}`, 'WrapStyle: 0', 'ScaledBorderAndShadow: yes', '',
@@ -268,7 +268,7 @@ export function buildAss(tl: Timeline): string {
 
   const cap = tl.captions;
   for (const line of cap.lines) {
-    const pre = overrides(cap.style, 0.5, cap.y, W, H);
+    const pre = overrides(cap.style, 0.5, cap.y, W, H, fontScale(cap.style.font, cap.style.bold));
     const plain = assEscape(line.words.map((w) => w.text).join(' '));
     if (cap.mode === 'line' || !line.words.length) {
       ev(1, line.startMs, line.endMs, cap.style, pre + plain);
@@ -286,7 +286,7 @@ export function buildAss(tl: Timeline): string {
       ev(1, a, b, cap.style, pre + text);
     });
   }
-  for (const t of tl.texts) ev(2, t.startMs, t.endMs, t.style, overrides(t.style, t.x, t.y, W, H) + assEscape(t.text));
+  for (const t of tl.texts) ev(2, t.startMs, t.endMs, t.style, overrides(t.style, t.x, t.y, W, H, fontScale(t.style.font, t.style.bold)) + assEscape(t.text));
   return lines.join('\n') + '\n';
 }
 
@@ -507,46 +507,101 @@ export function wordsFromWhisper(json: string, offsetMs = 0): Word[] {
 }
 
 export function groupLines(words: Word[], newId: () => string, maxWords = 4, maxMs = 2200, gapMs = 600): CaptionLine[] {
+  const ws = [...words].sort((x, y) => x.startMs - y.startMs);
   const lines: CaptionLine[] = [];
   let cur: Word[] = [];
   const push = () => {
     if (!cur.length) return;
-    lines.push({ id: newId(), startMs: cur[0].startMs, endMs: cur[cur.length - 1].endMs, words: cur });
+    lines.push({ id: newId(), startMs: cur[0].startMs, endMs: Math.max(...cur.map((w) => w.endMs)), words: cur });
     cur = [];
   };
-  for (const w of words) {
+  for (const w of ws) {
     const prev = cur[cur.length - 1];
     if (prev && (cur.length >= maxWords || w.endMs - cur[0].startMs > maxMs || w.startMs - prev.endMs > gapMs)) push();
     cur.push(w);
     if (/[.!?…]$/.test(w.text)) push();
   }
   push();
-  // keep lines from overlapping and fill short gaps so captions don't flicker
-  for (let i = 0; i + 1 < lines.length; i++) {
-    const next = lines[i + 1];
-    if (next.startMs - lines[i].endMs < 300) lines[i].endMs = next.startMs;
-    lines[i].endMs = Math.min(lines[i].endMs, next.startMs);
-  }
-  // whisper can give a line's words the same time as the next line: merge lines too short to read
+  // a line that would last almost nothing (whisper gave its words the same time as the next line)
+  // is joined to its neighbour instead of being shown for a blink; nothing is shifted in time
   const out: CaptionLine[] = [];
   for (const l of lines) {
     const prev = out[out.length - 1];
-    if (l.endMs - l.startMs < 200 && prev) {
+    if (prev && l.endMs - l.startMs < 150) {
       prev.words.push(...l.words);
-      prev.endMs = Math.max(prev.endMs, l.endMs, l.startMs + 200);
-    } else if (l.endMs - l.startMs < 200) {
-      l.endMs = l.startMs + 200;
-      out.push(l);
+      prev.endMs = Math.max(prev.endMs, l.endMs);
     } else {
       out.push(l);
     }
   }
-  for (let i = 0; i + 1 < out.length; i++) {
-    if (out[i].endMs > out[i + 1].startMs) out[i + 1].startMs = out[i].endMs;
-    if (out[i + 1].endMs <= out[i + 1].startMs) out[i + 1].endMs = out[i + 1].startMs + 200;
+  if (out.length > 1 && out[0].endMs - out[0].startMs < 150) {
+    out[1].words.unshift(...out[0].words);
+    out[1].startMs = out[0].startMs;
+    out.shift();
   }
-  for (const l of out) l.words = l.words.map((w) => ({ ...w, startMs: Math.max(l.startMs, Math.min(w.startMs, l.endMs)), endMs: Math.max(l.startMs, Math.min(w.endMs, l.endMs)) }));
+  // no overlaps (end at the next start), and fill short gaps so captions don't flicker
+  for (let i = 0; i < out.length; i++) {
+    const next = out[i + 1];
+    if (next) {
+      if (next.startMs - out[i].endMs < 300) out[i].endMs = next.startMs;
+      out[i].endMs = Math.min(out[i].endMs, next.startMs);
+    }
+    if (out[i].endMs - out[i].startMs < 150) out[i].endMs = next ? Math.max(out[i].endMs, Math.min(next.startMs, out[i].startMs + 400)) : out[i].startMs + 400;
+    const l = out[i];
+    l.words = l.words.map((w) => ({ ...w, startMs: Math.min(Math.max(w.startMs, l.startMs), l.endMs), endMs: Math.min(Math.max(w.endMs, l.startMs), l.endMs) }));
+  }
   return out;
+}
+
+/** Silent ranges of the source files, moved onto the timeline (respects cuts and speed). */
+export function silencesOnTimeline(clips: VideoClip[], silences: Record<string, Range[]>): Range[] {
+  const out: Range[] = [];
+  let start = 0;
+  for (const c of clips) {
+    for (const r of silences[c.mediaId] ?? []) {
+      const a = Math.max(r.startMs, c.inMs), b = Math.min(r.endMs, c.outMs);
+      if (b > a) out.push({ startMs: start + (a - c.inMs) / c.speed, endMs: start + (b - c.inMs) / c.speed });
+    }
+    start += clipDuration(c);
+  }
+  // join silences that touch across a cut
+  out.sort((x, y) => x.startMs - y.startMs);
+  const merged: Range[] = [];
+  for (const r of out) {
+    const last = merged[merged.length - 1];
+    if (last && r.startMs <= last.endMs + 5) last.endMs = Math.max(last.endMs, r.endMs);
+    else merged.push({ ...r });
+  }
+  return merged;
+}
+
+/**
+ * Whisper's word times can be early or late. A word that starts inside a silence is moved to where
+ * the talking resumes, and a word that runs on into a long silence is ended where the talking stopped.
+ */
+export function snapWordsToSpeech(words: Word[], silences: Range[], maxShiftMs = 1500): Word[] {
+  if (!silences.length) return words;
+  const find = (t: number) => silences.find((r) => t >= r.startMs && t < r.endMs);
+  return words.map((w) => {
+    let { startMs, endMs } = w;
+    const s = find(startMs);
+    if (s && s.endMs - startMs <= maxShiftMs) {
+      const len = endMs - startMs;
+      startMs = s.endMs;
+      endMs = Math.max(endMs, startMs + Math.min(len, 600));
+    }
+    const e = find(endMs - 1);
+    if (e && e.startMs > startMs && e.endMs - e.startMs > 400) endMs = Math.max(startMs + 80, e.startMs + 80);
+    return { ...w, startMs: Math.round(startMs), endMs: Math.round(endMs) };
+  }).reduce<Word[]>((acc, w) => {
+    // keep words in order and at least 80 ms apart so the highlight moves word by word
+    const prev = acc[acc.length - 1];
+    if (prev && w.startMs < prev.startMs + 80) {
+      const startMs = prev.startMs + 80;
+      acc.push({ ...w, startMs, endMs: Math.max(w.endMs, startMs + 80) });
+    } else acc.push(w);
+    return acc;
+  }, []);
 }
 
 /** Maps caption words from source time of one clip to timeline time (respects split and speed). */
