@@ -43,9 +43,23 @@ const scenarios: [string, (tl: Timeline) => void][] = [
   ['musik + ducking', (tl) => { tl.music = [{ id: 'mu', file: `${dir}/music.ogg`, name: 'm', startMs: 0, inMs: 0, lengthMs: 30000, sourceMs: 30000, volume: 0.5, duck: 'medium' }]; }],
   ['watermark', (tl) => { tl.watermark = { file: `${dir}/meme.png`, aspect: 400 / 300, corner: 'tr', scale: 0.2, opacity: 0.8 }; }],
   ['subtitle kata menyala', (tl) => { tl.captions.lines = [{ id: 'l', startMs: 300, endMs: 2000, words: [{ text: 'halo', startMs: 300, endMs: 800 }, { text: 'semua', startMs: 800, endMs: 2000 }] }]; }],
+  ['layer dari video utama (gameplay atas, facecam bawah, utama disembunyikan)', (tl) => {
+    tl.hideMain = true;
+    tl.clips[1].speed = 1.5;
+    tl.layers = [
+      { id: 'g', name: 'Gameplay', source: 'main', inMs: 0, startMs: 0, endMs: 99999, crop: { l: 0, t: 0.05, r: 0, b: 0.6 }, box: { x: 0.5, y: 0.3, w: 1, h: 0.6 }, opacity: 1, volume: 0 },
+      { id: 'c', name: 'Facecam', source: 'main', inMs: 0, startMs: 0, endMs: 99999, crop: { l: 0.1, t: 0.6, r: 0.1, b: 0 }, box: { x: 0.5, y: 0.8, w: 1, h: 0.4 }, opacity: 1, volume: 0 },
+    ];
+  }],
+  ['layer dari video utama tanpa menyembunyikan', (tl) => {
+    tl.layers = [{ id: 'g', name: 'Zoom', source: 'main', inMs: 0, startMs: 1000, endMs: 3000, crop: { l: 0.2, t: 0.2, r: 0.2, b: 0.4 }, box: { x: 0.7, y: 0.25, w: 0.5, h: 0.35 }, opacity: 0.8, volume: 0 }];
+  }],
+  ['layer video lain dengan suara', (tl) => {
+    tl.layers = [{ id: 'o', name: 'Lain', source: 'media', mediaId: 'm', inMs: 6000, startMs: 2000, endMs: 5000, crop: { l: 0.1, t: 0.1, r: 0.1, b: 0.5 }, box: { x: 0.5, y: 0.5, w: 0.6, h: 0.3 }, opacity: 1, volume: 0.8 }];
+  }],
   ['teks dengan kotak', (tl) => { tl.texts = [{ id: 't', startMs: 0, endMs: 3000, text: 'MOMEN', x: 0.5, y: 0.2, style: { ...DEFAULT_TEXT, font, box: true } }]; }],
 ];
-scenarios.push(['SEMUA SEKALIGUS', (tl) => { for (const [name, f] of scenarios) if (name !== 'SEMUA SEKALIGUS' && !name.startsWith('meme') && name !== 'speed 2x') f(tl); tl.images = [meme('i', `${dir}/meme.png`, 500, 2500, 'pop', 'fade'), meme('g', `${dir}/anim.gif`, 4500, 6500, 'slide', 'pop', true)]; tl.clips[1].trans = 'punch'; }]);
+scenarios.push(['SEMUA SEKALIGUS', (tl) => { for (const [name, f] of scenarios) if (name !== 'SEMUA SEKALIGUS' && !name.startsWith('meme') && !name.startsWith('layer') && name !== 'speed 2x') f(tl); tl.images = [meme('i', `${dir}/meme.png`, 500, 2500, 'pop', 'fade'), meme('g', `${dir}/anim.gif`, 4500, 6500, 'slide', 'pop', true)]; tl.clips[1].trans = 'punch'; tl.layers = [{ id: 'g', name: 'G', source: 'main', inMs: 0, startMs: 0, endMs: 99999, crop: { l: 0, t: 0, r: 0, b: 0.5 }, box: { x: 0.5, y: 0.25, w: 1, h: 0.5 }, opacity: 1, volume: 0 }, { id: 'o', name: 'O', source: 'media', mediaId: 'm', inMs: 2000, startMs: 1000, endMs: 4000, crop: { l: 0, t: 0.5, r: 0, b: 0 }, box: { x: 0.5, y: 0.75, w: 1, h: 0.5 }, opacity: 1, volume: 0.5 }]; tl.hideMain = true; }]);
 
 let failed = 0;
 for (const [name, setup] of scenarios) {

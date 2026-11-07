@@ -167,6 +167,40 @@ export interface Timeline {
   images?: ImageItem[];
   watermark?: Watermark | null;
   music?: MusicItem[];
+  layers?: VideoLayer[];   // bottom to top, above the main track
+  hideMain?: boolean;      // show only the layers (black behind them)
+}
+
+/** Part of a frame kept by a crop, as shares cut from each side (0..1). */
+export interface Crop { l: number; t: number; r: number; b: number }
+/** Where a layer sits on the canvas: centre and size as shares of the canvas. */
+export interface Box { x: number; y: number; w: number; h: number }
+
+/**
+ * A video layer over the main track. `main` layers show the main track's own picture (they follow its cuts,
+ * speed and pause removal), so one recording can be split into several framed parts. `media` layers play
+ * another file with their own timing.
+ */
+export interface VideoLayer {
+  id: string;
+  name: string;
+  source: 'main' | 'media';
+  mediaId?: string;   // media layers
+  inMs: number;       // media layers: where in the file it starts
+  startMs: number;    // timeline time
+  endMs: number;
+  crop: Crop;
+  box: Box;
+  opacity: number;    // 0..1
+  volume: number;     // media layers, 0..2 (0 = muted)
+  hidden?: boolean;
+}
+
+export const NO_CROP: Crop = { l: 0, t: 0, r: 0, b: 0 };
+
+/** Size in pixels of the cropped picture of a layer's source. */
+export function cropSize(c: Crop, srcW: number, srcH: number) {
+  return { w: Math.max(2, srcW * (1 - c.l - c.r)), h: Math.max(2, srcH * (1 - c.t - c.b)) };
 }
 
 export const DEFAULT_TEXT: TextStyle = {
@@ -379,6 +413,52 @@ export function renderArgs(spec: RenderSpec): string[] {
   let v = 'cv';
   let input = tl.clips.length;
   const total = timelineDuration(tl);
+  const even = (n: number) => Math.max(2, Math.round(n / 2) * 2);
+  const num = (n: number) => Number(n.toFixed(5));
+
+  // video layers: crop, scale and place; `main` layers crop the main track's picture itself
+  const layerAudio: string[] = [];
+  const layers = (tl.layers ?? []).filter((l) => !l.hidden && l.endMs > l.startMs && l.startMs < total && (l.source === 'main' || (l.mediaId && spec.media[l.mediaId])));
+  const linked = layers.filter((l) => l.source === 'main');
+  if (linked.length || tl.hideMain) {
+    const need = linked.length + (tl.hideMain ? 0 : 1);
+    if (need === 0) f.push(`[cv]nullsink`);
+    else f.push(`[cv]split=${need}${Array.from({ length: need }, (_, i) => `[mc${i}]`).join('')}`);
+    if (tl.hideMain) {
+      f.push(`color=c=black:s=${W}x${H}:r=${F}:d=${(total / 1000).toFixed(3)},format=yuv420p[mbase]`);
+      v = 'mbase';
+    } else {
+      v = 'mc0';
+    }
+  }
+  let copy = tl.hideMain ? 0 : 1;
+  layers.forEach((l, k) => {
+    const a = Math.max(0, l.startMs), b = Math.min(total, l.endMs);
+    const st = (a / 1000).toFixed(3), en = (b / 1000).toFixed(3);
+    const bw = even(l.box.w * W), bh = even(l.box.h * H);
+    const x = Math.round(l.box.x * W - bw / 2), y = Math.round(l.box.y * H - bh / 2);
+    const fw = num(1 - l.crop.l - l.crop.r), fh = num(1 - l.crop.t - l.crop.b);
+    const crop = `crop=w=trunc(iw*${fw}/2)*2:h=trunc(ih*${fh}/2)*2:x=trunc(iw*${num(l.crop.l)}):y=trunc(ih*${num(l.crop.t)})`;
+    const look = `${crop},scale=${bw}:${bh}:flags=lanczos,setsar=1,format=rgba${l.opacity < 0.999 ? `,colorchannelmixer=aa=${num(l.opacity)}` : ''}`;
+    let src: string;
+    if (l.source === 'main') {
+      src = `[mc${copy++}]`;
+      f.push(`${src}${look}[ly${k}]`);
+    } else {
+      const m = spec.media[l.mediaId!];
+      const dur = ((b - a) / 1000).toFixed(3);
+      args.push('-ss', (l.inMs / 1000).toFixed(3), '-t', dur, '-i', m.playable);
+      f.push(`[${input}:v]setpts=PTS-STARTPTS,fps=${F},${look},setpts=PTS+${st}/TB[ly${k}]`);
+      if (m.hasAudio && l.volume > 0.001) {
+        const d = Math.round(a);
+        f.push(`[${input}:a]asetpts=PTS-STARTPTS,aformat=sample_fmts=fltp:channel_layouts=stereo,aresample=48000,volume=${num(l.volume)},adelay=${d}|${d}[lya${k}]`);
+        layerAudio.push(`[lya${k}]`);
+      }
+      input++;
+    }
+    f.push(`[${v}][ly${k}]overlay=x=${x}:y=${y}:enable='between(t,${st},${en})':eof_action=pass:format=auto[lv${k}]`);
+    v = `lv${k}`;
+  });
 
   // meme pictures over the video, each only while it is on the timeline
   (tl.images ?? []).forEach((im, k) => {
@@ -427,7 +507,7 @@ export function renderArgs(spec: RenderSpec): string[] {
     v = 'wmo';
     input++;
   }
-  if (v !== 'cv') { f.push(`[${v}]format=yuv420p[ovf]`); v = 'ovf'; }
+  if (v !== 'cv' && v !== 'mc0') { f.push(`[${v}]format=yuv420p[ovf]`); v = 'ovf'; }
 
   if (spec.assFile) {
     const fd = spec.fontsDir ? `:fontsdir='${filterPath(spec.fontsDir)}'` : '';
@@ -445,6 +525,7 @@ export function renderArgs(spec: RenderSpec): string[] {
     f.push(`[ca]asplit=${ducked.length + 1}[cam]${ducked.map((_, j) => `[sc${j}]`).join('')}`);
     main = 'cam';
   }
+  labels.push(...layerAudio);
   let dj = 0;
   music.forEach((m, k) => {
     const len = Math.min(m.lengthMs, total - m.startMs) / 1000;
@@ -713,6 +794,8 @@ export function remapItems(tl: Timeline, map: (t: number) => number) {
   tl.images = (tl.images ?? []).map((x) => ({ ...x, startMs: map(x.startMs), endMs: map(x.endMs) })).filter((x) => x.endMs - x.startMs >= 100);
   tl.sounds = (tl.sounds ?? []).map((x) => ({ ...x, startMs: map(x.startMs) }));
   tl.music = (tl.music ?? []).map((x) => ({ ...x, startMs: map(x.startMs) }));
+  const total = timelineDuration(tl);
+  tl.layers = (tl.layers ?? []).map((x) => ({ ...x, startMs: map(x.startMs), endMs: x.endMs >= total ? x.endMs : map(x.endMs) }));
   tl.captions.lines = tl.captions.lines.map((l) => {
     const words = l.words.map((w) => ({ ...w, startMs: map(w.startMs), endMs: map(w.endMs) })).filter((w) => w.endMs - w.startMs >= 30);
     return { ...l, words, startMs: words[0]?.startMs ?? 0, endMs: words[words.length - 1]?.endMs ?? 0 };

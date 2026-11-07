@@ -29,6 +29,13 @@ Buka tab **Releases** di repo ini, unduh `GALSURKU Clipper_..._x64-setup.exe`, l
 | Shift + 1–9 | pasang meme di playhead |
 | Ctrl + scroll | zoom timeline (di atas gambar di preview: ubah ukuran) |
 
+## Layer video
+Panel **Layer** (rail kiri). Setiap layer bisa digeser, di-resize (tarik pojok, Shift untuk bebas), diregang (tarik sisi), dan di-crop (tombol **C** atau tab Crop, Enter untuk selesai).
+- **Pisah atas + bawah dari video utama**: untuk rekaman yang ikut merekam jendela lain. Video yang sama jadi dua layer (misal gameplay di atas, facecam di bawah); bagian yang tidak dipakai hilang.
+- **Layer dari video utama** mengikuti potongan, speed, dan hapus jeda video utama.
+- **Layer dari video lain**: file lain dengan waktu dan volume sendiri.
+- Posisi cepat (Penuh, Setengah atas/bawah) mengisi area dengan zoom, tidak gepeng.
+
 ## Watermark
 Klik area kosong di timeline, lalu di panel kanan pilih **+ Pasang logo**. Atur pojok, ukuran, dan transparansi. Centang **Pasang otomatis di proyek baru** agar logo GALSURKU selalu ikut.
 

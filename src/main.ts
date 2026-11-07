@@ -4,7 +4,7 @@ import {
   DEFAULT_CAPTION, DEFAULT_TEXT, clipDuration, clipStarts, locate, splitAt, timelineDuration,
   type CaptionLine, type ImageItem, type Watermark, type SoundItem, type TextItem, type TextStyle, type Trans, type VideoClip, type Word,
   transState, TRANS_IN_MS, clipFx, removePauses, remapItems, invertRanges, DUCK_LEVEL,
-  type ClipTrans, type Duck, type MusicItem, type Range,
+  type ClipTrans, type Duck, type MusicItem, type Range, type VideoLayer, type Crop, NO_CROP, cropSize,
 } from './render';
 import {
   IMAGE_EXT, SOUND_EXT, deleteMeme, deletePad, importFiles as importLibFiles, loadLibrary, move, saveLibrary, soundOf,
@@ -61,9 +61,9 @@ const FONTS = ['Segoe UI', 'Bahnschrift', 'Impact', 'Arial', 'Verdana', 'Trebuch
 
 // ================= state =================
 
-type SelKind = 'clip' | 'text' | 'line' | 'sound' | 'image' | 'music';
+type SelKind = 'clip' | 'text' | 'line' | 'sound' | 'image' | 'music' | 'layer';
 type Sel = { kind: SelKind; id: string } | null;
-type LeftTab = 'media' | 'sound' | 'meme' | 'text' | 'captions';
+type LeftTab = 'media' | 'layers' | 'sound' | 'meme' | 'text' | 'captions';
 
 let settings: Settings = { outDir: '', encoder: '', model: 'small' };
 let P: Project | null = null;
@@ -84,12 +84,13 @@ const mediaOf = (id: string) => P!.media.find((m) => m.id === id);
 const sounds = () => (tl().sounds ??= []);
 const images = () => (tl().images ??= []);
 const music = () => (tl().music ??= []);
+const layers = () => (tl().layers ??= []);
 function listOf(kind: SelKind): { id: string }[] {
-  return kind === 'clip' ? tl().clips : kind === 'text' ? tl().texts : kind === 'line' ? tl().captions.lines : kind === 'sound' ? sounds() : kind === 'music' ? music() : images();
+  return kind === 'clip' ? tl().clips : kind === 'text' ? tl().texts : kind === 'line' ? tl().captions.lines : kind === 'sound' ? sounds() : kind === 'music' ? music() : kind === 'layer' ? layers() : images();
 }
 const selected = <T extends SelKind>(kind: T) =>
   (sel?.kind === kind ? listOf(kind).find((x) => x.id === sel!.id) : undefined) as
-  (T extends 'clip' ? VideoClip : T extends 'text' ? TextItem : T extends 'line' ? CaptionLine : T extends 'sound' ? SoundItem : T extends 'music' ? MusicItem : ImageItem) | undefined;
+  (T extends 'clip' ? VideoClip : T extends 'text' ? TextItem : T extends 'line' ? CaptionLine : T extends 'sound' ? SoundItem : T extends 'music' ? MusicItem : T extends 'layer' ? VideoLayer : ImageItem) | undefined;
 let library: Library | null = null;
 let libEdit = false;
 
@@ -217,6 +218,8 @@ async function openProject(id: string, importNow: string[] = []) {
   p.timeline.sounds ??= [];
   p.timeline.images ??= [];
   p.timeline.music ??= [];
+  p.timeline.layers ??= [];
+  cropMode = false;
   sel = null;
   t = 0;
   void loadLibrary().then((l) => { library = l; if (tab === 'sound' || tab === 'meme') renderLeft(); });
@@ -367,7 +370,7 @@ function renderEditor() {
 }
 
 const RAIL: [LeftTab, string, string][] = [
-  ['media', '▦', 'Media'], ['sound', '♪', 'Suara'], ['meme', '☺', 'Meme'], ['text', 'T', 'Teks'], ['captions', '≋', 'Subtitle'],
+  ['media', '▦', 'Media'], ['layers', '◧', 'Layer'], ['sound', '♪', 'Suara'], ['meme', '☺', 'Meme'], ['text', 'T', 'Teks'], ['captions', '≋', 'Subtitle'],
 ];
 let safeGuide = false;
 
@@ -455,6 +458,7 @@ function renderLeftInner() {
   const el = $('#left');
   if (!el || !P) return;
   if (tab === 'media') el.replaceChildren(...mediaPanel());
+  else if (tab === 'layers') el.replaceChildren(...layerPanel());
   else if (tab === 'sound') el.replaceChildren(...soundPanel());
   else if (tab === 'meme') el.replaceChildren(...memePanel());
   else if (tab === 'text') el.replaceChildren(...textPanel());
@@ -481,6 +485,10 @@ function mediaPanel(): Node[] {
             h('div', { class: 'media-name', title: m.path }, m.name),
             h('div', { class: 'muted small mono' }, `${tc(m.durationMs)} · ${m.width}×${m.height}`),
           ),
+          h('button', {
+            class: 'icon-btn add', title: 'Jadikan layer di posisi playhead', 'aria-label': `Jadikan ${m.name} layer`,
+            onclick: () => addMediaLayer(m),
+          }, '◧'),
           h('button', {
             class: 'icon-btn add', title: 'Tambahkan ke akhir timeline', 'aria-label': `Tambahkan ${m.name} ke timeline`,
             onclick: () => {
@@ -731,6 +739,9 @@ function renderInspectorInner() {
     return;
   }
 
+  const lay = selected('layer');
+  if (lay) { el.replaceChildren(...layerInspector(lay)); return; }
+
   const mus = selected('music');
   if (mus) {
     const set = (patch: Partial<MusicItem>) => { snapshot(); Object.assign(mus, patch); changed(); };
@@ -906,6 +917,7 @@ function deleteSelected() {
   else if (sel.kind === 'sound') tl().sounds = sounds().filter((x) => x.id !== sel!.id);
   else if (sel.kind === 'image') tl().images = images().filter((x) => x.id !== sel!.id);
   else if (sel.kind === 'music') tl().music = music().filter((x) => x.id !== sel!.id);
+  else if (sel.kind === 'layer') { tl().layers = layers().filter((x) => x.id !== sel!.id); cropMode = false; }
   else tl().captions.lines = tl().captions.lines.filter((x) => x.id !== sel!.id);
   sel = null;
   changed({ left: tab === 'captions' });
@@ -951,6 +963,7 @@ function seek(ms: number) {
   t = clamp(ms, 0, Math.max(0, timelineDuration(tl()) - 1));
   setTimeout(markActiveLine, 0);
   syncVideo();
+  syncLayers();
   if (playing && activeVideo) void activeVideo.play().catch(() => undefined);
   renderFrame();
   drawTimeline();
@@ -975,6 +988,7 @@ function pause() {
   activeVideo?.pause();
   sfxEls.forEach((a) => a.pause());
   musicEls.forEach((a) => a.pause());
+  layerVideos.forEach((v) => v.pause());
   const btn = $('#play');
   if (btn) { btn.textContent = '▶'; btn.setAttribute('aria-label', 'Putar'); }
 }
@@ -1012,13 +1026,14 @@ function tickInner() {
   }
   syncSfx();
   syncMusic();
+  syncLayers();
   renderFrame();
   drawTimeline();
   updateTime();
   markActiveLine();
 }
 
-interface Box { kind: 'text' | 'captions' | 'image'; id: string; x: number; y: number; w: number; h: number }
+interface Box { kind: 'text' | 'captions' | 'image' | 'layer'; id: string; x: number; y: number; w: number; h: number }
 let boxes: Box[] = [];
 
 function renderFrame() {
@@ -1068,6 +1083,7 @@ function renderFrameInner() {
     ctx.textAlign = 'center';
     ctx.fillText('Tambahkan video dari tab Media', W / 2, H / 2);
   }
+  drawLayers(ctx, W, H);
   const k = W / tl().width;
   for (const im of images()) {
     if (t < im.startMs || t >= im.endMs) continue;
@@ -1209,7 +1225,16 @@ function setupPreviewDrag() {
   };
   preview.addEventListener('pointerdown', (e) => {
     const p = toCanvas(e);
-    const hit = [...boxes].reverse().find((b) => p.x >= b.x - 10 && p.x <= b.x + b.w + 10 && p.y >= b.y - 10 && p.y <= b.y + b.h + 10);
+    if (layerPointerDown(p, e)) { preview.setPointerCapture(e.pointerId); return; }
+    const hit = [...boxes].reverse().find((b) => b.kind !== 'layer' && p.x >= b.x - 10 && p.x <= b.x + b.w + 10 && p.y >= b.y - 10 && p.y <= b.y + b.h + 10)
+      ?? [...boxes].reverse().find((b) => b.kind === 'layer' && p.x >= b.x && p.x <= b.x + b.w && p.y >= b.y && p.y <= b.y + b.h);
+    if (hit?.kind === 'layer') {
+      sel = { kind: 'layer', id: hit.id };
+      renderInspector(); drawTimeline(); renderFrame();
+      layerPointerDown(p, e);
+      preview.setPointerCapture(e.pointerId);
+      return;
+    }
     if (!hit) {
       const loc = locate(tl().clips, t);
       const c = loc ? tl().clips[loc.index] : undefined;
@@ -1243,6 +1268,7 @@ function setupPreviewDrag() {
   });
   preview.addEventListener('pointermove', (e) => {
     const p = toCanvas(e);
+    if (layerPointerMove(p, e)) return;
     if (pan) {
       const z = Math.max(1.01, pan.c.zoom ?? 1);
       pan.c.zx = clamp(pan.ox - (p.x - pan.sx) / preview.width / (z - 1), 0, 1);
@@ -1266,7 +1292,7 @@ function setupPreviewDrag() {
     }
     renderFrame();
   });
-  const end = () => { if (drag || pan) { void saveProject(P!); drag = null; pan = null; } };
+  const end = () => { if (layerPointerUp()) return; if (drag || pan) { void saveProject(P!); drag = null; pan = null; } };
   preview.addEventListener('pointerup', end);
   preview.addEventListener('pointercancel', end);
   preview.addEventListener('wheel', (e) => {
@@ -1291,7 +1317,7 @@ const snap = (v: number, to: number) => (Math.abs(v - to) < 0.015 ? to : v);
 const HEAD_W = 0;
 const RULER = 24, ROW_TEXT = 26, ROW_CAP = 26, ROW_MAIN = 64, GAP = 6;
 
-interface Lane { kind: 'text' | 'image' | 'captions' | 'main' | 'sound' | 'music'; y: number; h: number }
+interface Lane { kind: 'text' | 'image' | 'layer' | 'captions' | 'main' | 'sound' | 'music'; y: number; h: number }
 let lanes: Lane[] = [];
 let textRows = new Map<string, number>();
 const ROW_SOUND = 24;
@@ -1318,6 +1344,8 @@ function computeLanes() {
   lanes = [];
   for (let i = 0; i < nText; i++) { lanes.push({ kind: 'text', y, h: ROW_TEXT }); y += ROW_TEXT + 3; }
   for (let i = 0; i < nImg; i++) { lanes.push({ kind: 'image', y, h: ROW_TEXT }); y += ROW_TEXT + 3; }
+  const nLay = layers().length ? pack(layers(), textRows) : 0;
+  for (let i = 0; i < nLay; i++) { lanes.push({ kind: 'layer', y, h: ROW_TEXT }); y += ROW_TEXT + 3; }
   y += GAP - 3;
   lanes.push({ kind: 'captions', y, h: ROW_CAP }); y += ROW_CAP + GAP;
   lanes.push({ kind: 'main', y, h: ROW_MAIN }); y += ROW_MAIN + GAP;
@@ -1537,6 +1565,23 @@ function drawTimelineInner() {
     }
   }
 
+  // video layers
+  for (const ly of layers()) {
+    const ln = lanes.filter((q) => q.kind === 'layer')[textRows.get(ly.id) ?? 0];
+    if (!ln) continue;
+    const xx = msToX(ly.startMs), w = ((Math.min(ly.endMs, timelineDuration(tl())) - ly.startMs) / 1000) * pxPerSec;
+    if (xx + w < 0 || xx > W) continue;
+    const isSel = sel?.kind === 'layer' && sel.id === ly.id;
+    roundRect(ctx, xx + 0.5, ln.y, w - 1, ln.h, 4);
+    ctx.fillStyle = isSel ? '#4ea1ff' : ly.hidden ? '#1d2430' : '#1b3150';
+    ctx.fill();
+    ctx.save(); ctx.beginPath(); ctx.rect(xx, ln.y, Math.max(1, w - 4), ln.h); ctx.clip();
+    ctx.fillStyle = isSel ? '#121212' : '#bcd9ff';
+    ctx.font = '600 10px "Segoe UI", sans-serif';
+    ctx.fillText(`◧ ${ly.name}${ly.source === 'main' ? ' · video utama' : ''}${ly.hidden ? ' · disembunyikan' : ''}`, xx + 6, ln.y + ln.h / 2);
+    ctx.restore();
+  }
+
   // meme pictures
   for (const im of images()) {
     const ln = laneOf('image', textRows.get(im.id) ?? 0);
@@ -1629,6 +1674,7 @@ function hitTest(x: number, y: number): Hit {
   const groups: [SelKind, Lane['kind'], { id: string; startMs: number; endMs: number }[]][] = [
     ['text', 'text', tl().texts],
     ['image', 'image', images()],
+    ['layer', 'layer', layers().map((q) => ({ id: q.id, startMs: q.startMs, endMs: Math.min(q.endMs, timelineDuration(tl())) }))],
     ['sound', 'sound', sounds().map((q) => ({ id: q.id, startMs: q.startMs, endMs: soundEnd(q) }))],
     ['music', 'music', music().map((q) => ({ id: q.id, startMs: q.startMs, endMs: q.startMs + q.lengthMs }))],
   ];
@@ -1648,6 +1694,20 @@ function hitTest(x: number, y: number): Hit {
 
 /** Start/end of any movable item, and a setter, so one drag handler serves them all. */
 function span(kind: SelKind, id: string): { a: number; b: number; set: (a: number, b: number) => void; max: number } | null {
+  if (kind === 'layer') {
+    const ly = layers().find((q) => q.id === id);
+    if (!ly) return null;
+    const total = timelineDuration(tl());
+    return {
+      a: ly.startMs, b: Math.min(ly.endMs, total), max: Infinity,
+      set: (a, b) => {
+        const oldA = ly.startMs, len = Math.min(ly.endMs, total) - ly.startMs;
+        if (ly.source === 'media' && b - a !== len) ly.inMs = Math.max(0, ly.inMs + (a - oldA));  // trimming the start
+        ly.startMs = a;
+        ly.endMs = b;
+      },
+    };
+  }
   if (kind === 'music') {
     const m = music().find((q) => q.id === id);
     if (!m) return null;
@@ -2255,6 +2315,409 @@ async function runRemovePauses() {
   }
 }
 
+// ================= video layers =================
+
+const UNTIL_END = 1e9;
+let cropMode = false;
+const layerVideos = new Map<string, HTMLVideoElement>();
+let mainCopy: HTMLCanvasElement | null = null;
+
+function srcSize(ly: VideoLayer): { w: number; h: number } {
+  if (ly.source === 'main') return { w: tl().width, h: tl().height };
+  const m = ly.mediaId ? mediaOf(ly.mediaId) : undefined;
+  return { w: m?.width ?? 1080, h: m?.height ?? 1920 };
+}
+
+/** A layer box that shows its crop at the source's own proportions, `width` = share of the canvas width. */
+function boxFor(crop: Crop, src: { w: number; h: number }, width: number, x = 0.5, y = 0.5) {
+  const cs = cropSize(crop, src.w, src.h);
+  const h = (width * tl().width * (cs.h / cs.w)) / tl().height;
+  return { x, y, w: width, h };
+}
+
+/**
+ * Puts a layer in an area of the canvas without squashing it: the crop is trimmed evenly
+ * (around its current centre) until it has the same shape as the area, like zooming in.
+ */
+function fillArea(ly: VideoLayer, box: VideoLayer['box']) {
+  const src = srcSize(ly);
+  const c = { ...ly.crop };
+  const cs = cropSize(c, src.w, src.h);
+  const want = (box.w * tl().width) / (box.h * tl().height);
+  const have = cs.w / cs.h;
+  if (have > want) {
+    const cut = (cs.w - cs.h * want) / src.w / 2;   // too wide: trim left and right
+    c.l += cut; c.r += cut;
+  } else if (have < want) {
+    const cut = (cs.h - cs.w / want) / src.h / 2;   // too tall: trim top and bottom
+    c.t += cut; c.b += cut;
+  }
+  ly.crop = c;
+  ly.box = { ...box };
+}
+
+function addMainLayer(name = 'Video utama', crop: Crop = { ...NO_CROP }, box?: VideoLayer['box']) {
+  if (!P || !tl().clips.length) { toast('Tambahkan video ke timeline dulu.'); return null; }
+  const ly: VideoLayer = {
+    id: uid(), name, source: 'main', inMs: 0, startMs: 0, endMs: UNTIL_END,  // follows the main track to its end
+    crop, box: box ?? { x: 0.5, y: 0.5, w: 1, h: 1 }, opacity: 1, volume: 0,
+  };
+  layers().push(ly);
+  return ly;
+}
+
+function addMediaLayer(m: MediaEntry) {
+  if (!P) return;
+  if (!tl().clips.length) { toast('Tambahkan video ke timeline dulu, lalu jadikan video lain sebagai layer di atasnya.'); return; }
+  snapshot();
+  const total = timelineDuration(tl());
+  const start = Math.floor(clamp(t, 0, Math.max(0, total - 500)));
+  const box = boxFor(NO_CROP, { w: m.width, h: m.height }, m.width >= m.height ? 1 : 0.6);
+  if (box.h > 1) { const k = 1 / box.h; box.w *= k; box.h = 1; }
+  const ly: VideoLayer = {
+    id: uid(), name: m.name, source: 'media', mediaId: m.id, inMs: 0, startMs: start, endMs: Math.min(total, start + m.durationMs),
+    crop: { ...NO_CROP }, box, opacity: 1, volume: 0,
+  };
+  layers().push(ly);
+  sel = { kind: 'layer', id: ly.id };
+  changed({ left: tab === 'layers' });
+  toast(`"${m.name}" jadi layer. Geser, tarik pojoknya, atau tekan C untuk crop.`);
+}
+
+/** The usual fix for a recording that caught extra windows: the same video twice, framed differently. */
+function splitTopBottom() {
+  if (!P || !tl().clips.length) { toast('Tambahkan video ke timeline dulu.'); return; }
+  snapshot();
+  const W = tl().width, H = tl().height;
+  const top = addMainLayer('Atas (gameplay)', { l: 0, t: 0, r: 0, b: 0.5 }, { x: 0.5, y: 0.25, w: 1, h: 0.5 });
+  const bottom = addMainLayer('Bawah (facecam)', { l: 0, t: 0.5, r: 0, b: 0 }, { x: 0.5, y: 0.75, w: 1, h: 0.5 });
+  void W; void H;
+  tl().hideMain = true;
+  if (top) sel = { kind: 'layer', id: top.id };
+  cropMode = true;
+  changed({ left: true });
+  void bottom;
+  toast('Dua layer dibuat dari video utama. Atur kotak crop tiap layer ke bagian yang mau dipakai, lalu Enter.');
+}
+
+function layerVideo(ly: VideoLayer): HTMLVideoElement | null {
+  if (ly.source !== 'media' || !ly.mediaId) return null;
+  let v = layerVideos.get(ly.id);
+  if (v) return v;
+  const m = mediaOf(ly.mediaId);
+  if (!m) return null;
+  v = h('video', { preload: 'auto', playsinline: true });
+  v.src = fileSrc(m.playable);
+  v.addEventListener('seeked', () => { if (!playing) renderFrame(); });
+  v.addEventListener('loadeddata', () => { if (!playing) renderFrame(); });
+  layerVideos.set(ly.id, v);
+  return v;
+}
+
+/** Keeps each media layer's own video at the right time (playing or paused). */
+function syncLayers() {
+  if (!P) return;
+  for (const ly of layers()) {
+    if (ly.source !== 'media') continue;
+    const v = layerVideo(ly);
+    if (!v) continue;
+    const inside = !ly.hidden && t >= ly.startMs && t < ly.endMs;
+    v.muted = ly.volume <= 0.001;
+    v.volume = clamp(ly.volume, 0, 1);
+    const want = (ly.inMs + (t - ly.startMs)) / 1000;
+    if (!inside) { if (!v.paused) v.pause(); continue; }
+    if (playing) {
+      if (v.paused) { v.currentTime = Math.max(0, want); void v.play().catch(() => undefined); }
+      else if (Math.abs(v.currentTime - want) > 0.25) v.currentTime = Math.max(0, want);
+    } else {
+      if (!v.paused) v.pause();
+      if (Math.abs(v.currentTime - want) > 0.04) v.currentTime = Math.max(0, want);
+    }
+  }
+}
+
+/** Draws the layers over the main picture (which is copied first so `main` layers can crop from it). */
+function drawLayers(ctx: CanvasRenderingContext2D, W: number, H: number) {
+  const active = layers().filter((l) => !l.hidden && t >= l.startMs && t < l.endMs);
+  if (!active.length && !tl().hideMain) return;
+  if (active.some((l) => l.source === 'main')) {
+    mainCopy ??= document.createElement('canvas');
+    if (mainCopy.width !== W || mainCopy.height !== H) { mainCopy.width = W; mainCopy.height = H; }
+    mainCopy.getContext('2d')!.drawImage(preview, 0, 0);
+  }
+  if (tl().hideMain) { ctx.fillStyle = '#000'; ctx.fillRect(0, 0, W, H); }
+  for (const ly of active) {
+    let src: CanvasImageSource | null = null, sw = 0, sh = 0;
+    if (ly.source === 'main') { src = mainCopy; sw = W; sh = H; }
+    else { const v = layerVideo(ly); if (v && v.readyState >= 2 && v.videoWidth) { src = v; sw = v.videoWidth; sh = v.videoHeight; } }
+    const bw = ly.box.w * W, bh = ly.box.h * H, bx = ly.box.x * W - bw / 2, by = ly.box.y * H - bh / 2;
+    if (src) {
+      ctx.globalAlpha = ly.opacity;
+      ctx.drawImage(src, ly.crop.l * sw, ly.crop.t * sh, sw * (1 - ly.crop.l - ly.crop.r), sh * (1 - ly.crop.t - ly.crop.b), bx, by, bw, bh);
+      ctx.globalAlpha = 1;
+    } else {
+      ctx.fillStyle = '#1b3150'; ctx.fillRect(bx, by, bw, bh);
+    }
+    boxes.push({ kind: 'layer', id: ly.id, x: bx, y: by, w: bw, h: bh });
+  }
+  const s = selected('layer');
+  if (s && !s.hidden && t >= s.startMs && t < s.endMs) drawTransformFrame(ctx, s, W, H);
+}
+
+const HANDLE = 7;
+type Handle = 'nw' | 'n' | 'ne' | 'e' | 'se' | 's' | 'sw' | 'w' | 'move';
+
+function frameRect(ly: VideoLayer, W: number, H: number) {
+  const bw = ly.box.w * W, bh = ly.box.h * H;
+  return { x: ly.box.x * W - bw / 2, y: ly.box.y * H - bh / 2, w: bw, h: bh };
+}
+
+function handlePoints(r: { x: number; y: number; w: number; h: number }): [Handle, number, number][] {
+  return [
+    ['nw', r.x, r.y], ['n', r.x + r.w / 2, r.y], ['ne', r.x + r.w, r.y], ['e', r.x + r.w, r.y + r.h / 2],
+    ['se', r.x + r.w, r.y + r.h], ['s', r.x + r.w / 2, r.y + r.h], ['sw', r.x, r.y + r.h], ['w', r.x, r.y + r.h / 2],
+  ];
+}
+
+function drawTransformFrame(ctx: CanvasRenderingContext2D, ly: VideoLayer, W: number, H: number) {
+  const r = frameRect(ly, W, H);
+  ctx.save();
+  if (cropMode) {
+    // show the whole uncropped source, dimmed, so you can see what is being cut away
+    const src = srcSize(ly);
+    const cs = cropSize(ly.crop, src.w, src.h);
+    const k = r.w / cs.w;
+    const fx = r.x - ly.crop.l * src.w * k, fy = r.y - ly.crop.t * src.h * k, fw = src.w * k, fh = src.h * k;
+    const img = ly.source === 'main' ? mainCopy : layerVideo(ly);
+    if (img) { ctx.globalAlpha = 0.35; ctx.drawImage(img as CanvasImageSource, fx, fy, fw, fh); ctx.globalAlpha = 1; }
+    ctx.strokeStyle = 'rgba(255,255,255,.5)'; ctx.setLineDash([4, 4]); ctx.strokeRect(fx, fy, fw, fh); ctx.setLineDash([]);
+    if (img) ctx.drawImage(img as CanvasImageSource, ly.crop.l * (ly.source === 'main' ? W : (img as HTMLVideoElement).videoWidth), ly.crop.t * (ly.source === 'main' ? H : (img as HTMLVideoElement).videoHeight),
+      (ly.source === 'main' ? W : (img as HTMLVideoElement).videoWidth) * (1 - ly.crop.l - ly.crop.r), (ly.source === 'main' ? H : (img as HTMLVideoElement).videoHeight) * (1 - ly.crop.t - ly.crop.b), r.x, r.y, r.w, r.h);
+  }
+  ctx.strokeStyle = cropMode ? '#ffd400' : '#4ea1ff';
+  ctx.lineWidth = 2;
+  ctx.strokeRect(r.x, r.y, r.w, r.h);
+  if (!cropMode) {
+    ctx.strokeStyle = 'rgba(78,161,255,.35)'; ctx.lineWidth = 1;
+    for (let i = 1; i < 3; i++) {
+      ctx.beginPath(); ctx.moveTo(r.x + (r.w * i) / 3, r.y); ctx.lineTo(r.x + (r.w * i) / 3, r.y + r.h); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(r.x, r.y + (r.h * i) / 3); ctx.lineTo(r.x + r.w, r.y + (r.h * i) / 3); ctx.stroke();
+    }
+  }
+  for (const [, hx, hy] of handlePoints(r)) {
+    ctx.fillStyle = cropMode ? '#ffd400' : '#ffffff';
+    ctx.strokeStyle = '#121212'; ctx.lineWidth = 1.5;
+    ctx.fillRect(hx - HANDLE / 2 - 1, hy - HANDLE / 2 - 1, HANDLE + 2, HANDLE + 2);
+    ctx.strokeRect(hx - HANDLE / 2 - 1, hy - HANDLE / 2 - 1, HANDLE + 2, HANDLE + 2);
+  }
+  ctx.font = '600 11px "Segoe UI", sans-serif';
+  const label = cropMode ? 'CROP · Enter selesai' : `${Math.round(ly.box.w * 100)}% × ${Math.round(ly.box.h * 100)}%`;
+  const tw = ctx.measureText(label).width + 10;
+  ctx.fillStyle = cropMode ? '#ffd400' : '#4ea1ff';
+  ctx.fillRect(r.x, Math.max(0, r.y - 18), tw, 16);
+  ctx.fillStyle = '#121212';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(label, r.x + 5, Math.max(0, r.y - 18) + 8);
+  ctx.restore();
+}
+
+let layerDrag: { ly: VideoLayer; handle: Handle; sx: number; sy: number; box: VideoLayer['box']; crop: Crop; free: boolean } | null = null;
+
+function hitHandle(ly: VideoLayer, p: { x: number; y: number }): Handle | null {
+  const W = preview.width, H = preview.height;
+  const r = frameRect(ly, W, H);
+  const tol = 10;
+  for (const [hd, hx, hy] of handlePoints(r)) if (Math.abs(p.x - hx) <= tol && Math.abs(p.y - hy) <= tol) return hd;
+  if (p.x >= r.x && p.x <= r.x + r.w && p.y >= r.y && p.y <= r.y + r.h) return 'move';
+  return null;
+}
+
+function layerPointerDown(p: { x: number; y: number }, e: PointerEvent): boolean {
+  const ly = selected('layer');
+  if (!ly || ly.hidden || t < ly.startMs || t >= ly.endMs) return false;
+  const hd = hitHandle(ly, p);
+  if (!hd) return false;
+  snapshot();
+  layerDrag = { ly, handle: hd, sx: p.x, sy: p.y, box: { ...ly.box }, crop: { ...ly.crop }, free: e.shiftKey };
+  return true;
+}
+
+function layerPointerMove(p: { x: number; y: number }, e: PointerEvent): boolean {
+  if (!layerDrag) {
+    const ly = selected('layer');
+    if (ly && t >= ly.startMs && t < ly.endMs) {
+      const hd = hitHandle(ly, p);
+      const cur: Record<string, string> = { nw: 'nwse-resize', se: 'nwse-resize', ne: 'nesw-resize', sw: 'nesw-resize', n: 'ns-resize', s: 'ns-resize', e: 'ew-resize', w: 'ew-resize', move: 'move' };
+      if (hd) { preview.style.cursor = cur[hd]; return false; }
+    }
+    return false;
+  }
+  const W = preview.width, H = preview.height;
+  const { ly, handle, box, crop } = layerDrag;
+  const dx = (p.x - layerDrag.sx) / W, dy = (p.y - layerDrag.sy) / H;
+  const left = box.x - box.w / 2, top = box.y - box.h / 2, right = box.x + box.w / 2, bottom = box.y + box.h / 2;
+  if (cropMode && handle !== 'move') {
+    // crop: move an edge of the box and cut the same amount from the source, so the picture does not shift or scale
+    const src = srcSize(ly);
+    const cs = cropSize(crop, src.w, src.h);
+    const pxPerSrcX = (box.w * tl().width) / cs.w;   // canvas px per source px (same both ways)
+    const shareX = (d: number) => (d * tl().width) / pxPerSrcX / src.w;
+    const shareY = (d: number) => (d * tl().height) / pxPerSrcX / src.h;
+    const c = { ...crop };
+    let l2 = left, t2 = top, r2 = right, b2 = bottom;
+    if (handle.includes('w')) { c.l = clamp(crop.l + shareX(dx), 0, 1 - crop.r - 0.03); l2 = left + ((c.l - crop.l) * src.w * pxPerSrcX) / tl().width; }
+    if (handle.includes('e')) { c.r = clamp(crop.r - shareX(dx), 0, 1 - crop.l - 0.03); r2 = right - ((c.r - crop.r) * src.w * pxPerSrcX) / tl().width; }
+    if (handle.includes('n')) { c.t = clamp(crop.t + shareY(dy), 0, 1 - crop.b - 0.03); t2 = top + ((c.t - crop.t) * src.h * pxPerSrcX) / tl().height; }
+    if (handle.includes('s')) { c.b = clamp(crop.b - shareY(dy), 0, 1 - crop.t - 0.03); b2 = bottom - ((c.b - crop.b) * src.h * pxPerSrcX) / tl().height; }
+    ly.crop = c;
+    ly.box = { x: (l2 + r2) / 2, y: (t2 + b2) / 2, w: r2 - l2, h: b2 - t2 };
+  } else if (handle === 'move') {
+    ly.box = { ...box, x: snapC(box.x + dx), y: snapC(box.y + dy) };
+  } else {
+    let l2 = left, t2 = top, r2 = right, b2 = bottom;
+    if (handle.includes('w')) l2 = Math.min(right - 0.02, left + dx);
+    if (handle.includes('e')) r2 = Math.max(left + 0.02, right + dx);
+    if (handle.includes('n')) t2 = Math.min(bottom - 0.02, top + dy);
+    if (handle.includes('s')) b2 = Math.max(top + 0.02, bottom + dy);
+    const corner = handle.length === 2;
+    if (corner && !(e.shiftKey || layerDrag.free)) {
+      // keep proportions: follow the larger change, anchored at the opposite corner
+      const ratio = (box.w * W) / (box.h * H);
+      let nw = (r2 - l2) * W, nh = (b2 - t2) * H;
+      if (nw / ratio > nh) nh = nw / ratio; else nw = nh * ratio;
+      if (handle.includes('w')) l2 = r2 - nw / W; else r2 = l2 + nw / W;
+      if (handle.includes('n')) t2 = b2 - nh / H; else b2 = t2 + nh / H;
+    }
+    ly.box = { x: (l2 + r2) / 2, y: (t2 + b2) / 2, w: r2 - l2, h: b2 - t2 };
+  }
+  renderFrame();
+  return true;
+}
+
+const snapC = (v: number) => (Math.abs(v - 0.5) < 0.012 ? 0.5 : Math.abs(v - 0.25) < 0.008 ? 0.25 : Math.abs(v - 0.75) < 0.008 ? 0.75 : v);
+
+function layerPointerUp(): boolean {
+  if (!layerDrag) return false;
+  layerDrag = null;
+  void saveProject(P!);
+  renderInspector();
+  return true;
+}
+
+function layerPanel(): Node[] {
+  const list = [...layers()].reverse();  // top first
+  return [
+    h('p', { class: 'muted small hint-p' }, 'Setiap layer bisa digeser, di-resize, dan di-crop di preview. Layer paling atas tampil paling depan.'),
+    h('div', { class: 'stack' },
+      h('button', { class: 'primary wide', onclick: splitTopBottom }, '⬒ Pisah atas + bawah dari video utama'),
+      h('div', { class: 'muted small' }, 'Untuk rekaman yang ikut merekam jendela lain: bagian atas dan bawah video yang sama jadi dua layer, sisanya dibuang.'),
+      h('button', { class: 'secondary wide', onclick: () => { snapshot(); const ly = addMainLayer(); if (ly) { sel = { kind: 'layer', id: ly.id }; cropMode = true; changed({ left: true }); } } }, '+ Layer dari video utama'),
+      h('button', {
+        class: 'secondary wide', onclick: async () => {
+          const f = await dialog().open({ title: 'Pilih video untuk layer', filters: [{ name: 'Video', extensions: VIDEO_EXT }] });
+          if (typeof f !== 'string' || !P) return;
+          setBusy('Menambahkan video…');
+          try {
+            const m = await importMedia(f, setBusy);
+            P.media.push(m);
+            await saveProject(P);
+            addMediaLayer(m);
+            void buildThumbs(P, m).then(() => saveProject(P!)).then(() => loadSheets(m));
+          } catch (e) { toast((e as Error).message, 'error'); } finally { setBusy(''); }
+        },
+      }, '+ Layer dari video lain'),
+    ),
+    h('label', { class: 'check layer-main-toggle' }, h('input', {
+      type: 'checkbox', checked: !tl().hideMain,
+      onchange: (e) => { snapshot(); tl().hideMain = !(e.target as HTMLInputElement).checked; changed({ left: true }); },
+    }), 'Tampilkan video utama di belakang layer'),
+    list.length ? h('ol', { class: 'layer-list' }, ...list.map((ly) => {
+      const i = layers().indexOf(ly);
+      return h('li', { class: sel?.kind === 'layer' && sel.id === ly.id ? 'sel' : '' },
+        h('button', {
+          class: 'icon-btn', title: ly.hidden ? 'Tampilkan' : 'Sembunyikan', 'aria-label': ly.hidden ? `Tampilkan ${ly.name}` : `Sembunyikan ${ly.name}`,
+          onclick: () => { snapshot(); ly.hidden = !ly.hidden; changed({ left: true }); },
+        }, ly.hidden ? '◌' : '●'),
+        h('button', { class: 'layer-name', onclick: () => { sel = { kind: 'layer', id: ly.id }; if (t < ly.startMs || t >= ly.endMs) seek(ly.startMs); renderInspector(); renderLeft(); drawTimeline(); renderFrame(); } },
+          h('span', {}, ly.name), h('span', { class: 'muted small' }, ly.source === 'main' ? 'video utama' : 'video lain')),
+        h('button', { class: 'icon-btn', 'aria-label': 'Naikkan', title: 'Ke depan', disabled: i === layers().length - 1, onclick: () => { snapshot(); const a = layers(); [a[i], a[i + 1]] = [a[i + 1], a[i]]; changed({ left: true }); } }, '↑'),
+        h('button', { class: 'icon-btn', 'aria-label': 'Turunkan', title: 'Ke belakang', disabled: i === 0, onclick: () => { snapshot(); const a = layers(); [a[i], a[i - 1]] = [a[i - 1], a[i]]; changed({ left: true }); } }, '↓'),
+      );
+    })) : h('p', { class: 'muted small' }, 'Belum ada layer.'),
+  ];
+}
+
+function pctInput(label: string, value: number, onSet: (v: number) => void, min = 0, max = 100) {
+  return h('label', { class: 'field mini' }, h('span', { class: 'label' }, label), h('input', {
+    type: 'number', min, max, step: 1, value: Math.round(value * 1000) / 10,
+    onchange: (e) => { const v = Number((e.target as HTMLInputElement).value); if (Number.isFinite(v)) onSet(clamp(v, min, max) / 100); },
+  }));
+}
+
+function layerInspector(ly: VideoLayer): Node[] {
+  const set = (fn: () => void) => { snapshot(); fn(); changed(); };
+  const src = srcSize(ly);
+  const keepRatioBox = (w: number) => boxFor(ly.crop, src, w, ly.box.x, ly.box.y);
+  return [
+    h('div', { class: 'row-between' },
+      h('input', { class: 'layer-title', value: ly.name, 'aria-label': 'Nama layer', onchange: (e) => set(() => { ly.name = (e.target as HTMLInputElement).value.trim() || ly.name; }) }),
+    ),
+    h('div', { class: 'muted small' }, `${ly.source === 'main' ? 'Dari video utama (ikut potongan & hapus jeda)' : 'Video lain'} · ${tc(ly.startMs)} → ${tc(Math.min(ly.endMs, timelineDuration(tl())))}`),
+    h('div', { class: 'block' },
+      h('div', { class: 'seg' },
+        h('button', { class: !cropMode ? 'on' : '', onclick: () => { cropMode = false; renderInspector(); renderFrame(); } }, 'Transform'),
+        h('button', { class: cropMode ? 'on' : '', onclick: () => { cropMode = true; renderInspector(); renderFrame(); } }, 'Crop (C)'),
+      ),
+      h('div', { class: 'muted small' }, cropMode
+        ? 'Tarik sisi atau pojok kotak kuning untuk memotong. Bagian yang terpotong tampil redup. Enter untuk selesai.'
+        : 'Geser untuk memindah. Tarik pojok untuk resize (rasio terkunci, tahan Shift untuk bebas). Tarik sisi untuk meregang.'),
+    ),
+    h('div', { class: 'block' },
+      h('div', { class: 'label' }, 'Posisi cepat'),
+      h('div', { class: 'quick-grid' },
+        h('button', { class: 'chip', title: 'Isi seluruh layar (di-zoom, tidak gepeng)', onclick: () => set(() => fillArea(ly, { x: 0.5, y: 0.5, w: 1, h: 1 })) }, 'Penuh'),
+        h('button', { class: 'chip', title: 'Isi setengah atas (di-zoom, tidak gepeng)', onclick: () => set(() => fillArea(ly, { x: 0.5, y: 0.25, w: 1, h: 0.5 })) }, 'Setengah atas'),
+        h('button', { class: 'chip', title: 'Isi setengah bawah (di-zoom, tidak gepeng)', onclick: () => set(() => fillArea(ly, { x: 0.5, y: 0.75, w: 1, h: 0.5 })) }, 'Setengah bawah'),
+        h('button', { class: 'chip', title: 'Lebar penuh dengan proporsi crop', onclick: () => set(() => { ly.box = keepRatioBox(1); }) }, 'Pas lebar'),
+        h('button', { class: 'chip', title: 'Tinggi kotak mengikuti proporsi crop (tidak gepeng)', onclick: () => set(() => { ly.box = keepRatioBox(ly.box.w); }) }, 'Tidak gepeng'),
+        h('button', { class: 'chip', onclick: () => set(() => { ly.box = boxFor(ly.crop, src, 0.32, 0.78, 0.18); }) }, 'Kecil pojok'),
+      ),
+    ),
+    h('div', { class: 'block' },
+      h('div', { class: 'label' }, 'Posisi & ukuran (% kanvas)'),
+      h('div', { class: 'grid4' },
+        pctInput('X', ly.box.x, (v) => set(() => { ly.box.x = v; }), -50, 150),
+        pctInput('Y', ly.box.y, (v) => set(() => { ly.box.y = v; }), -50, 150),
+        pctInput('Lebar', ly.box.w, (v) => set(() => { ly.box.w = Math.max(0.02, v); }), 2, 300),
+        pctInput('Tinggi', ly.box.h, (v) => set(() => { ly.box.h = Math.max(0.02, v); }), 2, 300),
+      ),
+      h('div', { class: 'label' }, 'Crop (% dipotong dari tiap sisi)'),
+      h('div', { class: 'grid4' },
+        pctInput('Kiri', ly.crop.l, (v) => set(() => { ly.crop.l = Math.min(v, 0.97 - ly.crop.r); }), 0, 97),
+        pctInput('Atas', ly.crop.t, (v) => set(() => { ly.crop.t = Math.min(v, 0.97 - ly.crop.b); }), 0, 97),
+        pctInput('Kanan', ly.crop.r, (v) => set(() => { ly.crop.r = Math.min(v, 0.97 - ly.crop.l); }), 0, 97),
+        pctInput('Bawah', ly.crop.b, (v) => set(() => { ly.crop.b = Math.min(v, 0.97 - ly.crop.t); }), 0, 97),
+      ),
+      h('button', { class: 'ghost small', onclick: () => set(() => { ly.crop = { ...NO_CROP }; }) }, 'Reset crop'),
+    ),
+    h('div', { class: 'block' },
+      field(`Opacity ${Math.round(ly.opacity * 100)}%`, h('input', {
+        type: 'range', min: 5, max: 100, value: Math.round(ly.opacity * 100),
+        onpointerdown: () => snapshot(),
+        oninput: (e) => { ly.opacity = Number((e.target as HTMLInputElement).value) / 100; ((e.target as HTMLElement).previousElementSibling as HTMLElement).textContent = `Opacity ${Math.round(ly.opacity * 100)}%`; renderFrame(); },
+        onchange: () => void saveProject(P!),
+      })),
+      ly.source === 'media' ? field(`Volume ${Math.round(ly.volume * 100)}%`, h('input', {
+        type: 'range', min: 0, max: 200, step: 5, value: Math.round(ly.volume * 100),
+        oninput: (e) => { ((e.target as HTMLElement).previousElementSibling as HTMLElement).textContent = `Volume ${(e.target as HTMLInputElement).value}%`; },
+        onchange: (e) => set(() => { ly.volume = Number((e.target as HTMLInputElement).value) / 100; }),
+      })) : h('div', { class: 'muted small' }, 'Suara layer dari video utama sudah ikut di video utama.'),
+      h('div', { class: 'muted small' }, 'Atur kapan layer muncul dengan menarik ujung kotaknya di lajur LAYER pada timeline.'),
+      h('button', { class: 'danger-ghost wide', onclick: deleteSelected }, 'Hapus layer'),
+    ),
+  ];
+}
+
 // ================= export =================
 
 function toggleExport() {
@@ -2359,6 +2822,8 @@ function onKey(e: KeyboardEvent) {
     else { const pad = library.pads[n]; if (pad) { e.preventDefault(); insertSound(pad); } }
     return;
   }
+  if ((e.key === 'c' || e.key === 'C') && !ctrl && sel?.kind === 'layer') { cropMode = !cropMode; renderInspector(); renderFrame(); return; }
+  if (e.key === 'Enter' && cropMode) { cropMode = false; renderInspector(); renderFrame(); return; }
   switch (e.key) {
     case ' ': e.preventDefault(); togglePlay(); break;
     case 'Delete': case 'Backspace': e.preventDefault(); deleteSelected(); break;
@@ -2366,7 +2831,7 @@ function onKey(e: KeyboardEvent) {
     case 'ArrowRight': e.preventDefault(); pause(); seek(t + (e.shiftKey ? 1000 : frame)); break;
     case 'Home': seek(0); break;
     case 'End': seek(timelineDuration(tl())); break;
-    case 'Escape': sel = null; renderInspector(); drawTimeline(); renderFrame(); break;
+    case 'Escape': if (cropMode) { cropMode = false; } else { sel = null; } renderInspector(); drawTimeline(); renderFrame(); break;
     case '=': case '+': zoomBy(1.25); break;
     case '-': zoomBy(0.8); break;
   }
