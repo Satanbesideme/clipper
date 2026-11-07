@@ -35,6 +35,8 @@ const scenarios: [string, (tl: Timeline) => void][] = [
   ['meme png tanpa animasi', (tl) => { tl.images = [meme('i', `${dir}/meme.png`, 500, 2500, 'none', 'none')]; }],
   ['meme pop', (tl) => { tl.images = [meme('i', `${dir}/meme.png`, 500, 2500, 'pop', 'pop')]; }],
   ['meme fade', (tl) => { tl.images = [meme('i', `${dir}/meme.png`, 500, 2500, 'fade', 'fade')]; }],
+  ['meme pop masuk + fade keluar (default)', (tl) => { tl.images = [meme('i', `${dir}/meme.png`, 500, 2500, 'pop', 'fade')]; }],
+  ['meme fade masuk + pop keluar', (tl) => { tl.images = [meme('i', `${dir}/meme.png`, 500, 2500, 'fade', 'pop')]; }],
   ['meme geser', (tl) => { tl.images = [meme('i', `${dir}/meme.png`, 500, 2500, 'slide', 'slide')]; }],
   ['gif bergerak', (tl) => { tl.images = [meme('g', `${dir}/anim.gif`, 500, 2500, 'pop', 'fade', true)]; }],
   ['efek suara', (tl) => { tl.sounds = [{ id: 's', file: `${dir}/sfx.ogg`, name: 's', startMs: 1000, lengthMs: 1200, sourceMs: 1200, volume: 1 }]; }],

@@ -394,14 +394,16 @@ export function renderArgs(spec: RenderSpec): string[] {
     const ti = Math.min(TRANS_IN_MS / 1000, D / 2), to = Math.min(TRANS_OUT_MS / 1000, D / 2);
     const tin = im.transIn ?? 'none', tout = im.transOut ?? 'none';
     const chain = [`scale=${w}:-2:flags=lanczos`, 'format=rgba'];
-    // pop: size animated per frame (t = time since the picture appeared)
+    // fades run first, on the fixed-size picture: newer ffmpeg stops when a frame changes size
+    // before a filter that is not set up for it (the pop below changes the size every frame)
+    if (tin === 'fade') chain.push(`fade=t=in:st=0:d=${ti}:alpha=1`);
+    if (tout === 'fade') chain.push(`fade=t=out:st=${(D - to).toFixed(3)}:d=${to}:alpha=1`);
+    // pop: size animated per frame (t = time since the picture appeared); last before overlay
     if (tin === 'pop' || tout === 'pop') {
       const sIn = tin === 'pop' ? `if(lt(t,${ti}),1+2.70158*pow(t/${ti}-1,3)+1.70158*pow(t/${ti}-1,2),1)` : '1';
       const sOut = tout === 'pop' ? `if(gt(t,${(D - to).toFixed(3)}),pow(max(0,1-(t-${(D - to).toFixed(3)})/${to}),2),1)` : '1';
       chain.push(`scale=w='max(2,trunc(${w}*max(0.01,(${sIn})*(${sOut}))/2)*2)':h=-2:eval=frame`);
     }
-    if (tin === 'fade') chain.push(`fade=t=in:st=0:d=${ti}:alpha=1`);
-    if (tout === 'fade') chain.push(`fade=t=out:st=${(D - to).toFixed(3)}:d=${to}:alpha=1`);
     chain.push(`setpts=PTS-STARTPTS+${st}/TB`);
     f.push(`[${input}:v]${chain.join(',')}[im${k}]`);
     // slide: vertical offset driven by the main timeline time
