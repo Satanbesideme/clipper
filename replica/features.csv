@@ -1,0 +1,28 @@
+feature,area,priority,original,clone,notes
+Buka rekaman live panjang (MP4/MKV dari OBS) tanpa memuat seluruh file,import,must,yes,no,VOD bisa 1-4 jam; harus tetap ringan
+Timeline VOD dengan thumbnail dan gelombang audio untuk scrub cepat,scanner,must,yes,no,cari momen ramai dari lonjakan suara
+Tandai in/out untuk membuat banyak klip dari satu VOD,scanner,must,partial,no,di CapCut harus split manual di timeline
+Potong dan rapikan klip (trim/split) di timeline,editor,must,yes,no,
+Kanvas 9:16 1080x1920,editor,must,yes,no,
+Layout reframe: crop tengah / geser posisi crop,layout,must,yes,no,
+Layout split: facecam di atas + gameplay di bawah,layout,must,partial,no,di CapCut dirakit manual dengan dua layer; ini fitur kunci untuk streamer
+Teks judul/hook di atas video,text,must,yes,no,
+Ekspor MP4 H.264 1080x1920 30/60fps,export,must,yes,no,
+Preset ekspor TikTok dan YouTube Shorts,export,should,partial,no,
+Antrean ekspor banyak klip sekaligus,export,should,no,no,
+Subtitle manual,captions,should,yes,no,
+Subtitle otomatis Bahasa Indonesia,captions,should,yes,no,di CapCut khusus Pro; di klon jalan lokal (offline)
+Gaya subtitle ala shorts (kata menyala per kata),captions,should,yes,no,
+Watermark/logo channel tetap di setiap klip,branding,should,yes,no,
+Atur volume dan tambah lagu dari file sendiri,audio,should,yes,no,
+Simpan dan buka lagi proyek,project,should,yes,no,
+Zoom/punch-in dengan keyframe,editor,could,yes,no,
+Transisi dan efek dasar,editor,could,yes,no,
+Filter warna / LUT,editor,could,yes,no,
+Auto reframe yang mengikuti wajah,layout,could,yes,no,berat; mulai dari posisi crop manual
+Deteksi highlight dari lonjakan audio,scanner,could,no,no,lebih dari CapCut
+Unggah langsung ke TikTok dan YouTube lewat API resmi,export,could,yes,no,pakai kunci API milik sendiri
+Pustaka musik dan stiker CapCut,assets,could,yes,skip,konten berlisensi milik CapCut
+Template komunitas,assets,could,yes,skip,jaringan dan konten milik pengguna CapCut
+Script to Video dan AI Presenter,ai,could,yes,skip,di luar kebutuhan klip live
+Penyimpanan cloud,project,could,yes,skip,tidak perlu; semua lokal
