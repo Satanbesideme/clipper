@@ -153,53 +153,107 @@ export async function downloadModel(size: ModelSize, onFrac: (f: number) => void
   }
 }
 
+/** Job id of the running speech-to-text step, so it can be cancelled. */
+export let sttJob: string | null = null;
+let sttCancelled = false;
+export async function cancelTranscribe() {
+  sttCancelled = true;
+  if (sttJob) await cancelJob(sttJob).catch(() => undefined);
+}
+
 /**
- * Transcribes the audio under every clip on the timeline and returns caption lines in timeline time.
- * Each clip is transcribed separately so only the parts that are used get processed.
+ * ffmpeg args that write the timeline's audio (clips in order, speed applied) as one 16 kHz mono WAV,
+ * padded with a second of silence: whisper refuses inputs shorter than one second.
+ */
+export function timelineWavArgs(clips: Timeline['clips'], media: Record<string, MediaEntry>, out: string): string[] {
+  const args = ['-hide_banner', '-y', '-nostats', '-progress', 'pipe:1'];
+  const f: string[] = [];
+  clips.forEach((c, i) => {
+    const m = media[c.mediaId];
+    args.push('-ss', (c.inMs / 1000).toFixed(3), '-t', ((c.outMs - c.inMs) / 1000).toFixed(3), '-i', m.playable);
+    const dur = (Math.max(1, Math.round((c.outMs - c.inMs) / c.speed)) / 1000).toFixed(3);
+    f.push(m.hasAudio
+      ? `[${i}:a]asetpts=PTS-STARTPTS,${[...atempo(c.speed), 'aresample=16000', 'aformat=sample_fmts=s16:channel_layouts=mono', 'apad', `atrim=0:${dur}`].join(',')}[a${i}]`
+      : `anullsrc=r=16000:cl=mono,atrim=0:${dur},aformat=sample_fmts=s16:channel_layouts=mono[a${i}]`);
+  });
+  f.push(`${clips.map((_, i) => `[a${i}]`).join('')}concat=n=${clips.length}:v=0:a=1,apad=pad_dur=1[out]`);
+  args.push('-filter_complex', f.join(';'), '-map', '[out]', '-c:a', 'pcm_s16le', '-ar', '16000', '-ac', '1', out);
+  return args;
+}
+
+function atempo(speed: number): string[] {
+  const out: string[] = [];
+  let s = speed;
+  while (s < 0.5) { out.push('atempo=0.5'); s /= 0.5; }
+  while (s > 2) { out.push('atempo=2'); s /= 2; }
+  if (Math.abs(s - 1) > 1e-3) out.push(`atempo=${Number(s.toFixed(4))}`);
+  return out;
+}
+
+/**
+ * Transcribes what is said on the timeline and returns caption lines in timeline time.
+ * The timeline audio is cut into a few batches (so the model is loaded a few times, not once per clip)
+ * and each batch is one WAV in timeline order, so whisper's times are already timeline times.
  */
 export async function transcribe(p: Project, size: ModelSize, onStatus: (msg: string, frac: number) => void): Promise<CaptionLine[]> {
   if (!(await invoke<boolean>('whisper_available'))) throw new Error('Mesin subtitle tidak ditemukan. Install ulang GALSURKU Clipper versi terbaru.');
+  if (!(await modelReady(size))) throw new Error('Model subtitle belum lengkap. Unduh ulang modelnya di tab Subtitle.');
   const model = await modelPath(size);
   const dir = join(await projectDir(p.id), 'stt');
   await invoke('ensure_dir', { path: dir });
   const threads = await invoke<number>('cpu_count');
-  const clips = p.timeline.clips;
-  const total = clips.reduce((s, c) => s + (c.outMs - c.inMs), 0) || 1;
-  let done = 0;
+  const media = Object.fromEntries(p.media.map((m) => [m.id, m]));
+  const clips = p.timeline.clips.filter((c) => media[c.mediaId]);
+  if (!clips.length) return [];
+  sttCancelled = false;
+
+  // batches of at most 40 clips / 10 minutes, so the command line stays short on Windows
+  const batches: { clips: typeof clips; offset: number; dur: number }[] = [];
+  let cur: typeof clips = [], curDur = 0, offset = 0;
+  for (const c of clips) {
+    const d = Math.round((c.outMs - c.inMs) / c.speed);
+    if (cur.length && (cur.length >= 40 || curDur + d > 600_000)) { batches.push({ clips: cur, offset, dur: curDur }); offset += curDur; cur = []; curDur = 0; }
+    cur.push(c); curDur += d;
+  }
+  if (cur.length) batches.push({ clips: cur, offset, dur: curDur });
+  const total = batches.reduce((s, b) => s + b.dur, 0) || 1;
+
   const words: Word[] = [];
-  for (let i = 0; i < clips.length; i++) {
-    const c = clips[i];
-    const m = p.media.find((x) => x.id === c.mediaId);
-    const len = c.outMs - c.inMs;
-    if (!m || !m.hasAudio) { done += len; continue; }
-    const wav = join(dir, `clip-${c.id}.wav`);
-    const base = join(dir, `clip-${c.id}`);
-    const label = clips.length > 1 ? ` (potongan ${i + 1}/${clips.length})` : '';
-    onStatus(`Menyiapkan audio${label}…`, done / total);
-    await runTool('ffmpeg', speechWavArgs(m.playable, c.inMs, c.outMs, wav));
-    onStatus(`Mendengarkan ucapan${label}…`, done / total);
-    await runTool('whisper', whisperArgs(model, wav, base, threads), (_ms, pct) => {
-      if (pct >= 0) onStatus(`Mendengarkan ucapan${label}… ${Math.round(pct)}%`, (done + (len * pct) / 100) / total);
-    });
-    const json = await invoke<string>('read_text', { path: `${base}.json` });
-    for (const w of wordsFromWhisper(json, c.inMs)) {
-      const a = sourceToTimeline([c], c.mediaId, Math.min(c.outMs, w.startMs));
-      const b = sourceToTimeline([c], c.mediaId, Math.min(c.outMs, w.endMs));
-      if (a === null || b === null) continue;
-      const offset = clipOffset(p.timeline, i);
-      words.push({ text: w.text, startMs: a + offset, endMs: Math.max(a + offset + 60, b + offset) });
+  let done = 0;
+  for (const [bi, b] of batches.entries()) {
+    const tag = batches.length > 1 ? ` (bagian ${bi + 1}/${batches.length})` : '';
+    const wav = join(dir, `part-${bi}.wav`);
+    const base = join(dir, `part-${bi}`);
+    try {
+      onStatus(`Menyiapkan audio${tag}…`, done / total);
+      sttJob = uid();
+      await runTool('ffmpeg', timelineWavArgs(b.clips, media, wav), undefined, sttJob);
+      if (sttCancelled) throw new Error('Dibatalkan.');
+      onStatus(`Mendengarkan ucapan${tag}…`, done / total);
+      await invoke('remove_path', { path: `${base}.json` }).catch(() => undefined);
+      sttJob = uid();
+      await runTool('whisper', whisperArgs(model, wav, base, threads), (_ms, pct) => {
+        if (pct >= 0) onStatus(`Mendengarkan ucapan${tag}… ${Math.round(pct)}%`, (done + (b.dur * pct) / 100) / total);
+      }, sttJob);
+      if (sttCancelled) throw new Error('Dibatalkan.');
+      let json: string;
+      try { json = await invoke<string>('read_text', { path: `${base}.json` }); }
+      catch { throw new Error('Hasil subtitle tidak ditemukan. Coba lagi, atau pilih model Cepat.'); }
+      for (const w of wordsFromWhisper(json, 0)) {
+        if (w.startMs >= b.dur) continue;  // inside the silent padding
+        words.push({ text: w.text, startMs: b.offset + w.startMs, endMs: b.offset + Math.min(b.dur, Math.max(w.endMs, w.startMs + 60)) });
+      }
+    } catch (e) {
+      if (sttCancelled) throw new Error('Dibatalkan.');
+      throw new Error(`${(e as Error).message}`);
+    } finally {
+      sttJob = null;
+      await invoke('remove_path', { path: wav }).catch(() => undefined);
     }
-    await invoke('remove_path', { path: wav }).catch(() => undefined);
-    done += len;
+    done += b.dur;
   }
   onStatus('Menyusun subtitle…', 1);
   return groupLines(words, uid);
-}
-
-function clipOffset(tl: Timeline, index: number) {
-  let t = 0;
-  for (let i = 0; i < index; i++) t += Math.round((tl.clips[i].outMs - tl.clips[i].inMs) / tl.clips[i].speed);
-  return t;
 }
 
 // ---------- export queue ----------

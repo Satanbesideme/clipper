@@ -129,7 +129,7 @@ input[type=checkbox] { width: auto; accent-color: var(--accent); }
 .job { display: grid; gap: 4px; padding: 8px 0; border-top: 1px solid var(--border); }
 
 .toasts { position: fixed; left: 50%; top: 56px; transform: translateX(-50%); display: flex; flex-direction: column; align-items: center; gap: 6px; z-index: 10; pointer-events: none; }
-.toast { background: var(--surface-2); border: 1px solid var(--border-input); padding: 10px 16px; border-radius: var(--r-md); box-shadow: 0 8px 24px rgba(0,0,0,.5); max-width: 560px; white-space: pre-wrap; z-index: 10; transition: opacity 300ms; }
+.toast { user-select: text; pointer-events: auto; background: var(--surface-2); border: 1px solid var(--border-input); padding: 10px 16px; border-radius: var(--r-md); box-shadow: 0 8px 24px rgba(0,0,0,.5); max-width: 560px; white-space: pre-wrap; z-index: 10; transition: opacity 300ms; }
 .toast.error { border-color: var(--danger); }
 .toast.out { opacity: 0; }
 .center-msg { display: grid; place-items: center; height: 100%; color: var(--muted); }

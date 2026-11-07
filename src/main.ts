@@ -16,7 +16,7 @@ import {
 } from './store';
 import {
   ENCODER_LABEL, MODELS, VIDEO_EXT, buildThumbs, cancelExport, detectEncoder, downloadModel, enqueueExport,
-  importMedia, modelReady, onQueueChange, queue, thumbPath, transcribe, silencesOf, probeAudio,
+  importMedia, modelReady, onQueueChange, queue, thumbPath, transcribe, silencesOf, probeAudio, cancelTranscribe,
 } from './jobs';
 
 // ================= helpers =================
@@ -484,10 +484,12 @@ function captionPanel(): Node[] {
           }
         },
       }, downloading >= 0 ? 'Mengunduh…' : `Unduh model (${MODELS[size].label.replace(/.*\(|\)/g, '')}, sekali saja)`)
-    : h('button', {
-        class: 'primary wide', disabled: !hasClips || !ready || !!busy,
-        onclick: () => void runCaptions(),
-      }, cap.lines.length ? 'Buat ulang subtitle' : 'Buat subtitle otomatis');
+    : captionsRunning
+      ? h('button', { class: 'secondary wide', onclick: () => { void cancelTranscribe(); } }, 'Batal')
+      : h('button', {
+          class: 'primary wide', disabled: !hasClips || !ready || !!busy,
+          onclick: () => void runCaptions(),
+        }, cap.lines.length ? 'Buat ulang subtitle' : 'Buat subtitle otomatis');
 
   const st = cap.style;
   const styleSet = (patch: Partial<TextStyle>) => { snapshot(); Object.assign(cap.style, patch); changed({ inspector: false }); };
@@ -535,10 +537,13 @@ function setLineText(l: CaptionLine, text: string) {
   l.words = parts.map((w, i): Word => ({ text: w, startMs: Math.round(l.startMs + i * d), endMs: Math.round(l.startMs + (i + 1) * d) }));
 }
 
+let captionsRunning = false;
 async function runCaptions() {
   const p = P!;
   if (tl().captions.lines.length && !(await dialog().ask('Subtitle yang sekarang akan diganti. Lanjut?', { title: 'Buat ulang subtitle', kind: 'warning' }))) return;
   pause();
+  captionsRunning = true;
+  renderLeft();
   try {
     const lines = await transcribe(p, settings.model, (msg, frac) => setBusy(`${msg}${frac >= 0 && !/%$/.test(msg) ? ` ${Math.round(frac * 100)}%` : ''}`));
     snapshot();
@@ -546,8 +551,11 @@ async function runCaptions() {
     changed({ left: true });
     toast(lines.length ? `${lines.length} baris subtitle dibuat. Klik barisnya untuk koreksi.` : 'Tidak ada ucapan yang terdengar.');
   } catch (e) {
-    toast(`Subtitle gagal: ${(e as Error).message}`, 'error');
+    const msg = (e as Error).message;
+    if (msg === 'Dibatalkan.') toast('Pembuatan subtitle dibatalkan.');
+    else toast(`Subtitle gagal: ${msg}`, 'error');
   } finally {
+    captionsRunning = false;
     setBusy('');
     renderLeft();
   }
@@ -2184,4 +2192,11 @@ function onKey(e: KeyboardEvent) {
 }
 
 window.addEventListener('beforeunload', () => void flush());
+// show unexpected errors instead of silently stopping, and keep the app usable
+window.addEventListener('error', (e) => { toast(`Terjadi error: ${e.message}`, 'error'); setBusy(''); });
+window.addEventListener('unhandledrejection', (e) => {
+  const r = e.reason as { message?: string } | string | undefined;
+  toast(`Terjadi error: ${typeof r === 'string' ? r : r?.message ?? 'tidak diketahui'}`, 'error');
+  setBusy('');
+});
 void boot();

@@ -284,9 +284,11 @@ fn videos_dir(app: AppHandle) -> String {
     app.path().video_dir().map(|p| p.to_string_lossy().to_string()).unwrap_or_default()
 }
 
+/// Reads a text file; bytes that are not valid UTF-8 (whisper can split multi-byte characters) are replaced.
 #[tauri::command]
 fn read_text(path: String) -> Result<String, String> {
-    std::fs::read_to_string(&path).map_err(|e| e.to_string())
+    let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
+    Ok(String::from_utf8_lossy(&bytes).to_string())
 }
 
 #[tauri::command]

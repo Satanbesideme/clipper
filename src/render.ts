@@ -493,8 +493,10 @@ export function wordsFromWhisper(json: string, offsetMs = 0): Word[] {
   const data = JSON.parse(json) as { transcription?: WhisperSeg[] };
   const out: Word[] = [];
   for (const s of data.transcription ?? []) {
-    const text = (s.text ?? '').trim();
-    if (!text || /^\[.*\]$/.test(text) || /^\(.*\)$/.test(text)) continue; // [MUSIC], (tertawa)
+    // drop broken bytes, music notes and other symbols whisper writes for music or noise
+    const text = (s.text ?? '').replace(/[\uFFFD\u266A-\u266F]/g, '').trim();
+    if (!text || /^\[.*\]$/.test(text) || /^\(.*\)$/.test(text) || /^\*.*\*$/.test(text)) continue; // [MUSIC], (tertawa)
+    if (!/[\p{L}\p{N}]/u.test(text) && !/^[.,!?;:…]+$/.test(text)) continue;
     const a = (s.offsets?.from ?? 0) + offsetMs;
     const b = (s.offsets?.to ?? a) + offsetMs;
     // whisper sometimes glues punctuation as its own segment
