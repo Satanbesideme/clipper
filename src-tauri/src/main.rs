@@ -127,7 +127,7 @@ fn tool_run(app: AppHandle, jobs: State<Jobs>, job: String, tool: String, args: 
                     }
                     let mut t = tail.lock().unwrap();
                     t.push(line);
-                    if t.len() > 25 { t.remove(0); }
+                    if t.len() > 120 { t.remove(0); }
                 }
             })
         });

@@ -42,9 +42,13 @@ export async function runTool(tool: 'ffmpeg' | 'whisper', args: string[], onProg
   });
 }
 
-function cleanError(s: string): string {
-  const lines = s.trim().split(/\r?\n/).map((l) => l.trim()).filter((l) => l && !/^(Stream|Input|Output|Duration|Metadata|encoder|handler_name|\[)/i.test(l));
-  return lines.slice(-3).join('\n') || 'Dibatalkan.';
+/** Picks the lines of an ffmpeg/whisper log that say what went wrong, not the progress statistics. */
+export function cleanError(s: string): string {
+  const all = s.trim().split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  const noise = /^(frame=|size=|video:|CPB properties|elapsed=|Conversion failed|Stream|Input|Output|Duration|Metadata|encoder|handler_name|Side data|cpb:)/i;
+  const meaningful = all.filter((l) => !noise.test(l) && /error|invalid|failed|not supported|cannot|unable|no such|unknown|mismatch|reinit|changing|could not|out of|too |denied|exceed/i.test(l));
+  const pick = meaningful.length ? meaningful.slice(-4) : all.filter((l) => !noise.test(l)).slice(-3);
+  return pick.join('\n') || 'Dibatalkan.';
 }
 
 export const cancelJob = (jobId: string) => invoke('ffmpeg_cancel', { job: jobId });

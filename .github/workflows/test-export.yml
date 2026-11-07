@@ -1,0 +1,25 @@
+name: Uji ekspor dengan FFmpeg yang dibundel
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ['src/render.ts', 'src/ffmpeg.ts', 'tests/**', '.github/workflows/test-export.yml']
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Unduh FFmpeg (build BtbN yang sama dengan aplikasi, versi Linux)
+        run: |
+          curl -sSL -o ff.tar.xz https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz
+          mkdir ff && tar -xf ff.tar.xz -C ff --strip-components=1
+          ff/bin/ffmpeg -hide_banner -version | head -1
+      - run: sudo apt-get install -y fonts-dejavu-core >/dev/null
+      - run: npm install
+      - run: npx tsc --outDir build-test --module commonjs --target es2021 --lib es2021,dom --skipLibCheck --esModuleInterop tests/export-scenarios.ts || true
+      - run: mkdir -p work && node build-test/tests/export-scenarios.js "$PWD/ff/bin/ffmpeg" "$PWD/work" /usr/share/fonts/truetype/dejavu "DejaVu Sans"
