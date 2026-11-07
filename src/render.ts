@@ -24,6 +24,9 @@ export interface VideoClip {
   speed: number;  // 0.25..4
   volume: number; // 0..2
   fit: Fit;
+  zoom?: number;  // 1..3, punch-in
+  zx?: number;    // 0..1, where the zoom looks (horizontal)
+  zy?: number;    // 0..1 (vertical)
 }
 
 export interface TextStyle {
@@ -67,6 +70,10 @@ export interface SoundItem {
   volume: number;      // 0..2
 }
 
+export type Trans = 'none' | 'fade' | 'pop' | 'slide';
+export const TRANS_IN_MS = 300;
+export const TRANS_OUT_MS = 250;
+
 /** A picture (meme) over the video. */
 export interface ImageItem {
   id: string;
@@ -79,7 +86,39 @@ export interface ImageItem {
   scale: number;   // width as a share of the canvas width
   aspect: number;  // natural width / height
   animated: boolean;
+  transIn?: Trans;
+  transOut?: Trans;
 }
+
+/** Channel logo shown for the whole video. */
+export interface Watermark {
+  file: string;
+  aspect: number;
+  corner: 'tl' | 'tr' | 'bl' | 'br';
+  scale: number;    // width share of the canvas
+  opacity: number;  // 0..1
+}
+
+/** Animation state of a picture at local time `lt` (ms since it appeared). Shared by preview and export. */
+export function transState(im: Pick<ImageItem, 'transIn' | 'transOut' | 'startMs' | 'endMs'>, lt: number) {
+  const d = im.endMs - im.startMs;
+  const ti = Math.min(TRANS_IN_MS, d / 2), to = Math.min(TRANS_OUT_MS, d / 2);
+  let scale = 1, alpha = 1, dy = 0;
+  if (lt < ti) {
+    const x = Math.max(0, lt / ti);
+    if (im.transIn === 'pop') scale *= easeOutBack(x);
+    if (im.transIn === 'fade') alpha *= x;
+    if (im.transIn === 'slide') dy += 0.5 * Math.pow(1 - x, 3);
+  }
+  if (lt > d - to) {
+    const x = Math.min(1, (lt - (d - to)) / to);
+    if (im.transOut === 'pop') scale *= Math.max(0.01, Math.pow(1 - x, 2));
+    if (im.transOut === 'fade') alpha *= 1 - x;
+    if (im.transOut === 'slide') dy += 0.5 * x * x;
+  }
+  return { scale: Math.max(0.01, scale), alpha, dy };
+}
+const easeOutBack = (x: number) => 1 + 2.70158 * Math.pow(x - 1, 3) + 1.70158 * Math.pow(x - 1, 2);
 
 export interface Timeline {
   width: number;   // 1080
@@ -90,6 +129,7 @@ export interface Timeline {
   captions: Captions;
   sounds?: SoundItem[];
   images?: ImageItem[];
+  watermark?: Watermark | null;
 }
 
 export const DEFAULT_TEXT: TextStyle = {
@@ -250,9 +290,20 @@ export function renderArgs(spec: RenderSpec): string[] {
     const m = spec.media[c.mediaId];
     if (!m) throw new Error('Media klip tidak ditemukan.');
     args.push('-ss', (c.inMs / 1000).toFixed(3), '-t', ((c.outMs - c.inMs) / 1000).toFixed(3), '-i', m.playable);
-    const fit = c.fit === 'fit'
-      ? `scale=${W}:${H}:force_original_aspect_ratio=decrease:flags=lanczos,pad=${W}:${H}:(ow-iw)/2:(oh-ih)/2:black`
-      : `scale=${W}:${H}:force_original_aspect_ratio=increase:flags=lanczos,crop=${W}:${H}`;
+    const z = Math.max(1, c.zoom ?? 1);
+    let fit: string;
+    if (z <= 1.001) {
+      fit = c.fit === 'fit'
+        ? `scale=${W}:${H}:force_original_aspect_ratio=decrease:flags=lanczos,pad=${W}:${H}:(ow-iw)/2:(oh-ih)/2:black`
+        : `scale=${W}:${H}:force_original_aspect_ratio=increase:flags=lanczos,crop=${W}:${H}`;
+    } else {
+      // punch-in: scale up, pad if the picture is still smaller than the canvas, then crop around the chosen point
+      const zw = Math.round((W * z) / 2) * 2, zh = Math.round((H * z) / 2) * 2;
+      const zx = Number((c.zx ?? 0.5).toFixed(4)), zy = Number((c.zy ?? 0.5).toFixed(4));
+      fit = `scale=${zw}:${zh}:force_original_aspect_ratio=${c.fit === 'fit' ? 'decrease' : 'increase'}:flags=lanczos,` +
+        `pad=w='max(iw,${W})':h='max(ih,${H})':x='(ow-iw)/2':y='(oh-ih)/2':color=black,` +
+        `crop=${W}:${H}:x='(iw-${W})*${zx}':y='(ih-${H})*${zy}'`;
+    }
     const sp = c.speed === 1 ? '' : `,setpts=PTS/${Number(c.speed.toFixed(4))}`;
     f.push(`[${i}:v]setpts=PTS-STARTPTS${sp},${fit},setsar=1,fps=${F},format=yuv420p[v${i}]`);
     const dur = (clipDuration(c) / 1000).toFixed(3);
@@ -277,15 +328,43 @@ export function renderArgs(spec: RenderSpec): string[] {
     if (im.animated) args.push('-ignore_loop', '0', '-t', dur, '-i', im.file);
     else args.push('-loop', '1', '-t', dur, '-framerate', String(F), '-i', im.file);
     const w = Math.max(2, Math.round((W * im.scale) / 2) * 2);
-    const x = Math.round(im.x * W - w / 2);
-    const hgt = Math.round(w / im.aspect);
-    const y = Math.round(im.y * H - hgt / 2);
+    const cx = Math.round(im.x * W), cy = Math.round(im.y * H);
     const st = (a / 1000).toFixed(3), en = (b / 1000).toFixed(3);
-    f.push(`[${input}:v]scale=${w}:-2,format=rgba,setpts=PTS-STARTPTS+${st}/TB[im${k}]`);
-    f.push(`[${v}][im${k}]overlay=x=${x}:y=${y}:enable='between(t,${st},${en})':eof_action=pass:format=auto[ov${k}]`);
+    const D = (b - a) / 1000;
+    const ti = Math.min(TRANS_IN_MS / 1000, D / 2), to = Math.min(TRANS_OUT_MS / 1000, D / 2);
+    const tin = im.transIn ?? 'none', tout = im.transOut ?? 'none';
+    const chain = [`scale=${w}:-2:flags=lanczos`, 'format=rgba'];
+    // pop: size animated per frame (t = time since the picture appeared)
+    if (tin === 'pop' || tout === 'pop') {
+      const sIn = tin === 'pop' ? `if(lt(t,${ti}),1+2.70158*pow(t/${ti}-1,3)+1.70158*pow(t/${ti}-1,2),1)` : '1';
+      const sOut = tout === 'pop' ? `if(gt(t,${(D - to).toFixed(3)}),pow(max(0,1-(t-${(D - to).toFixed(3)})/${to}),2),1)` : '1';
+      chain.push(`scale=w='max(2,trunc(${w}*max(0.01,(${sIn})*(${sOut}))/2)*2)':h=-2:eval=frame`);
+    }
+    if (tin === 'fade') chain.push(`fade=t=in:st=0:d=${ti}:alpha=1`);
+    if (tout === 'fade') chain.push(`fade=t=out:st=${(D - to).toFixed(3)}:d=${to}:alpha=1`);
+    chain.push(`setpts=PTS-STARTPTS+${st}/TB`);
+    f.push(`[${input}:v]${chain.join(',')}[im${k}]`);
+    // slide: vertical offset driven by the main timeline time
+    const lt = `(t-${st})`;
+    let dy = '0';
+    if (tin === 'slide') dy += `+if(lt(${lt},${ti}),${H * 0.5}*pow(1-${lt}/${ti},3),0)`;
+    if (tout === 'slide') dy += `+if(gt(${lt},${(D - to).toFixed(3)}),${H * 0.5}*pow((${lt}-${(D - to).toFixed(3)})/${to},2),0)`;
+    f.push(`[${v}][im${k}]overlay=x='${cx}-overlay_w/2':y='${cy}-overlay_h/2${dy === '0' ? '' : `+(${dy})`}':enable='between(t,${st},${en})':eof_action=pass:format=auto[ov${k}]`);
     v = `ov${k}`;
     input++;
   });
+  const wm = tl.watermark;
+  if (wm) {
+    args.push('-loop', '1', '-t', (total / 1000).toFixed(3), '-framerate', String(F), '-i', wm.file);
+    const w = Math.max(2, Math.round((W * wm.scale) / 2) * 2);
+    const m = 40;
+    const x = wm.corner.endsWith('l') ? `${m}` : `W-w-${m}`;
+    const y = wm.corner.startsWith('t') ? `${m + 60}` : `H-h-${m + 220}`;
+    f.push(`[${input}:v]scale=${w}:-2:flags=lanczos,format=rgba,colorchannelmixer=aa=${Number(wm.opacity.toFixed(3))}[wm]`);
+    f.push(`[${v}][wm]overlay=x=${x}:y=${y}:eof_action=pass:format=auto[wmo]`);
+    v = 'wmo';
+    input++;
+  }
   if (v !== 'cv') { f.push(`[${v}]format=yuv420p[ovf]`); v = 'ovf'; }
 
   if (spec.assFile) {

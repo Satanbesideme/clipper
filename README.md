@@ -9,9 +9,11 @@ Buka tab **Releases** di repo ini, unduh `GALSURKU Clipper_..._x64-setup.exe`, l
 1. **Proyek baru**: pilih rekaman, atau tarik file dari folder OBS ke jendela.
 2. **Potong**: geser playhead, tekan **Ctrl+B** untuk split, pilih bagian yang tidak dipakai, tekan **Delete**. Potongan otomatis merapat.
 3. **Subtitle**: buka tab **Subtitle**, unduh model sekali (148 MB atau 488 MB), lalu klik **Buat subtitle otomatis**. Pilih gaya **Kata menyala** atau **Per kalimat**. Klik baris untuk mengoreksi.
-4. **Soundboard**: tab **Soundboard**. Saat memutar, pause di momennya, pencet pad atau angka **1–9**, lalu lanjut putar. Tarik file suara (MP3/WAV/OGG) atau gambar (PNG/JPG/GIF) ke jendela untuk menambah ke library. Klik **Atur** untuk menggabungkan suara + gambar jadi combo meme, mengganti nama, warna, dan urutan tombol.
-5. **Teks**: tab **Teks**, pilih gaya, ketik, lalu geser posisinya di preview.
-6. **Ekspor**: tombol **Ekspor** di kanan atas. Hasil 1080×1920 MP4 di `Videos\GALSURKU Clipper`.
+4. **Suara (soundboard)**: tab **Suara**. Pause di momennya, pencet pad atau angka **1–9**, lalu lanjut putar. Tarik file MP3/WAV/OGG ke jendela untuk menambah.
+5. **Meme**: tab **Meme**. Klik gambar atau **Shift+1–9** untuk memasang meme di playhead, lengkap dengan animasi masuk/keluar (Pop, Fade, Geser). Klik **Atur** untuk mengubah default tiap meme.
+6. **Zoom (punch-in)**: pilih potongan video, atur **Zoom** di panel kanan, geser preview untuk mengarahkan.
+7. **Teks**: tab **Teks**, pilih gaya, ketik, lalu geser posisinya di preview.
+8. **Ekspor**: tombol **Ekspor** di kanan atas. Hasil 1080×1920 MP4 di `Videos\GALSURKU Clipper`.
 
 | Tombol | Fungsi |
 | --- | --- |
@@ -20,8 +22,12 @@ Buka tab **Releases** di repo ini, unduh `GALSURKU Clipper_..._x64-setup.exe`, l
 | Delete | hapus yang dipilih |
 | Ctrl+Z / Ctrl+Y | urungkan / ulangi |
 | ← / → | 1 frame (Shift: 1 detik) |
-| 1–9 | pasang pad soundboard di playhead |
+| 1–9 | pasang suara di playhead |
+| Shift + 1–9 | pasang meme di playhead |
 | Ctrl + scroll | zoom timeline (di atas gambar di preview: ubah ukuran) |
+
+## Watermark
+Klik area kosong di timeline, lalu di panel kanan pilih **+ Pasang logo**. Atur pojok, ukuran, dan transparansi. Centang **Pasang otomatis di proyek baru** agar logo GALSURKU selalu ikut.
 
 ## Catatan
 - Subtitle diproses di PC ini dengan whisper.cpp; tidak ada yang dikirim ke internet selain unduhan model sekali.

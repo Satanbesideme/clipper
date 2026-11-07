@@ -1,7 +1,7 @@
 // Projects live as JSON files in the app data folder. Nothing leaves the PC.
 import { invoke, join } from './tauri';
 import type { Encoder } from './ffmpeg';
-import { DEFAULT_CAPTION, timelineDuration, type Media, type Timeline } from './render';
+import { DEFAULT_CAPTION, timelineDuration, type Media, type Timeline, type Watermark } from './render';
 
 export interface MediaEntry extends Media {
   thumbs: { everySec: number; sheets: number; tw: number; th: number; ready: boolean };
@@ -20,7 +20,7 @@ export interface Project {
 export interface ProjectSummary { id: string; name: string; durationMs: number; clips: number; updatedAt: string; version?: number }
 
 export type ModelSize = 'base' | 'small';
-export interface Settings { outDir: string; encoder: Encoder | ''; model: ModelSize }
+export interface Settings { outDir: string; encoder: Encoder | ''; model: ModelSize; watermark?: Watermark | null }
 
 let dataDirCache = '';
 export async function dataDir(): Promise<string> {
@@ -99,7 +99,7 @@ export async function loadSettings(): Promise<Settings> {
     const vids = await invoke<string>('videos_dir');
     outDir = join(vids || (await dataDir()), 'GALSURKU Clipper');
   }
-  return { outDir, encoder: s.encoder ?? '', model: s.model ?? 'small' };
+  return { outDir, encoder: s.encoder ?? '', model: s.model ?? 'small', watermark: s.watermark ?? null };
 }
 
 export async function saveSettings(s: Settings) {
