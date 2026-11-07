@@ -1,85 +1,117 @@
 import './styles.css';
-import { dialog, fileSrc, invoke, isTauri, join, onDrop, baseName } from './tauri';
-import { type Layout, type Rect, splitHeights } from './ffmpeg';
+import { dialog, fileSrc, invoke, isTauri, onDrop, extName } from './tauri';
 import {
-  deleteProject, flush, listProjects, loadProject, loadSettings, projectDir, saveProject, saveSettings, uid,
-  type Clip, type Project, type Settings,
+  DEFAULT_CAPTION, DEFAULT_TEXT, clipDuration, clipStarts, locate, splitAt, timelineDuration,
+  type CaptionLine, type TextItem, type TextStyle, type VideoClip, type Word,
+} from './render';
+import {
+  deleteProject, flush, listProjects, loadProject, loadSettings, newProject, saveProject, saveSettings, uid,
+  type MediaEntry, type Project, type Settings,
 } from './store';
 import {
-  ENCODER_LABEL, PRESET_LIMIT_SEC, buildThumbs, buildWaveform, cancelExport, detectEncoder, enqueueExport,
-  importVideo, loadWaveform, onQueueChange, queue, stripEmoji, type Preset,
+  ENCODER_LABEL, MODELS, VIDEO_EXT, buildThumbs, cancelExport, detectEncoder, downloadModel, enqueueExport,
+  importMedia, modelReady, onQueueChange, queue, thumbPath, transcribe,
 } from './jobs';
-import { moveRect, normalize, partAspect, resizeRect, withType, type Part } from './layout';
 
-// ---------------- tiny DOM helper ----------------
+// ================= helpers =================
 
+type Kid = Node | string | null | false | undefined;
 type Attrs = Record<string, string | number | boolean | ((e: Event) => void) | undefined>;
-function h<K extends keyof HTMLElementTagNameMap>(tag: K, attrs: Attrs = {}, ...kids: (Node | string | null | false | undefined)[]): HTMLElementTagNameMap[K] {
+function h<K extends keyof HTMLElementTagNameMap>(tag: K, attrs: Attrs = {}, ...kids: Kid[]): HTMLElementTagNameMap[K] {
   const el = document.createElement(tag);
   for (const [k, v] of Object.entries(attrs)) {
     if (v === undefined || v === false) continue;
     if (k.startsWith('on') && typeof v === 'function') el.addEventListener(k.slice(2).toLowerCase(), v as EventListener);
     else if (k === 'class') el.className = String(v);
+    else if (k === 'value' && (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement)) el.value = String(v);
     else if (v === true) el.setAttribute(k, '');
     else el.setAttribute(k, String(v));
   }
   for (const c of kids) if (c !== null && c !== false && c !== undefined) el.append(c);
   return el;
 }
-const $ = <T extends HTMLElement>(sel: string) => document.querySelector(sel) as T | null;
+const $ = <T extends HTMLElement = HTMLElement>(sel: string) => document.querySelector(sel) as T | null;
 const app = document.getElementById('app')!;
+const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
 
-function tc(ms: number, withMs = false): string {
-  const neg = ms < 0;
-  ms = Math.abs(Math.round(ms));
-  const hh = Math.floor(ms / 3600000);
-  const mm = Math.floor((ms % 3600000) / 60000);
-  const ss = Math.floor((ms % 60000) / 1000);
-  const ff = Math.floor((ms % 1000) / 100);
-  const base = `${hh > 0 ? `${hh}:` : ''}${String(mm).padStart(hh > 0 ? 2 : 1, '0')}:${String(ss).padStart(2, '0')}`;
-  return (neg ? '-' : '') + base + (withMs ? `.${ff}` : '');
-}
-function parseTc(s: string): number | null {
-  const parts = s.trim().split(':').map((x) => x.trim());
-  if (!parts.length || parts.some((p) => p === '' || isNaN(Number(p)))) return null;
-  let sec = 0;
-  for (const p of parts) sec = sec * 60 + Number(p);
-  return Math.round(sec * 1000);
+function tc(ms: number, frac = false): string {
+  ms = Math.max(0, Math.round(ms));
+  const hh = Math.floor(ms / 3600000), mm = Math.floor((ms % 3600000) / 60000), ss = Math.floor((ms % 60000) / 1000);
+  const base = `${hh ? `${hh}:` : ''}${String(mm).padStart(hh ? 2 : 1, '0')}:${String(ss).padStart(2, '0')}`;
+  return frac ? `${base}.${String(Math.floor((ms % 1000) / 10)).padStart(2, '0')}` : base;
 }
 
 function toast(msg: string, kind: 'info' | 'error' = 'info') {
   const t = h('div', { class: `toast ${kind}`, role: 'status' }, msg);
   document.body.append(t);
-  setTimeout(() => t.classList.add('out'), kind === 'error' ? 7000 : 3000);
-  setTimeout(() => t.remove(), kind === 'error' ? 7400 : 3400);
+  const life = kind === 'error' ? 8000 : 3000;
+  setTimeout(() => t.classList.add('out'), life);
+  setTimeout(() => t.remove(), life + 400);
 }
 
-// ---------------- state ----------------
+const FONTS = ['Segoe UI', 'Bahnschrift', 'Impact', 'Arial', 'Verdana', 'Trebuchet MS', 'Georgia', 'Comic Sans MS'];
 
-let settings: Settings = { outDir: '', encoder: '', fps: 0 };
-let project: Project | null = null;
-let wave: Uint8Array | null = null;
-let selectedId: string | null = null;
-let markIn: number | null = null;
-let markOut: number | null = null;
-let view = { start: 0, end: 60000 };
-let status = { text: '', frac: -1 };
-let preset: Preset = 'tiktok';
-const sheets: HTMLImageElement[] = [];
+// ================= state =================
 
-const selected = (): Clip | null => project?.clips.find((c) => c.id === selectedId) ?? null;
-const editingLayout = (): Layout => (selected()?.layout ?? project!.defaultLayout);
+type Sel = { kind: 'clip' | 'text' | 'line'; id: string } | null;
+type LeftTab = 'media' | 'text' | 'captions';
 
-function setLayout(l: Layout) {
-  if (!project) return;
-  const c = selected();
-  if (c) c.layout = l; else project.defaultLayout = l;
-  void saveProject(project);
-  drawOverlay();
-  drawPreview();
+let settings: Settings = { outDir: '', encoder: '', model: 'small' };
+let P: Project | null = null;
+let sel: Sel = null;
+let tab: LeftTab = 'media';
+let t = 0;                 // playhead, timeline ms
+let playing = false;
+let pxPerSec = 60;         // timeline zoom
+let scrollX = 0;           // timeline scroll in px
+let busy = '';             // long task message (captions, import)
+const undoStack: string[] = [];
+const redoStack: string[] = [];
+const videos = new Map<string, HTMLVideoElement>();
+const sheets = new Map<string, HTMLImageElement[]>();
+
+const tl = () => P!.timeline;
+const mediaOf = (id: string) => P!.media.find((m) => m.id === id);
+const selected = <T extends 'clip' | 'text' | 'line'>(kind: T) =>
+  (sel?.kind === kind ? (kind === 'clip' ? tl().clips : kind === 'text' ? tl().texts : tl().captions.lines).find((x) => x.id === sel!.id) : undefined) as
+  (T extends 'clip' ? VideoClip : T extends 'text' ? TextItem : CaptionLine) | undefined;
+
+/** Call before changing the timeline; records an undo step. */
+function snapshot() {
+  undoStack.push(JSON.stringify(P!.timeline));
+  if (undoStack.length > 80) undoStack.shift();
+  redoStack.length = 0;
+}
+/** Call after changing the timeline. */
+function changed(opts: { inspector?: boolean; left?: boolean } = {}) {
+  void saveProject(P!);
+  t = clamp(t, 0, Math.max(0, timelineDuration(tl()) - 1));
+  drawTimeline();
+  renderFrame();
+  if (opts.inspector !== false) renderInspector();
+  if (opts.left) renderLeft();
+  updateTime();
+  const fm = $('#fmt');
+  if (fm) fm.textContent = `${tl().width}×${tl().height} · ${tl().fps} fps`;
+}
+function undo() {
+  const s = undoStack.pop();
+  if (!s) return;
+  redoStack.push(JSON.stringify(P!.timeline));
+  P!.timeline = JSON.parse(s);
+  sel = null;
+  changed({ left: true });
+}
+function redo() {
+  const s = redoStack.pop();
+  if (!s) return;
+  undoStack.push(JSON.stringify(P!.timeline));
+  P!.timeline = JSON.parse(s);
+  sel = null;
+  changed({ left: true });
 }
 
-// ---------------- boot ----------------
+// ================= boot / home =================
 
 async function boot() {
   if (!isTauri()) {
@@ -87,48 +119,65 @@ async function boot() {
     return;
   }
   settings = await loadSettings();
-  void onDrop((paths) => { if (paths[0]) void startImport(paths[0]); });
+  void onDrop((paths) => void dropped(paths));
   onQueueChange(renderQueue);
   window.addEventListener('keydown', onKey);
+  window.addEventListener('resize', () => { layoutPreview(); sizeTimeline(); });
   await renderHome();
   if (!settings.encoder) {
     settings.encoder = await detectEncoder();
     await saveSettings(settings);
-    $('#enc')?.replaceChildren(ENCODER_LABEL[settings.encoder]);
   }
 }
 
-// ---------------- home ----------------
+async function dropped(paths: string[]) {
+  const vids = paths.filter((p) => VIDEO_EXT.includes(extName(p)));
+  if (!vids.length) { toast('Format belum didukung. Pakai MP4, MKV, MOV, FLV, atau TS.'); return; }
+  if (!P) {
+    const p = newProject(vids[0].split(/[\\/]/).pop()!.replace(/\.[^.]+$/, ''));
+    await saveProject(p, true);
+    await openProject(p.id, vids);
+  } else {
+    await importFiles(vids, true);
+  }
+}
 
 async function renderHome() {
+  pause();
   await flush();
-  project = null;
-  wave = null;
-  selectedId = null;
+  P = null;
+  sel = null;
+  videos.forEach((v) => { v.pause(); v.removeAttribute('src'); v.load(); });
+  videos.clear();
+  sheets.clear();
   const list = await listProjects();
   app.replaceChildren(
     h('header', { class: 'bar' },
       h('div', { class: 'brand' }, h('span', { class: 'dot' }), 'GALSURKU Clipper'),
-      h('div', { class: 'spacer' }),
-      h('span', { class: 'muted', id: 'enc' }, settings.encoder ? ENCODER_LABEL[settings.encoder] : 'Mengecek GPU…'),
     ),
     h('main', { class: 'home' },
-      h('button', { class: 'drop', onclick: () => void pickFile() },
-        h('div', { class: 'drop-title' }, 'Import rekaman live'),
-        h('div', { class: 'muted' }, 'Klik, atau tarik file MP4 / MKV dari OBS ke jendela ini'),
+      h('button', {
+        class: 'drop', onclick: async () => {
+          const files = await dialog().open({ multiple: true, title: 'Pilih rekaman', filters: [{ name: 'Video', extensions: VIDEO_EXT }] });
+          const arr = typeof files === 'string' ? [files] : files ?? [];
+          if (arr.length) await dropped(arr);
+        },
+      },
+        h('div', { class: 'drop-plus' }, '+'),
+        h('div', { class: 'drop-title' }, 'Proyek baru'),
+        h('div', { class: 'muted' }, 'Klik untuk memilih rekaman, atau tarik file video ke jendela ini'),
       ),
-      h('div', { id: 'import-status', class: 'muted' }),
-      list.length ? h('h2', {}, 'Proyek terakhir') : null,
+      list.length ? h('h2', { class: 'section' }, 'Proyek') : null,
       h('ul', { class: 'projects' },
         ...list.map((p) => h('li', {},
           h('button', { class: 'proj', onclick: () => void openProject(p.id) },
             h('div', { class: 'proj-name' }, p.name),
-            h('div', { class: 'muted' }, `${tc(p.durationMs)} · ${p.clips} klip · ${baseName(p.source)}`),
+            h('div', { class: 'muted small' }, `${tc(p.durationMs)} · ${p.clips} potongan · ${new Date(p.updatedAt).toLocaleString('id-ID', { dateStyle: 'medium', timeStyle: 'short' })}`),
           ),
           h('button', {
-            class: 'icon-btn', title: 'Hapus proyek (file video asli tidak dihapus)', 'aria-label': `Hapus proyek ${p.name}`,
+            class: 'icon-btn', title: 'Hapus proyek', 'aria-label': `Hapus proyek ${p.name}`,
             onclick: async () => {
-              if (await dialog().ask(`Hapus proyek "${p.name}"?\nFile video asli tetap aman.`, { title: 'Hapus proyek', kind: 'warning' })) {
+              if (await dialog().ask(`Hapus proyek "${p.name}"?\nFile rekaman asli tidak ikut terhapus.`, { title: 'Hapus proyek', kind: 'warning' })) {
                 await deleteProject(p.id);
                 await renderHome();
               }
@@ -140,101 +189,83 @@ async function renderHome() {
   );
 }
 
-async function pickFile() {
-  const f = await dialog().open({ title: 'Pilih rekaman live', filters: [{ name: 'Video', extensions: ['mp4', 'mkv', 'mov', 'flv', 'ts', 'm4v'] }] });
-  if (typeof f === 'string') await startImport(f);
-}
-
-let importing = false;
-async function startImport(path: string) {
-  if (importing) return;
-  importing = true;
-  const out = $('#import-status');
-  try {
-    const p = await importVideo(path, (msg, frac) => {
-      if (out) out.textContent = frac !== undefined ? `${msg} ${Math.round(frac * 100)}%` : msg;
-    });
-    await saveProject(p, true);
-    await openProject(p.id);
-  } catch (e) {
-    if (out) out.textContent = '';
-    await dialog().message((e as Error).message, { title: 'Import gagal', kind: 'error' });
-  } finally {
-    importing = false;
-  }
-}
-
-// ---------------- editor ----------------
-
-async function openProject(id: string) {
+async function openProject(id: string, importNow: string[] = []) {
   const p = await loadProject(id);
-  if (!p) { toast('Proyek tidak ditemukan.', 'error'); return; }
-  if (!(await invoke<boolean>('exists', { path: p.playable }))) {
-    await dialog().message(`File videonya tidak ditemukan:\n${p.playable}\n\nKalau filenya dipindah, import ulang dari lokasi baru.`, { title: 'Video hilang', kind: 'error' });
-    return;
-  }
-  project = p;
-  selectedId = null;
-  markIn = markOut = null;
-  view = { start: 0, end: Math.min(p.durationMs, 10 * 60000) };
+  if (!p) { toast('Proyek tidak bisa dibuka.', 'error'); return; }
+  P = p;
+  sel = null;
+  t = 0;
+  scrollX = 0;
+  undoStack.length = redoStack.length = 0;
   renderEditor();
-  void loadCaches();
+  for (const m of p.media) void loadSheets(m);
+  if (importNow.length) await importFiles(importNow, true);
+  fitZoom();
 }
 
-async function loadCaches() {
-  const p = project!;
-  const dir = await projectDir(p.id);
-  try {
-    if (!p.thumbs.ready) {
-      setStatus('Membuat thumbnail timeline…', 0);
-      await buildThumbs(p, (f) => setStatus('Membuat thumbnail timeline…', f));
+// ================= import =================
+
+async function pickAndImport() {
+  const files = await dialog().open({ multiple: true, title: 'Tambah video', filters: [{ name: 'Video', extensions: VIDEO_EXT }] });
+  const arr = typeof files === 'string' ? [files] : files ?? [];
+  if (arr.length) await importFiles(arr, P!.timeline.clips.length === 0);
+}
+
+async function importFiles(paths: string[], addToTimeline: boolean) {
+  const p = P!;
+  for (const path of paths) {
+    try {
+      setBusy('Menambahkan video…');
+      const m = await importMedia(path, setBusy);
+      p.media.push(m);
+      if (addToTimeline) {
+        snapshot();
+        tl().clips.push({ id: uid(), mediaId: m.id, inMs: 0, outMs: m.durationMs, speed: 1, volume: 1, fit: m.width / m.height < 0.7 ? 'fill' : 'fit' });
+        if (tl().clips.length === 1) tl().fps = m.fps >= 50 ? 60 : 30;
+      }
       await saveProject(p);
-    }
-    sheets.length = 0;
-    for (let i = 1; i <= p.thumbs.sheets; i++) {
-      const img = new Image();
-      img.src = fileSrc(join(dir, `thumbs_${String(i).padStart(3, '0')}.jpg`));
-      img.onload = () => drawTimeline();
-      sheets.push(img);
-    }
-    wave = p.waveformReady ? await loadWaveform(p) : null;
-    if (!wave) {
-      setStatus('Membaca gelombang suara…', 0);
-      wave = await buildWaveform(p, (f) => setStatus('Membaca gelombang suara…', f));
+      renderLeft();
+      changed();
+      fitZoom();
+      setBusy('Membuat thumbnail…');
+      await buildThumbs(p, m);
       await saveProject(p);
+      await loadSheets(m);
+    } catch (e) {
+      toast((e as Error).message, 'error');
+    } finally {
+      setBusy('');
     }
-    setStatus('', -1);
-  } catch (e) {
-    setStatus('', -1);
-    toast(`Timeline tidak lengkap: ${(e as Error).message}`, 'error');
   }
-  drawTimeline();
 }
 
-function setStatus(text: string, frac: number) {
-  status = { text, frac };
-  const el = $('#status');
-  if (el) el.textContent = text ? (frac >= 0 ? `${text} ${Math.round(Math.min(1, frac) * 100)}%` : text) : '';
+async function loadSheets(m: MediaEntry) {
+  if (!m.thumbs.ready || !P) return;
+  const imgs: HTMLImageElement[] = [];
+  for (let i = 0; i < m.thumbs.sheets; i++) {
+    const img = new Image();
+    img.src = fileSrc(await thumbPath(P, m, i));
+    img.onload = () => { drawTimeline(); if (tab === 'media') renderLeft(); };
+    imgs.push(img);
+  }
+  sheets.set(m.id, imgs);
 }
 
-let video: HTMLVideoElement;
-let tl: HTMLCanvasElement;
+function setBusy(msg: string) {
+  busy = msg;
+  const el = $('#busy');
+  if (el) { el.textContent = msg; el.classList.toggle('show', !!msg); }
+}
+
+// ================= editor shell =================
+
 let preview: HTMLCanvasElement;
-let overlay: HTMLDivElement;
+let tlCanvas: HTMLCanvasElement;
 
 function renderEditor() {
-  const p = project!;
-  video = h('video', { class: 'player', src: fileSrc(p.playable), preload: 'auto' });
-  video.addEventListener('timeupdate', onTime);
-  video.addEventListener('seeked', () => { onTime(); drawPreview(); });
-  video.addEventListener('loadeddata', () => { drawPreview(); drawOverlay(); });
-  video.addEventListener('play', () => { renderTransport(); loopPreview(); });
-  video.addEventListener('pause', () => renderTransport());
-  video.addEventListener('error', () => toast('Video tidak bisa diputar di aplikasi. Format atau codec mungkin tidak didukung.', 'error'));
-  overlay = h('div', { class: 'overlay' });
-  tl = h('canvas', { class: 'timeline', 'aria-label': 'Timeline rekaman' });
-  preview = h('canvas', { class: 'preview', width: 270, height: 480, 'aria-label': 'Preview 9:16' });
-
+  const p = P!;
+  preview = h('canvas', { class: 'preview', width: 540, height: 960, 'aria-label': 'Preview video' });
+  tlCanvas = h('canvas', { class: 'tl-canvas', 'aria-label': 'Timeline' });
   app.replaceChildren(
     h('header', { class: 'bar' },
       h('button', { class: 'ghost', onclick: () => void renderHome() }, '← Proyek'),
@@ -242,676 +273,1121 @@ function renderEditor() {
         class: 'title-input', value: p.name, 'aria-label': 'Nama proyek',
         onchange: (e) => { p.name = (e.target as HTMLInputElement).value.trim() || p.name; void saveProject(p); },
       }),
-      h('span', { class: 'muted' }, `${p.width}×${p.height} · ${p.fps} fps · ${tc(p.durationMs)}`),
       h('div', { class: 'spacer' }),
-      h('span', { class: 'muted', id: 'status' }),
-      h('span', { class: 'muted', id: 'enc' }, settings.encoder ? ENCODER_LABEL[settings.encoder] : ''),
+      h('span', { id: 'busy', class: 'busy muted small' }),
+      h('button', { class: 'primary', id: 'export-btn', onclick: toggleExport }, 'Ekspor'),
     ),
-    h('div', { class: 'editor' },
-      h('aside', { class: 'clips' },
-        h('div', { class: 'panel-head' }, h('h2', {}, 'Klip'), h('span', { class: 'muted', id: 'clip-count' })),
-        h('ul', { id: 'clip-list' }),
-        h('div', { class: 'hint muted' },
-          h('div', {}, h('kbd', {}, 'I'), ' awal  ', h('kbd', {}, 'O'), ' akhir  ', h('kbd', {}, 'Enter'), ' buat klip'),
-          h('div', {}, h('kbd', {}, 'Spasi'), ' putar  ', h('kbd', {}, 'J'), h('kbd', {}, 'L'), ' ±5 dtk  ', h('kbd', {}, '←'), h('kbd', {}, '→'), ' ±1 dtk'),
+    h('div', { class: 'workspace' },
+      h('aside', { class: 'left' },
+        h('nav', { class: 'tabs', role: 'tablist' },
+          ...(['media', 'text', 'captions'] as LeftTab[]).map((k) => h('button', {
+            role: 'tab', class: tab === k ? 'on' : '', 'aria-selected': tab === k ? 'true' : 'false', 'data-tab': k,
+            onclick: () => { tab = k; renderLeft(); document.querySelectorAll('.tabs button').forEach((b) => b.classList.toggle('on', (b as HTMLElement).dataset.tab === k)); },
+          }, k === 'media' ? 'Media' : k === 'text' ? 'Teks' : 'Subtitle')),
+        ),
+        h('div', { class: 'left-body', id: 'left' }),
+      ),
+      h('section', { class: 'viewer' },
+        h('div', { class: 'stage', id: 'stage' }, preview),
+        h('div', { class: 'transport' },
+          h('span', { class: 'mono small', id: 'time' }),
+          h('button', { class: 'play', id: 'play', 'aria-label': 'Putar', onclick: togglePlay }, '▶'),
+          h('span', { class: 'muted small', id: 'fmt' }, `${tl().width}×${tl().height} · ${tl().fps} fps`),
         ),
       ),
-      h('section', { class: 'stage' },
-        h('div', { class: 'player-wrap' }, video, overlay),
-        h('div', { class: 'transport', id: 'transport' }),
-        h('div', { class: 'tl-wrap' }, tl),
-      ),
-      h('aside', { class: 'inspector', id: 'inspector' }),
+      h('aside', { class: 'right', id: 'inspector' }),
     ),
+    h('section', { class: 'timeline' },
+      h('div', { class: 'tl-tools' },
+        h('button', { class: 'tool', title: 'Urungkan (Ctrl+Z)', onclick: undo }, '↶'),
+        h('button', { class: 'tool', title: 'Ulangi (Ctrl+Y)', onclick: redo }, '↷'),
+        h('span', { class: 'sep' }),
+        h('button', { class: 'tool', title: 'Potong di playhead (Ctrl+B)', onclick: splitHere }, '✂ Split'),
+        h('button', { class: 'tool', title: 'Hapus (Delete)', onclick: deleteSelected }, '🗑 Hapus'),
+        h('div', { class: 'spacer' }),
+        h('button', { class: 'tool', title: 'Perkecil', onclick: () => zoomBy(0.8) }, '−'),
+        h('input', { type: 'range', id: 'zoom', min: 0, max: 100, 'aria-label': 'Zoom timeline', oninput: (e) => setZoomFromSlider(Number((e.target as HTMLInputElement).value)) }),
+        h('button', { class: 'tool', title: 'Perbesar', onclick: () => zoomBy(1.25) }, '+'),
+        h('button', { class: 'tool', title: 'Muat seluruh timeline', onclick: fitZoom }, 'Pas'),
+      ),
+      h('div', { class: 'tl-body', id: 'tl-body' }, tlCanvas),
+    ),
+    h('div', { class: 'export-pop', id: 'export-pop', hidden: true }),
   );
   setupTimeline();
-  setupOverlay();
-  new ResizeObserver(() => { sizeTimeline(); drawOverlay(); }).observe(app.querySelector('.stage')!);
-  renderClipList();
-  renderTransport();
+  setupPreviewDrag();
+  renderLeft();
   renderInspector();
-  setStatus(status.text, status.frac);
+  setBusy(busy);
+  requestAnimationFrame(() => { layoutPreview(); sizeTimeline(); renderFrame(); updateTime(); });
+  new ResizeObserver(() => { layoutPreview(); sizeTimeline(); }).observe($('#stage')!);
 }
 
-function onTime() {
-  drawTimeline();
-  const t = $('#time');
-  if (t) t.textContent = `${tc(video.currentTime * 1000, true)} / ${tc(project!.durationMs)}`;
-  // keep the playhead in view while playing
-  const ms = video.currentTime * 1000;
-  if (!video.paused && (ms > view.end || ms < view.start)) {
-    const span = view.end - view.start;
-    view.start = Math.max(0, ms - span * 0.1);
-    view.end = view.start + span;
-  }
+function layoutPreview() {
+  const stage = $('#stage');
+  if (!stage || !preview) return;
+  const r = stage.getBoundingClientRect();
+  const ar = tl().width / tl().height;
+  let hgt = r.height - 16, w = hgt * ar;
+  if (w > r.width - 16) { w = r.width - 16; hgt = w / ar; }
+  preview.style.width = `${Math.max(10, w)}px`;
+  preview.style.height = `${Math.max(10, hgt)}px`;
 }
 
-function seek(ms: number) {
-  if (!project) return;
-  video.currentTime = Math.max(0, Math.min(project.durationMs, ms)) / 1000;
+function updateTime() {
+  const el = $('#time');
+  if (el && P) el.textContent = `${tc(t, true)} / ${tc(timelineDuration(tl()), true)}`;
 }
 
-// ---------------- transport ----------------
+// ================= left panel =================
 
-function renderTransport() {
-  const el = $('#transport');
-  if (!el || !project) return;
-  el.replaceChildren(
-    h('button', { class: 'icon-btn', 'aria-label': 'Mundur 5 detik', onclick: () => seek(video.currentTime * 1000 - 5000) }, '«'),
-    h('button', { class: 'primary round', 'aria-label': video.paused ? 'Putar' : 'Jeda', onclick: togglePlay }, video.paused ? '▶' : '❚❚'),
-    h('button', { class: 'icon-btn', 'aria-label': 'Maju 5 detik', onclick: () => seek(video.currentTime * 1000 + 5000) }, '»'),
-    h('span', { id: 'time', class: 'mono' }, `${tc(video.currentTime * 1000, true)} / ${tc(project.durationMs)}`),
-    h('div', { class: 'spacer' }),
-    h('button', { class: 'secondary', onclick: () => { markIn = video.currentTime * 1000; renderTransport(); drawTimeline(); } },
-      'Awal ', h('span', { class: 'mono muted' }, markIn !== null ? tc(markIn) : '—')),
-    h('button', { class: 'secondary', onclick: () => { markOut = video.currentTime * 1000; renderTransport(); drawTimeline(); } },
-      'Akhir ', h('span', { class: 'mono muted' }, markOut !== null ? tc(markOut) : '—')),
-    h('button', { class: 'primary', onclick: addClipFromMarks, disabled: markIn === null }, '+ Buat klip'),
-    ...(project.audioTracks > 1 ? [h('select', {
-          'aria-label': 'Track audio', title: 'Track audio yang dipakai untuk ekspor',
-          onchange: (e) => void changeTrack(Number((e.target as HTMLSelectElement).value)),
-        }, ...Array.from({ length: project.audioTracks }, (_, i) => {
-          const o = h('option', { value: i }, `Audio ${i + 1}`);
-          if (i === project!.audioTrack) o.selected = true;
-          return o;
-        }))] : []),
-  );
+function renderLeft() {
+  const el = $('#left');
+  if (!el || !P) return;
+  if (tab === 'media') el.replaceChildren(...mediaPanel());
+  else if (tab === 'text') el.replaceChildren(...textPanel());
+  else el.replaceChildren(...captionPanel());
 }
 
-async function changeTrack(i: number) {
-  const p = project!;
-  p.audioTrack = i;
-  p.waveformReady = false;
-  await saveProject(p);
-  wave = null;
-  drawTimeline();
-  void loadCaches();
+function mediaPanel(): Node[] {
+  const p = P!;
+  return [
+    h('button', { class: 'secondary wide', onclick: () => void pickAndImport() }, '+ Tambah video'),
+    p.media.length ? h('div', { class: 'media-grid' },
+      ...p.media.map((m) => {
+        const thumb = h('div', { class: 'media-thumb' });
+        const img = sheets.get(m.id)?.[0];
+        if (img?.complete && img.naturalWidth) {
+          thumb.style.backgroundImage = `url("${img.src}")`;
+          thumb.style.backgroundSize = `${m.thumbs.tw * 10}px auto`;
+          thumb.style.width = `${m.thumbs.tw}px`;
+        }
+        return h('div', { class: 'media-item' },
+          thumb,
+          h('div', { class: 'media-meta' },
+            h('div', { class: 'media-name', title: m.path }, m.name),
+            h('div', { class: 'muted small mono' }, `${tc(m.durationMs)} · ${m.width}×${m.height}`),
+          ),
+          h('button', {
+            class: 'icon-btn add', title: 'Tambahkan ke akhir timeline', 'aria-label': `Tambahkan ${m.name} ke timeline`,
+            onclick: () => {
+              snapshot();
+              tl().clips.push({ id: uid(), mediaId: m.id, inMs: 0, outMs: m.durationMs, speed: 1, volume: 1, fit: m.width / m.height < 0.7 ? 'fill' : 'fit' });
+              changed();
+              fitZoom();
+            },
+          }, '+'),
+        );
+      }),
+    ) : h('p', { class: 'muted small pad' }, 'Tarik rekaman dari OBS ke sini, atau klik tombol di atas.'),
+  ];
 }
 
-function togglePlay() {
-  if (video.paused) void video.play(); else video.pause();
-}
+const TEXT_PRESETS: { name: string; style: Partial<TextStyle> }[] = [
+  { name: 'Putih tebal', style: { color: '#ffffff', outline: 6, box: false, font: 'Segoe UI', bold: true } },
+  { name: 'Kotak gelap', style: { color: '#ffffff', box: true, font: 'Segoe UI', bold: true } },
+  { name: 'Kuning', style: { color: '#ffd400', outline: 6, box: false, font: 'Bahnschrift', bold: true } },
+  { name: 'Impact', style: { color: '#ffffff', outline: 7, box: false, font: 'Impact', bold: false, size: 96 } },
+];
 
-function addClipFromMarks() {
-  const p = project!;
-  if (markIn === null) { toast('Tandai awal klip dulu (tombol I).'); return; }
-  let a = markIn;
-  let b = markOut ?? Math.min(p.durationMs, a + 30000);
-  if (b < a) [a, b] = [b, a];
-  if (b - a < 1000) { toast('Klip minimal 1 detik.'); return; }
-  const clip: Clip = {
-    id: uid(),
-    name: `Klip ${p.clips.length + 1}`,
-    inMs: Math.round(a),
-    outMs: Math.round(b),
-    title: '',
-    titlePos: 'top',
-    layout: structuredClone(p.defaultLayout),
-    exported: false,
-  };
-  p.clips.push(clip);
-  p.clips.sort((x, y) => x.inMs - y.inMs);
-  markIn = markOut = null;
-  selectedId = clip.id;
-  void saveProject(p);
-  renderClipList();
-  renderTransport();
-  renderInspector();
-  drawTimeline();
-  drawOverlay();
-  drawPreview();
-}
-
-// ---------------- clip list ----------------
-
-function renderClipList() {
-  const p = project!;
-  $('#clip-count')!.textContent = p.clips.length ? String(p.clips.length) : '';
-  const ul = $('#clip-list')!;
-  if (!p.clips.length) {
-    ul.replaceChildren(h('li', { class: 'empty muted' }, 'Belum ada klip. Putar rekaman, tekan I di awal momen dan O di akhirnya, lalu Enter.'));
-    return;
-  }
-  ul.replaceChildren(...p.clips.map((c) => h('li', { class: c.id === selectedId ? 'sel' : '' },
-    h('button', { class: 'clip-row', onclick: () => selectClip(c.id) },
-      h('div', { class: 'clip-name' }, c.name, c.exported ? h('span', { class: 'badge ok' }, 'diekspor') : null),
-      h('div', { class: 'muted mono' }, `${tc(c.inMs)} → ${tc(c.outMs)} · ${tc(c.outMs - c.inMs)}`),
+function textPanel(): Node[] {
+  return [
+    h('p', { class: 'muted small pad' }, 'Teks muncul di posisi playhead selama 3 detik. Geser di preview untuk memindahkan.'),
+    h('div', { class: 'preset-grid' },
+      ...TEXT_PRESETS.map((pr) => {
+        const st = { ...DEFAULT_TEXT, ...pr.style };
+        return h('button', {
+          class: 'preset', style: `font-family:"${st.font}";font-weight:${st.bold ? 700 : 400};color:${st.color};${st.box ? 'background:rgba(0,0,0,.6);' : `-webkit-text-stroke:1px #000;`}`,
+          onclick: () => addText(st),
+        }, pr.name);
+      }),
     ),
-  )));
+  ];
 }
 
-function selectClip(id: string | null) {
-  selectedId = id;
-  const c = selected();
-  if (c) {
-    seek(c.inMs);
-    const span = view.end - view.start;
-    if (c.inMs < view.start || c.outMs > view.end) {
-      view.start = Math.max(0, c.inMs - span * 0.2);
-      view.end = view.start + Math.max(span, (c.outMs - c.inMs) * 1.5);
-    }
+function addText(style: TextStyle) {
+  if (!P) return;
+  snapshot();
+  const total = Math.max(3000, timelineDuration(tl()));
+  const start = Math.round(clamp(t, 0, total - 500));
+  const item: TextItem = { id: uid(), startMs: start, endMs: Math.min(total, start + 3000), text: 'Ketik teks', x: 0.5, y: 0.2, style: { ...style } };
+  tl().texts.push(item);
+  sel = { kind: 'text', id: item.id };
+  changed();
+  setTimeout(() => { const ta = $<HTMLTextAreaElement>('#text-edit'); ta?.focus(); ta?.select(); }, 30);
+}
+
+let modelState: { base?: boolean; small?: boolean } = {};
+let downloading = -1;
+
+function captionPanel(): Node[] {
+  const p = P!;
+  const cap = tl().captions;
+  const size = settings.model;
+  if (modelState[size] === undefined) void modelReady(size).then((ok) => { modelState[size] = ok; if (tab === 'captions') renderLeft(); });
+  const ready = modelState[size];
+  const hasClips = tl().clips.length > 0;
+
+  const modelSeg = h('div', { class: 'seg' },
+    ...(['base', 'small'] as const).map((k) => h('button', {
+      class: settings.model === k ? 'on' : '', disabled: downloading >= 0,
+      onclick: async () => { settings.model = k; await saveSettings(settings); renderLeft(); },
+    }, MODELS[k].label)),
+  );
+
+  const action = ready === false
+    ? h('button', {
+        class: 'primary wide', disabled: downloading >= 0,
+        onclick: async () => {
+          downloading = 0;
+          renderLeft();
+          try {
+            await downloadModel(size, (f) => { downloading = f; const b = $('#dl-bar'); if (b) b.style.width = `${Math.round(f * 100)}%`; const l = $('#dl-label'); if (l) l.textContent = `Mengunduh model… ${Math.round(f * 100)}%`; });
+            modelState[size] = true;
+            toast('Model subtitle siap.');
+          } catch (e) {
+            toast((e as Error).message, 'error');
+          } finally {
+            downloading = -1;
+            renderLeft();
+          }
+        },
+      }, downloading >= 0 ? 'Mengunduh…' : `Unduh model (${MODELS[size].label.replace(/.*\(|\)/g, '')}, sekali saja)`)
+    : h('button', {
+        class: 'primary wide', disabled: !hasClips || !ready || !!busy,
+        onclick: () => void runCaptions(),
+      }, cap.lines.length ? 'Buat ulang subtitle' : 'Buat subtitle otomatis');
+
+  const st = cap.style;
+  const styleSet = (patch: Partial<TextStyle>) => { snapshot(); Object.assign(cap.style, patch); changed({ inspector: false }); };
+
+  return [
+    h('div', { class: 'block' },
+      h('div', { class: 'label' }, 'Bahasa: Indonesia · jalan offline di PC ini'),
+      modelSeg,
+      action,
+      downloading >= 0 ? h('div', {}, h('div', { class: 'bar-track' }, h('div', { class: 'bar-fill', id: 'dl-bar', style: `width:${Math.round(downloading * 100)}%` })), h('div', { class: 'muted small', id: 'dl-label' }, 'Mengunduh model…')) : null,
+      !hasClips ? h('div', { class: 'muted small' }, 'Tambahkan video ke timeline dulu.') : null,
+    ),
+    h('div', { class: 'block' },
+      h('div', { class: 'label' }, 'Gaya'),
+      h('div', { class: 'seg' },
+        h('button', { class: cap.mode === 'word' ? 'on' : '', onclick: () => { snapshot(); cap.mode = 'word'; changed({ left: true, inspector: false }); } }, 'Kata menyala'),
+        h('button', { class: cap.mode === 'line' ? 'on' : '', onclick: () => { snapshot(); cap.mode = 'line'; changed({ left: true, inspector: false }); } }, 'Per kalimat'),
+      ),
+      ...styleControls(st, styleSet, cap.mode === 'word'),
+      field('Posisi tinggi', h('input', { type: 'range', min: 8, max: 92, value: Math.round(cap.y * 100), oninput: (e) => { cap.y = Number((e.target as HTMLInputElement).value) / 100; void saveProject(p); renderFrame(); }, onchange: () => undefined })),
+    ),
+    cap.lines.length ? h('div', { class: 'block' },
+      h('div', { class: 'row-between' },
+        h('div', { class: 'label' }, `${cap.lines.length} baris`),
+        h('button', { class: 'danger-ghost small', onclick: async () => { if (await dialog().ask('Hapus semua subtitle?', { title: 'Subtitle', kind: 'warning' })) { snapshot(); cap.lines = []; sel = null; changed({ left: true }); } } }, 'Hapus semua'),
+      ),
+      h('ol', { class: 'lines' }, ...cap.lines.map((l) => h('li', { class: sel?.kind === 'line' && sel.id === l.id ? 'sel' : '' },
+        h('button', { class: 'line-time mono', onclick: () => { sel = { kind: 'line', id: l.id }; seek(l.startMs); renderInspector(); renderLeft(); } }, tc(l.startMs)),
+        h('input', {
+          value: l.words.map((w) => w.text).join(' '), 'aria-label': `Subtitle ${tc(l.startMs)}`,
+          onfocus: () => { sel = { kind: 'line', id: l.id }; seek(l.startMs); renderInspector(); },
+          onchange: (e) => { snapshot(); setLineText(l, (e.target as HTMLInputElement).value); changed({ inspector: false }); },
+        }),
+      ))),
+    ) : h('span'),
+  ];
+}
+
+function setLineText(l: CaptionLine, text: string) {
+  const parts = text.trim().split(/\s+/).filter(Boolean);
+  if (!parts.length) { tl().captions.lines = tl().captions.lines.filter((x) => x.id !== l.id); return; }
+  // keep the original word timing when the word count is unchanged, else spread evenly
+  if (parts.length === l.words.length) { l.words = l.words.map((w, i) => ({ ...w, text: parts[i] })); return; }
+  const d = (l.endMs - l.startMs) / parts.length;
+  l.words = parts.map((w, i): Word => ({ text: w, startMs: Math.round(l.startMs + i * d), endMs: Math.round(l.startMs + (i + 1) * d) }));
+}
+
+async function runCaptions() {
+  const p = P!;
+  if (tl().captions.lines.length && !(await dialog().ask('Subtitle yang sekarang akan diganti. Lanjut?', { title: 'Buat ulang subtitle', kind: 'warning' }))) return;
+  pause();
+  try {
+    const lines = await transcribe(p, settings.model, (msg, frac) => setBusy(`${msg}${frac >= 0 && !/%$/.test(msg) ? ` ${Math.round(frac * 100)}%` : ''}`));
+    snapshot();
+    tl().captions.lines = lines;
+    changed({ left: true });
+    toast(lines.length ? `${lines.length} baris subtitle dibuat. Klik barisnya untuk koreksi.` : 'Tidak ada ucapan yang terdengar.');
+  } catch (e) {
+    toast(`Subtitle gagal: ${(e as Error).message}`, 'error');
+  } finally {
+    setBusy('');
+    renderLeft();
   }
-  renderClipList();
-  renderInspector();
-  drawTimeline();
-  drawOverlay();
-  drawPreview();
 }
 
-// ---------------- inspector ----------------
+// ================= inspector =================
 
 function field(label: string, control: HTMLElement) {
   return h('label', { class: 'field' }, h('span', { class: 'label' }, label), control);
 }
 
+function styleControls(st: TextStyle, set: (p: Partial<TextStyle>) => void, showHighlight: boolean): HTMLElement[] {
+  return [
+    field('Font', h('select', { onchange: (e) => set({ font: (e.target as HTMLSelectElement).value }) },
+      ...FONTS.map((f) => { const o = h('option', { value: f, style: `font-family:"${f}"` }, f); o.selected = f === st.font; return o; }))),
+    field(`Ukuran ${st.size}`, h('input', { type: 'range', min: 32, max: 160, value: st.size, onchange: (e) => set({ size: Number((e.target as HTMLInputElement).value) }) })),
+    h('div', { class: 'row2' },
+      field('Warna', h('input', { type: 'color', value: st.color, onchange: (e) => set({ color: (e.target as HTMLInputElement).value }) })),
+      showHighlight ? field('Warna kata aktif', h('input', { type: 'color', value: st.highlight, onchange: (e) => set({ highlight: (e.target as HTMLInputElement).value }) })) : h('span'),
+    ),
+    h('div', { class: 'seg' },
+      h('button', { class: !st.box ? 'on' : '', onclick: () => set({ box: false }) }, 'Garis tepi'),
+      h('button', { class: st.box ? 'on' : '', onclick: () => set({ box: true }) }, 'Kotak gelap'),
+    ),
+    h('label', { class: 'check' }, h('input', { type: 'checkbox', checked: st.bold, onchange: (e) => set({ bold: (e.target as HTMLInputElement).checked }) }), 'Tebal'),
+  ];
+}
+
 function renderInspector() {
   const el = $('#inspector');
-  if (!el || !project) return;
-  const p = project;
-  const c = selected();
-  const l = editingLayout();
-  const isSplit = l.type === 'split';
+  if (!el || !P) return;
+  const clip = selected('clip');
+  const text = selected('text');
+  const line = selected('line');
 
-  const layoutSeg = h('div', { class: 'seg', role: 'group', 'aria-label': 'Layout' },
-    h('button', { class: !isSplit ? 'on' : '', onclick: () => { setLayout(withType(l, 'crop', p.width, p.height)); renderInspector(); } }, 'Crop'),
-    h('button', { class: isSplit ? 'on' : '', onclick: () => { setLayout(withType(l, 'split', p.width, p.height)); renderInspector(); } }, 'Facecam + game'),
-  );
-
-  const splitControls = isSplit ? h('div', { class: 'stack' },
-    field('Posisi facecam', h('div', { class: 'seg' },
-      h('button', { class: l.camPosition !== 'bottom' ? 'on' : '', onclick: () => { setLayout({ ...l, camPosition: 'top' }); renderInspector(); } }, 'Atas'),
-      h('button', { class: l.camPosition === 'bottom' ? 'on' : '', onclick: () => { setLayout({ ...l, camPosition: 'bottom' }); renderInspector(); } }, 'Bawah'),
-    )),
-    field(`Tinggi facecam ${Math.round(l.camRatio * 100)}%`, h('input', {
-      type: 'range', min: 25, max: 55, value: Math.round(l.camRatio * 100),
-      oninput: (e) => {
-        const v = Number((e.target as HTMLInputElement).value) / 100;
-        setLayout(normalize({ ...l, camRatio: v }, p.width, p.height));
-        const lab = (e.target as HTMLElement).previousElementSibling;
-        if (lab) lab.textContent = `Tinggi facecam ${Math.round(v * 100)}%`;
-      },
-    })),
-  ) : null;
-
-  const layoutBlock = h('div', { class: 'block' },
-    h('h3', {}, c ? 'Layout klip ini' : 'Layout default untuk klip baru'),
-    layoutSeg,
-    splitControls,
-    h('p', { class: 'muted small' }, isSplit
-      ? 'Geser kotak oranye (gameplay) dan kotak putih (facecam) langsung di video. Tarik pojok kanan bawah untuk ubah ukuran.'
-      : 'Geser kotak oranye di video untuk memilih bagian yang tampil.'),
-    c ? h('button', { class: 'ghost small', onclick: () => { p.defaultLayout = structuredClone(c.layout); void saveProject(p); toast('Dipakai sebagai layout default untuk klip baru.'); } }, 'Jadikan default') : null,
-  );
-
-  if (!c) {
+  if (clip) {
+    const m = mediaOf(clip.mediaId);
+    const set = (patch: Partial<VideoClip>, rerender = true) => { snapshot(); Object.assign(clip, patch); changed({ inspector: rerender }); };
     el.replaceChildren(
-      h('div', { class: 'preview-holder' }, preview),
-      layoutBlock,
-      h('div', { class: 'block muted small' }, 'Pilih atau buat klip untuk mengatur judul dan ekspor.'),
-      h('div', { class: 'block', id: 'queue' }),
+      h('h3', {}, 'Video'),
+      h('div', { class: 'muted small' }, m?.name ?? ''),
+      h('div', { class: 'muted small mono' }, `${tc(clip.inMs, true)} → ${tc(clip.outMs, true)} · ${tc(clipDuration(clip), true)}`),
+      h('div', { class: 'block' },
+        h('div', { class: 'label' }, 'Isi layar'),
+        h('div', { class: 'seg' },
+          h('button', { class: clip.fit === 'fill' ? 'on' : '', onclick: () => set({ fit: 'fill' }) }, 'Penuh'),
+          h('button', { class: clip.fit === 'fit' ? 'on' : '', onclick: () => set({ fit: 'fit' }) }, 'Utuh (bar hitam)'),
+        ),
+      ),
+      h('div', { class: 'block' },
+        field(`Kecepatan ${clip.speed}×`, h('input', {
+          type: 'range', min: 0, max: 8, step: 1, value: [0.25, 0.5, 0.75, 1, 1.25, 1.5, 2, 3, 4].indexOf(clip.speed),
+          oninput: (e) => { const v = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 2, 3, 4][Number((e.target as HTMLInputElement).value)]; ((e.target as HTMLElement).previousElementSibling as HTMLElement).textContent = `Kecepatan ${v}×`; },
+          onchange: (e) => set({ speed: [0.25, 0.5, 0.75, 1, 1.25, 1.5, 2, 3, 4][Number((e.target as HTMLInputElement).value)] }),
+        })),
+        field(`Volume ${Math.round(clip.volume * 100)}%`, h('input', {
+          type: 'range', min: 0, max: 200, step: 5, value: Math.round(clip.volume * 100),
+          oninput: (e) => { ((e.target as HTMLElement).previousElementSibling as HTMLElement).textContent = `Volume ${(e.target as HTMLInputElement).value}%`; },
+          onchange: (e) => set({ volume: Number((e.target as HTMLInputElement).value) / 100 }),
+        })),
+      ),
+      h('div', { class: 'block' },
+        h('button', { class: 'secondary wide', onclick: splitHere }, '✂ Split di playhead'),
+        h('button', { class: 'danger-ghost wide', onclick: deleteSelected }, 'Hapus potongan'),
+      ),
     );
-    renderQueue();
-    drawPreview();
     return;
   }
 
-  const dur = c.outMs - c.inMs;
-  const limit = PRESET_LIMIT_SEC[preset] * 1000;
-  const timeInput = (key: 'inMs' | 'outMs') => h('input', {
-    class: 'mono', value: tc(c[key], true), 'aria-label': key === 'inMs' ? 'Waktu awal' : 'Waktu akhir',
-    onchange: (e) => {
-      const v = parseTc((e.target as HTMLInputElement).value);
-      if (v === null || v < 0 || v > p.durationMs) { toast('Format waktu: menit:detik, misal 12:34.5'); renderInspector(); return; }
-      c[key] = v;
-      if (c.outMs - c.inMs < 1000) { toast('Klip minimal 1 detik.'); c[key] = key === 'inMs' ? c.outMs - 1000 : c.inMs + 1000; }
-      void saveProject(p); renderInspector(); renderClipList(); drawTimeline();
-    },
-  });
+  if (text) {
+    const set = (patch: Partial<TextStyle>) => { snapshot(); Object.assign(text.style, patch); changed(); };
+    el.replaceChildren(
+      h('h3', {}, 'Teks'),
+      h('textarea', {
+        id: 'text-edit', rows: 3, 'aria-label': 'Isi teks', value: text.text,
+        onfocus: () => snapshot(),
+        oninput: (e) => { text.text = (e.target as HTMLTextAreaElement).value; void saveProject(P!); renderFrame(); drawTimeline(); },
+      }),
+      /\p{Extended_Pictographic}/u.test(text.text) ? h('div', { class: 'muted small' }, 'Emoji belum ikut di video hasil ekspor.') : h('span'),
+      h('div', { class: 'block' }, ...styleControls(text.style, set, false)),
+      h('div', { class: 'block' },
+        h('div', { class: 'muted small mono' }, `${tc(text.startMs, true)} → ${tc(text.endMs, true)}`),
+        h('div', { class: 'muted small' }, 'Atur durasi dengan menarik ujung kotak teks di timeline.'),
+        h('button', { class: 'danger-ghost wide', onclick: deleteSelected }, 'Hapus teks'),
+      ),
+    );
+    return;
+  }
+
+  if (line) {
+    el.replaceChildren(
+      h('h3', {}, 'Baris subtitle'),
+      h('div', { class: 'muted small mono' }, `${tc(line.startMs, true)} → ${tc(line.endMs, true)}`),
+      h('input', {
+        value: line.words.map((w) => w.text).join(' '), 'aria-label': 'Teks subtitle',
+        onchange: (e) => { snapshot(); setLineText(line, (e.target as HTMLInputElement).value); changed({ left: true }); },
+      }),
+      h('div', { class: 'muted small' }, 'Gaya semua subtitle diatur di tab Subtitle sebelah kiri.'),
+      h('button', { class: 'danger-ghost wide', onclick: deleteSelected }, 'Hapus baris ini'),
+    );
+    return;
+  }
 
   el.replaceChildren(
-    h('div', { class: 'preview-holder' }, preview),
-    h('div', { class: 'block' },
-      field('Nama klip', h('input', { value: c.name, onchange: (e) => { c.name = (e.target as HTMLInputElement).value.trim() || c.name; void saveProject(p); renderClipList(); } })),
-      h('div', { class: 'row2' },
-        field('Awal', timeInput('inMs')),
-        field('Akhir', timeInput('outMs')),
-      ),
-      h('div', { class: 'row2' },
-        h('button', { class: 'ghost small', onclick: () => { c.inMs = Math.min(Math.round(video.currentTime * 1000), c.outMs - 1000); void saveProject(p); renderInspector(); renderClipList(); drawTimeline(); } }, 'Awal = posisi sekarang'),
-        h('button', { class: 'ghost small', onclick: () => { c.outMs = Math.max(Math.round(video.currentTime * 1000), c.inMs + 1000); void saveProject(p); renderInspector(); renderClipList(); drawTimeline(); } }, 'Akhir = posisi sekarang'),
-      ),
-      h('div', { class: dur > limit ? 'warn small' : 'muted small' },
-        `Durasi ${tc(dur, true)}${dur > limit ? ` — lebih dari batas ${preset === 'shorts' ? 'YouTube Shorts (3 menit)' : 'TikTok (10 menit)'}` : ''}`),
+    h('h3', {}, 'Proyek'),
+    field('Frame rate', h('div', { class: 'seg' },
+      ...([30, 60] as const).map((f) => h('button', { class: tl().fps === f ? 'on' : '', onclick: () => { snapshot(); tl().fps = f; changed(); const fm = $('#fmt'); if (fm) fm.textContent = `${tl().width}×${tl().height} · ${f} fps`; } }, `${f} fps`)),
+    )),
+    h('div', { class: 'muted small' }, `Durasi ${tc(timelineDuration(tl()), true)} · ${tl().clips.length} potongan · ${tl().texts.length} teks · ${tl().captions.lines.length} baris subtitle`),
+    h('div', { class: 'block muted small' },
+      h('div', {}, h('kbd', {}, 'Spasi'), ' putar / jeda'),
+      h('div', {}, h('kbd', {}, 'Ctrl'), h('kbd', {}, 'B'), ' split di playhead'),
+      h('div', {}, h('kbd', {}, 'Delete'), ' hapus yang dipilih'),
+      h('div', {}, h('kbd', {}, 'Ctrl'), h('kbd', {}, 'Z'), ' urungkan'),
+      h('div', {}, h('kbd', {}, '←'), h('kbd', {}, '→'), ' 1 frame · ', h('kbd', {}, 'Shift'), ' 1 detik'),
+      h('div', {}, h('kbd', {}, 'Ctrl'), ' + scroll di timeline: zoom'),
     ),
-    layoutBlock,
-    h('div', { class: 'block' },
-      h('h3', {}, 'Judul'),
-      h('textarea', {
-        rows: 2, placeholder: 'Tulis hook di sini (opsional)', 'aria-label': 'Judul di video',
-        oninput: (e) => { c.title = (e.target as HTMLTextAreaElement).value; void saveProject(p); drawPreview(); },
-      }, c.title),
-      stripEmoji(c.title) !== c.title.trim() && c.title ? h('div', { class: 'muted small' }, 'Emoji tidak ikut di video hasil ekspor.') : null,
-      h('div', { class: 'seg' },
-        ...(['top', 'center', 'bottom'] as const).map((pos) => h('button', {
-          class: c.titlePos === pos ? 'on' : '',
-          onclick: () => { c.titlePos = pos; void saveProject(p); renderInspector(); drawPreview(); },
-        }, pos === 'top' ? 'Atas' : pos === 'center' ? 'Tengah' : 'Bawah')),
-      ),
-    ),
-    h('div', { class: 'block' },
-      h('h3', {}, 'Ekspor'),
-      h('div', { class: 'seg' },
-        h('button', { class: preset === 'tiktok' ? 'on' : '', onclick: () => { preset = 'tiktok'; renderInspector(); } }, 'TikTok'),
-        h('button', { class: preset === 'shorts' ? 'on' : '', onclick: () => { preset = 'shorts'; renderInspector(); } }, 'YouTube Shorts'),
-      ),
-      h('div', { class: 'muted small' }, `1080×1920 · ${exportFps()} fps · MP4`),
-      h('button', { class: 'primary wide', onclick: () => void exportClips([c]) }, 'Ekspor klip ini'),
-      p.clips.length > 1 ? h('button', { class: 'secondary wide', onclick: () => void exportClips(p.clips) }, `Ekspor semua (${p.clips.length})`) : null,
-      h('button', { class: 'ghost small', onclick: () => void chooseOutDir() }, `Simpan ke: ${settings.outDir}`),
-      h('button', {
-        class: 'danger-ghost small',
-        onclick: async () => {
-          if (!(await dialog().ask(`Hapus "${c.name}"?`, { title: 'Hapus klip', kind: 'warning' }))) return;
-          p.clips = p.clips.filter((x) => x.id !== c.id);
-          void saveProject(p);
-          selectClip(null);
-        },
-      }, 'Hapus klip'),
-    ),
-    h('div', { class: 'block', id: 'queue' }),
   );
-  renderQueue();
-  drawPreview();
 }
 
-function exportFps(): 30 | 60 {
-  if (settings.fps) return settings.fps;
-  return project && project.fps >= 50 ? 60 : 30;
+// ================= editing actions =================
+
+function splitHere() {
+  if (!P) return;
+  const text = selected('text');
+  if (text && t > text.startMs + 100 && t < text.endMs - 100) {
+    snapshot();
+    const b: TextItem = { ...structuredClone(text), id: uid(), startMs: t };
+    text.endMs = t;
+    tl().texts.push(b);
+    changed();
+    return;
+  }
+  const next = splitAt(tl().clips, t, uid());
+  if (!next) { toast('Geser playhead ke tengah potongan video untuk split.'); return; }
+  snapshot();
+  tl().clips = next;
+  const loc = locate(next, t + 1);
+  if (loc) sel = { kind: 'clip', id: next[loc.index].id };
+  changed();
 }
 
-async function chooseOutDir() {
-  const d = await dialog().open({ directory: true, title: 'Folder hasil ekspor' });
-  if (typeof d === 'string') { settings.outDir = d; await saveSettings(settings); renderInspector(); }
+function deleteSelected() {
+  if (!P || !sel) { toast('Pilih dulu potongan, teks, atau subtitle di timeline.'); return; }
+  snapshot();
+  if (sel.kind === 'clip') tl().clips = tl().clips.filter((c) => c.id !== sel!.id);
+  else if (sel.kind === 'text') tl().texts = tl().texts.filter((x) => x.id !== sel!.id);
+  else tl().captions.lines = tl().captions.lines.filter((x) => x.id !== sel!.id);
+  sel = null;
+  changed({ left: tab === 'captions' });
 }
 
-async function exportClips(clips: Clip[]) {
-  const p = project!;
-  const enc = settings.encoder || (await detectEncoder());
-  const over = clips.filter((c) => c.outMs - c.inMs > PRESET_LIMIT_SEC[preset] * 1000);
-  if (over.length && !(await dialog().ask(`${over.length} klip lebih panjang dari batas ${preset === 'shorts' ? 'YouTube Shorts' : 'TikTok'}. Tetap ekspor?`, { title: 'Durasi', kind: 'warning' }))) return;
-  for (const c of clips) {
-    try {
-      await enqueueExport(p, c, { outDir: settings.outDir, encoder: enc, fps: exportFps() });
-    } catch (e) {
-      toast(`${c.name}: ${(e as Error).message}`, 'error');
+// ================= preview engine =================
+
+function videoFor(mediaId: string): HTMLVideoElement | null {
+  let v = videos.get(mediaId);
+  if (v) return v;
+  const m = mediaOf(mediaId);
+  if (!m) return null;
+  v = h('video', { preload: 'auto', playsinline: true });
+  v.src = fileSrc(m.playable);
+  v.addEventListener('seeked', () => { if (!playing) renderFrame(); });
+  v.addEventListener('loadeddata', () => { if (!playing) { syncVideo(); renderFrame(); } });
+  v.addEventListener('error', () => toast(`Video ${m.name} tidak bisa diputar di preview (codec belum didukung). Ekspor tetap bisa.`, 'error'));
+  videos.set(mediaId, v);
+  return v;
+}
+
+let activeVideo: HTMLVideoElement | null = null;
+let activeIndex = -1;
+
+/** Points the right <video> at the right source time for the playhead. */
+function syncVideo() {
+  if (!P) return;
+  const loc = locate(tl().clips, t);
+  if (!loc) { activeVideo = null; activeIndex = -1; return; }
+  const c = tl().clips[loc.index];
+  const v = videoFor(c.mediaId);
+  if (!v) return;
+  if (activeVideo && activeVideo !== v) activeVideo.pause();
+  activeVideo = v;
+  activeIndex = loc.index;
+  v.playbackRate = c.speed;
+  v.volume = clamp(c.volume, 0, 1);
+  if (Math.abs(v.currentTime * 1000 - loc.sourceMs) > 40) v.currentTime = loc.sourceMs / 1000;
+}
+
+function seek(ms: number) {
+  if (!P) return;
+  t = clamp(ms, 0, Math.max(0, timelineDuration(tl()) - 1));
+  syncVideo();
+  if (playing && activeVideo) void activeVideo.play().catch(() => undefined);
+  renderFrame();
+  drawTimeline();
+  updateTime();
+}
+
+function togglePlay() { if (playing) pause(); else play(); }
+
+function play() {
+  if (!P || !tl().clips.length) return;
+  if (t >= timelineDuration(tl()) - 50) t = 0;
+  playing = true;
+  syncVideo();
+  void activeVideo?.play().catch(() => undefined);
+  const btn = $('#play');
+  if (btn) { btn.textContent = '❚❚'; btn.setAttribute('aria-label', 'Jeda'); }
+  requestAnimationFrame(tick);
+}
+
+function pause() {
+  playing = false;
+  activeVideo?.pause();
+  const btn = $('#play');
+  if (btn) { btn.textContent = '▶'; btn.setAttribute('aria-label', 'Putar'); }
+}
+
+function tick() {
+  if (!playing || !P) return;
+  const clips = tl().clips;
+  const c = clips[activeIndex];
+  const v = activeVideo;
+  if (c && v) {
+    const starts = clipStarts(clips);
+    const src = v.currentTime * 1000;
+    t = starts[activeIndex] + (src - c.inMs) / c.speed;
+    if (src >= c.outMs - 20 || v.ended) {
+      if (activeIndex + 1 < clips.length) {
+        t = starts[activeIndex + 1];
+        syncVideo();
+        void activeVideo?.play().catch(() => undefined);
+      } else {
+        t = timelineDuration(tl());
+        pause();
+      }
     }
   }
+  // keep the playhead in view
+  const tb = $('#tl-body');
+  if (tb) {
+    const x = HEAD_W + (t / 1000) * pxPerSec - scrollX;
+    if (x > tb.clientWidth - 40) scrollX += tb.clientWidth * 0.6;
+  }
+  renderFrame();
+  drawTimeline();
+  updateTime();
+  requestAnimationFrame(tick);
+}
+
+interface Box { kind: 'text' | 'captions'; id: string; x: number; y: number; w: number; h: number }
+let boxes: Box[] = [];
+
+function renderFrame() {
+  if (!preview || !P) return;
+  const ctx = preview.getContext('2d');
+  if (!ctx) return;
+  const W = preview.width, H = preview.height;
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0, 0, W, H);
+  boxes = [];
+  const loc = locate(tl().clips, t);
+  if (loc) {
+    const c = tl().clips[loc.index];
+    const v = videos.get(c.mediaId) ?? videoFor(c.mediaId);
+    if (v && v.readyState >= 2 && v.videoWidth) {
+      const vw = v.videoWidth, vh = v.videoHeight;
+      const s = c.fit === 'fill' ? Math.max(W / vw, H / vh) : Math.min(W / vw, H / vh);
+      const dw = vw * s, dh = vh * s;
+      ctx.drawImage(v, (W - dw) / 2, (H - dh) / 2, dw, dh);
+    }
+  } else {
+    ctx.fillStyle = '#6b6b6b';
+    ctx.font = '500 18px "Segoe UI", sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('Tambahkan video dari tab Media', W / 2, H / 2);
+  }
+  const k = W / tl().width;
+  const cap = tl().captions;
+  const line = cap.lines.find((l) => t >= l.startMs && t < l.endMs);
+  if (line) {
+    let active = -1;
+    if (cap.mode === 'word') line.words.forEach((w, i) => { if (t >= w.startMs) active = i; });
+    const segs = line.words.map((w, i) => ({ text: w.text, color: i === active ? cap.style.highlight : cap.style.color }));
+    const b = drawText(ctx, wrapSegs(ctx, segs, cap.style, k, W * 0.9), W / 2, cap.y * H, cap.style, k);
+    boxes.push({ kind: 'captions', id: line.id, ...b });
+  }
+  for (const x of tl().texts) {
+    if (t < x.startMs || t >= x.endMs || !x.text.trim()) continue;
+    const lines = x.text.split('\n').flatMap((l) => wrapSegs(ctx, l.split(/\s+/).filter(Boolean).map((w) => ({ text: w, color: x.style.color })), x.style, k, W * 0.92));
+    const b = drawText(ctx, lines, x.x * W, x.y * H, x.style, k);
+    boxes.push({ kind: 'text', id: x.id, ...b });
+    if (sel?.kind === 'text' && sel.id === x.id) {
+      ctx.strokeStyle = '#ff6a1a';
+      ctx.lineWidth = 2;
+      ctx.setLineDash([6, 4]);
+      ctx.strokeRect(b.x - 6, b.y - 6, b.w + 12, b.h + 12);
+      ctx.setLineDash([]);
+    }
+  }
+}
+
+type Seg = { text: string; color: string };
+const fontOf = (st: TextStyle, k: number) => `${st.bold ? 700 : 400} ${st.size * k}px "${st.font}", "Segoe UI", sans-serif`;
+
+function wrapSegs(ctx: CanvasRenderingContext2D, segs: Seg[], st: TextStyle, k: number, maxW: number): Seg[][] {
+  ctx.font = fontOf(st, k);
+  const space = ctx.measureText(' ').width;
+  const lines: Seg[][] = [];
+  let cur: Seg[] = [], w = 0;
+  for (const s of segs) {
+    const sw = ctx.measureText(s.text).width;
+    if (cur.length && w + space + sw > maxW) { lines.push(cur); cur = []; w = 0; }
+    w += (cur.length ? space : 0) + sw;
+    cur.push(s);
+  }
+  if (cur.length) lines.push(cur);
+  return lines;
+}
+
+function drawText(ctx: CanvasRenderingContext2D, lines: Seg[][], cx: number, cy: number, st: TextStyle, k: number) {
+  ctx.font = fontOf(st, k);
+  ctx.textBaseline = 'middle';
+  ctx.textAlign = 'left';
+  const space = ctx.measureText(' ').width;
+  const lh = st.size * k * 1.18;
+  const widths = lines.map((l) => l.reduce((s, x, i) => s + ctx.measureText(x.text).width + (i ? space : 0), 0));
+  const totalH = lh * lines.length;
+  const top = cy - totalH / 2;
+  const maxW = Math.max(0, ...widths);
+  lines.forEach((l, li) => {
+    let x = cx - widths[li] / 2;
+    const y = top + lh * (li + 0.5);
+    if (st.box) {
+      const pad = 18 * k;
+      ctx.fillStyle = 'rgba(0,0,0,.62)';
+      ctx.fillRect(x - pad, y - lh / 2 - pad / 3, widths[li] + pad * 2, lh + (pad * 2) / 3);
+    }
+    for (const s of l) {
+      if (!st.box && st.outline > 0) {
+        ctx.lineJoin = 'round';
+        ctx.lineWidth = st.outline * 2 * k;
+        ctx.strokeStyle = '#000';
+        ctx.strokeText(s.text, x, y);
+      }
+      ctx.fillStyle = s.color;
+      ctx.fillText(s.text, x, y);
+      x += ctx.measureText(s.text).width + space;
+    }
+  });
+  return { x: cx - maxW / 2, y: top, w: maxW, h: totalH };
+}
+
+/** Drag text (or the captions) around on the preview. */
+function setupPreviewDrag() {
+  let drag: { box: Box; sx: number; sy: number; ox: number; oy: number } | null = null;
+  const toCanvas = (e: PointerEvent) => {
+    const r = preview.getBoundingClientRect();
+    return { x: ((e.clientX - r.left) / r.width) * preview.width, y: ((e.clientY - r.top) / r.height) * preview.height };
+  };
+  preview.addEventListener('pointerdown', (e) => {
+    const p = toCanvas(e);
+    const hit = [...boxes].reverse().find((b) => p.x >= b.x - 10 && p.x <= b.x + b.w + 10 && p.y >= b.y - 10 && p.y <= b.y + b.h + 10);
+    if (!hit) { if (sel?.kind === 'text') { sel = null; renderInspector(); renderFrame(); drawTimeline(); } return; }
+    snapshot();
+    if (hit.kind === 'text') {
+      const x = tl().texts.find((q) => q.id === hit.id)!;
+      sel = { kind: 'text', id: x.id };
+      drag = { box: hit, sx: p.x, sy: p.y, ox: x.x, oy: x.y };
+    } else {
+      sel = { kind: 'line', id: hit.id };
+      drag = { box: hit, sx: p.x, sy: p.y, ox: 0.5, oy: tl().captions.y };
+    }
+    renderInspector();
+    drawTimeline();
+    preview.setPointerCapture(e.pointerId);
+  });
+  preview.addEventListener('pointermove', (e) => {
+    const p = toCanvas(e);
+    if (!drag) {
+      preview.style.cursor = boxes.some((b) => p.x >= b.x - 10 && p.x <= b.x + b.w + 10 && p.y >= b.y - 10 && p.y <= b.y + b.h + 10) ? 'move' : 'default';
+      return;
+    }
+    const dx = (p.x - drag.sx) / preview.width, dy = (p.y - drag.sy) / preview.height;
+    if (drag.box.kind === 'text') {
+      const x = tl().texts.find((q) => q.id === drag!.box.id);
+      if (x) { x.x = snap(clamp(drag.ox + dx, 0.05, 0.95), 0.5); x.y = clamp(drag.oy + dy, 0.03, 0.97); }
+    } else {
+      tl().captions.y = clamp(drag.oy + dy, 0.08, 0.92);
+    }
+    renderFrame();
+  });
+  const end = () => { if (drag) { void saveProject(P!); drag = null; } };
+  preview.addEventListener('pointerup', end);
+  preview.addEventListener('pointercancel', end);
+}
+const snap = (v: number, to: number) => (Math.abs(v - to) < 0.015 ? to : v);
+
+// ================= timeline =================
+
+const HEAD_W = 0;
+const RULER = 24, ROW_TEXT = 26, ROW_CAP = 26, ROW_MAIN = 64, GAP = 6;
+
+interface Lane { kind: 'text' | 'captions' | 'main'; y: number; h: number }
+let lanes: Lane[] = [];
+let textRows = new Map<string, number>();
+
+function computeLanes() {
+  textRows = new Map();
+  const rowsEnd: number[] = [];
+  for (const x of [...tl().texts].sort((a, b) => a.startMs - b.startMs)) {
+    let r = rowsEnd.findIndex((e) => e <= x.startMs);
+    if (r < 0) { r = rowsEnd.length; rowsEnd.push(0); }
+    rowsEnd[r] = x.endMs;
+    textRows.set(x.id, r);
+  }
+  const nText = Math.max(1, rowsEnd.length);
+  let y = RULER + GAP;
+  lanes = [];
+  for (let i = 0; i < nText; i++) { lanes.push({ kind: 'text', y, h: ROW_TEXT }); y += ROW_TEXT + 3; }
+  y += GAP - 3;
+  lanes.push({ kind: 'captions', y, h: ROW_CAP }); y += ROW_CAP + GAP;
+  lanes.push({ kind: 'main', y, h: ROW_MAIN }); y += ROW_MAIN + GAP;
+  return y;
+}
+
+function sizeTimeline() {
+  if (!tlCanvas || !P) return;
+  const body = $('#tl-body')!;
+  const dpr = window.devicePixelRatio || 1;
+  const hgt = Math.max(computeLanes(), body.clientHeight);
+  tlCanvas.width = Math.floor(body.clientWidth * dpr);
+  tlCanvas.height = Math.floor(hgt * dpr);
+  tlCanvas.style.width = `${body.clientWidth}px`;
+  tlCanvas.style.height = `${hgt}px`;
+  drawTimeline();
+}
+
+const msToX = (ms: number) => HEAD_W + (ms / 1000) * pxPerSec - scrollX;
+const xToMs = (x: number) => ((x - HEAD_W + scrollX) / pxPerSec) * 1000;
+
+function zoomBy(f: number, anchorX?: number) {
+  const body = $('#tl-body');
+  const ax = anchorX ?? msToX(t);
+  const at = xToMs(ax);
+  pxPerSec = clamp(pxPerSec * f, 2, 600);
+  scrollX = Math.max(0, (at / 1000) * pxPerSec - (ax - HEAD_W));
+  const z = $<HTMLInputElement>('#zoom');
+  if (z) z.value = String(Math.round((Math.log(pxPerSec / 2) / Math.log(300)) * 100));
+  if (body) drawTimeline();
+}
+function setZoomFromSlider(v: number) { zoomBy((2 * Math.pow(300, v / 100)) / pxPerSec); }
+function fitZoom() {
+  const body = $('#tl-body');
+  if (!body || !P) return;
+  const total = Math.max(5000, timelineDuration(tl()));
+  pxPerSec = clamp(((body.clientWidth - 60) / total) * 1000, 2, 600);
+  scrollX = 0;
+  const z = $<HTMLInputElement>('#zoom');
+  if (z) z.value = String(Math.round((Math.log(pxPerSec / 2) / Math.log(300)) * 100));
+  sizeTimeline();
+}
+
+function niceStep() {
+  const target = 90 / pxPerSec * 1000;
+  return [100, 200, 500, 1000, 2000, 5000, 10000, 15000, 30000, 60000, 120000, 300000, 600000].find((s) => s >= target) ?? 600000;
+}
+
+function laneOf(kind: Lane['kind'], row = 0) {
+  return lanes.filter((l) => l.kind === kind)[row] ?? lanes.find((l) => l.kind === kind)!;
+}
+
+function roundRect(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, hh: number, r: number) {
+  ctx.beginPath();
+  ctx.roundRect(x, y, Math.max(0, w), hh, Math.min(r, w / 2));
+}
+
+function drawTimeline() {
+  if (!tlCanvas || !P) return;
+  const ctx = tlCanvas.getContext('2d');
+  if (!ctx) return;
+  const dpr = window.devicePixelRatio || 1;
+  const W = tlCanvas.width / dpr, H = tlCanvas.height / dpr;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.fillStyle = '#161616';
+  ctx.fillRect(0, 0, W, H);
+  computeLanes();
+
+  // lane backgrounds
+  for (const l of lanes) {
+    ctx.fillStyle = l.kind === 'main' ? '#1c1c1c' : '#191919';
+    ctx.fillRect(0, l.y, W, l.h);
+  }
+  ctx.fillStyle = '#6b6b6b';
+  ctx.font = '500 10px "Segoe UI", sans-serif';
+  ctx.textBaseline = 'middle';
+  const lt = laneOf('text'), lc = laneOf('captions');
+  if (!tl().texts.length) ctx.fillText('TEKS', 8, lt.y + lt.h / 2);
+  if (!tl().captions.lines.length) ctx.fillText('SUBTITLE', 8, lc.y + lc.h / 2);
+
+  // ruler
+  ctx.fillStyle = '#121212';
+  ctx.fillRect(0, 0, W, RULER);
+  const step = niceStep();
+  ctx.font = '10px "JetBrains Mono", Consolas, monospace';
+  for (let ms = Math.floor(xToMs(0) / step) * step; msToX(ms) < W; ms += step) {
+    if (ms < 0) continue;
+    const x = msToX(ms);
+    ctx.fillStyle = '#3a3a3a';
+    ctx.fillRect(x, RULER - 7, 1, 7);
+    ctx.fillStyle = '#a3a3a3';
+    ctx.fillText(step < 1000 ? tc(ms, true) : tc(ms), x + 3, 9);
+    for (let s = 1; s < 5; s++) { ctx.fillStyle = '#2a2a2a'; ctx.fillRect(x + (s * step * pxPerSec) / 5000, RULER - 3, 1, 3); }
+  }
+
+  // main track: clips with filmstrip
+  const lm = laneOf('main');
+  const starts = clipStarts(tl().clips);
+  tl().clips.forEach((c, i) => {
+    const x = msToX(starts[i]), w = (clipDuration(c) / 1000) * pxPerSec;
+    if (x + w < 0 || x > W) return;
+    const isSel = sel?.kind === 'clip' && sel.id === c.id;
+    ctx.save();
+    roundRect(ctx, x + 1, lm.y, w - 2, lm.h, 5);
+    ctx.clip();
+    ctx.fillStyle = '#2b2b2b';
+    ctx.fillRect(x, lm.y, w, lm.h);
+    const m = mediaOf(c.mediaId);
+    const imgs = m ? sheets.get(m.id) : undefined;
+    if (m && imgs?.length) {
+      const fw = m.thumbs.tw * (lm.h / m.thumbs.th);
+      for (let fx = Math.max(x, -fw); fx < Math.min(x + w, W); fx += fw) {
+        const src = c.inMs + ((fx - x + fw / 2) / pxPerSec) * 1000 * c.speed;
+        const idx = Math.floor(src / 1000 / m.thumbs.everySec);
+        const sheet = imgs[Math.floor(idx / 100)];
+        if (!sheet?.complete || !sheet.naturalWidth) continue;
+        const kk = idx % 100;
+        ctx.drawImage(sheet, (kk % 10) * m.thumbs.tw, Math.floor(kk / 10) * m.thumbs.th, m.thumbs.tw, m.thumbs.th, fx, lm.y, fw, lm.h);
+      }
+    }
+    ctx.fillStyle = 'rgba(0,0,0,.45)';
+    ctx.fillRect(x, lm.y + lm.h - 16, w, 16);
+    ctx.fillStyle = '#ededed';
+    ctx.font = '500 10px "Segoe UI", sans-serif';
+    const label = `${c.speed !== 1 ? `${c.speed}× · ` : ''}${tc(clipDuration(c), true)}`;
+    ctx.fillText(label, x + 6, lm.y + lm.h - 8);
+    ctx.restore();
+    ctx.lineWidth = isSel ? 2 : 1;
+    ctx.strokeStyle = isSel ? '#ffffff' : '#000';
+    roundRect(ctx, x + 1, lm.y, w - 2, lm.h, 5);
+    ctx.stroke();
+    if (isSel) {
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(x + 1, lm.y + lm.h / 2 - 10, 4, 20);
+      ctx.fillRect(x + w - 5, lm.y + lm.h / 2 - 10, 4, 20);
+    }
+  });
+
+  // captions
+  for (const l of tl().captions.lines) {
+    const x = msToX(l.startMs), w = ((l.endMs - l.startMs) / 1000) * pxPerSec;
+    if (x + w < 0 || x > W) continue;
+    const isSel = sel?.kind === 'line' && sel.id === l.id;
+    roundRect(ctx, x + 0.5, lc.y, w - 1, lc.h, 4);
+    ctx.fillStyle = isSel ? '#ffd400' : '#3d3520';
+    ctx.fill();
+    if (w > 24) {
+      ctx.save(); ctx.beginPath(); ctx.rect(x, lc.y, w - 4, lc.h); ctx.clip();
+      ctx.fillStyle = isSel ? '#121212' : '#f2d98c';
+      ctx.font = '500 10px "Segoe UI", sans-serif';
+      ctx.fillText(l.words.map((q) => q.text).join(' '), x + 5, lc.y + lc.h / 2);
+      ctx.restore();
+    }
+  }
+
+  // texts
+  for (const x of tl().texts) {
+    const ln = laneOf('text', textRows.get(x.id) ?? 0);
+    const xx = msToX(x.startMs), w = ((x.endMs - x.startMs) / 1000) * pxPerSec;
+    if (xx + w < 0 || xx > W) continue;
+    const isSel = sel?.kind === 'text' && sel.id === x.id;
+    roundRect(ctx, xx + 0.5, ln.y, w - 1, ln.h, 4);
+    ctx.fillStyle = isSel ? '#ff6a1a' : '#4a2a18';
+    ctx.fill();
+    ctx.save(); ctx.beginPath(); ctx.rect(xx, ln.y, w - 4, ln.h); ctx.clip();
+    ctx.fillStyle = isSel ? '#121212' : '#ffc29e';
+    ctx.font = '600 10px "Segoe UI", sans-serif';
+    ctx.fillText(`T  ${x.text.replace(/\n/g, ' ')}`, xx + 6, ln.y + ln.h / 2);
+    ctx.restore();
+    if (isSel) {
+      ctx.fillStyle = '#121212';
+      ctx.fillRect(xx + 2, ln.y + 6, 2, ln.h - 12);
+      ctx.fillRect(xx + w - 4, ln.y + 6, 2, ln.h - 12);
+    }
+  }
+
+  // drop marker while dragging a clip
+  if (dropX !== null) {
+    ctx.fillStyle = '#ff6a1a';
+    ctx.fillRect(dropX - 1, lm.y - 4, 3, lm.h + 8);
+  }
+
+  // playhead
+  const px = msToX(t);
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(px - 0.5, 0, 1.5, H);
+  ctx.beginPath(); ctx.moveTo(px - 6, 0); ctx.lineTo(px + 6, 0); ctx.lineTo(px + 6, 8); ctx.lineTo(px, 14); ctx.lineTo(px - 6, 8); ctx.fill();
+}
+
+let dropX: number | null = null;
+
+type Hit =
+  | { kind: 'clip'; id: string; edge: 'in' | 'out' | null }
+  | { kind: 'text'; id: string; edge: 'in' | 'out' | null }
+  | { kind: 'line'; id: string; edge: 'in' | 'out' | null }
+  | null;
+
+function hitTest(x: number, y: number): Hit {
+  const EDGE = 7;
+  const lm = laneOf('main');
+  if (y >= lm.y && y <= lm.y + lm.h) {
+    const starts = clipStarts(tl().clips);
+    for (let i = 0; i < tl().clips.length; i++) {
+      const c = tl().clips[i];
+      const a = msToX(starts[i]), b = a + (clipDuration(c) / 1000) * pxPerSec;
+      if (x >= a && x <= b) return { kind: 'clip', id: c.id, edge: x - a < EDGE ? 'in' : b - x < EDGE ? 'out' : null };
+    }
+    return null;
+  }
+  const lc = laneOf('captions');
+  if (y >= lc.y && y <= lc.y + lc.h) {
+    for (const l of tl().captions.lines) {
+      const a = msToX(l.startMs), b = msToX(l.endMs);
+      if (x >= a && x <= b) return { kind: 'line', id: l.id, edge: x - a < EDGE ? 'in' : b - x < EDGE ? 'out' : null };
+    }
+    return null;
+  }
+  for (const x2 of tl().texts) {
+    const ln = laneOf('text', textRows.get(x2.id) ?? 0);
+    if (y < ln.y || y > ln.y + ln.h) continue;
+    const a = msToX(x2.startMs), b = msToX(x2.endMs);
+    if (x >= a && x <= b) return { kind: 'text', id: x2.id, edge: x - a < EDGE ? 'in' : b - x < EDGE ? 'out' : null };
+  }
+  return null;
+}
+
+/** Snap a time to the playhead, clip boundaries and item edges when close (8 px). */
+function snapMs(ms: number, ignoreId?: string): number {
+  const pts = [t, 0, ...clipStarts(tl().clips), timelineDuration(tl())];
+  for (const x of tl().texts) if (x.id !== ignoreId) pts.push(x.startMs, x.endMs);
+  const tol = (8 / pxPerSec) * 1000;
+  let best = ms, d = tol;
+  for (const p of pts) if (Math.abs(p - ms) < d) { d = Math.abs(p - ms); best = p; }
+  return best;
+}
+
+function setupTimeline() {
+  type Drag =
+    | { mode: 'scrub' }
+    | { mode: 'trim-clip'; id: string; edge: 'in' | 'out'; start: VideoClip; sx: number }
+    | { mode: 'move-clip'; id: string; sx: number; moved: boolean }
+    | { mode: 'item'; kind: 'text' | 'line'; id: string; edge: 'in' | 'out' | null; sx: number; a: number; b: number };
+  let drag: Drag | null = null;
+  const pos = (e: MouseEvent) => { const r = tlCanvas.getBoundingClientRect(); return { x: e.clientX - r.left, y: e.clientY - r.top }; };
+
+  tlCanvas.addEventListener('pointerdown', (e) => {
+    if (!P) return;
+    const { x, y } = pos(e);
+    tlCanvas.setPointerCapture(e.pointerId);
+    if (y < RULER) { drag = { mode: 'scrub' }; seek(xToMs(x)); return; }
+    const hit = hitTest(x, y);
+    if (!hit) { sel = null; renderInspector(); drag = { mode: 'scrub' }; seek(xToMs(x)); if (tab === 'captions') renderLeft(); return; }
+    sel = { kind: hit.kind, id: hit.id };
+    snapshot();
+    if (hit.kind === 'clip') {
+      const c = tl().clips.find((q) => q.id === hit.id)!;
+      drag = hit.edge ? { mode: 'trim-clip', id: c.id, edge: hit.edge, start: { ...c }, sx: x } : { mode: 'move-clip', id: c.id, sx: x, moved: false };
+      if (!hit.edge) {
+        const i = tl().clips.indexOf(c);
+        const start = clipStarts(tl().clips)[i];
+        if (t < start || t >= start + clipDuration(c)) seek(start + 1);
+      }
+    } else {
+      const item = hit.kind === 'text' ? tl().texts.find((q) => q.id === hit.id)! : tl().captions.lines.find((q) => q.id === hit.id)!;
+      drag = { mode: 'item', kind: hit.kind, id: hit.id, edge: hit.edge, sx: x, a: item.startMs, b: item.endMs };
+      if (t < item.startMs || t >= item.endMs) seek(item.startMs);
+    }
+    renderInspector();
+    if (tab === 'captions') renderLeft();
+    drawTimeline();
+    renderFrame();
+  });
+
+  tlCanvas.addEventListener('pointermove', (e) => {
+    if (!P) return;
+    const { x, y } = pos(e);
+    if (!drag) {
+      const hit = y > RULER ? hitTest(x, y) : null;
+      tlCanvas.style.cursor = hit?.edge ? 'ew-resize' : hit ? 'grab' : 'default';
+      return;
+    }
+    const dms = ((x - (('sx' in drag) ? drag.sx : x)) / pxPerSec) * 1000;
+    if (drag.mode === 'scrub') { seek(xToMs(x)); return; }
+    if (drag.mode === 'trim-clip') {
+      const c = tl().clips.find((q) => q.id === (drag as { id: string }).id);
+      const m = c && mediaOf(c.mediaId);
+      if (!c || !m) return;
+      if (drag.edge === 'in') c.inMs = Math.round(clamp(drag.start.inMs + dms * c.speed, 0, c.outMs - 200));
+      else c.outMs = Math.round(clamp(drag.start.outMs + dms * c.speed, c.inMs + 200, m.durationMs));
+      const i = tl().clips.indexOf(c);
+      seek(clipStarts(tl().clips)[i] + (drag.edge === 'in' ? 0 : clipDuration(c) - 1));
+      return;
+    }
+    if (drag.mode === 'move-clip') {
+      if (Math.abs(x - drag.sx) > 4) drag.moved = true;
+      if (!drag.moved) return;
+      const starts = clipStarts(tl().clips);
+      const ms = xToMs(x);
+      let gap = starts.findIndex((s, i) => ms < s + clipDuration(tl().clips[i]) / 2);
+      if (gap < 0) gap = tl().clips.length;
+      dropX = msToX(gap < starts.length ? starts[gap] : timelineDuration(tl()));
+      drawTimeline();
+      return;
+    }
+    if (drag.mode === 'item') {
+      const total = Math.max(timelineDuration(tl()), drag.b);
+      const item = drag.kind === 'text' ? tl().texts.find((q) => q.id === (drag as { id: string }).id) : tl().captions.lines.find((q) => q.id === (drag as { id: string }).id);
+      if (!item) return;
+      if (drag.edge === 'in') item.startMs = Math.round(clamp(snapMs(drag.a + dms, drag.id), 0, item.endMs - 100));
+      else if (drag.edge === 'out') item.endMs = Math.round(clamp(snapMs(drag.b + dms, drag.id), item.startMs + 100, total));
+      else {
+        const len = drag.b - drag.a;
+        let a = snapMs(drag.a + dms, drag.id);
+        if (a === drag.a + dms) a = snapMs(drag.b + dms, drag.id) - len;
+        a = Math.round(clamp(a, 0, total - len));
+        const shift = a - item.startMs;
+        item.startMs = a;
+        item.endMs = a + len;
+        if ('words' in item) item.words = item.words.map((w) => ({ ...w, startMs: w.startMs + shift, endMs: w.endMs + shift }));
+      }
+      if ('words' in item && drag.edge) {
+        // keep words inside a trimmed caption line
+        item.words = item.words.map((w) => ({ ...w, startMs: clamp(w.startMs, item.startMs, item.endMs), endMs: clamp(w.endMs, item.startMs, item.endMs) }));
+      }
+      drawTimeline();
+      renderFrame();
+    }
+  });
+
+  const end = (e: PointerEvent) => {
+    if (!drag || !P) { drag = null; return; }
+    if (drag.mode === 'move-clip' && drag.moved) {
+      const { x } = pos(e);
+      const clips = tl().clips;
+      const from = clips.findIndex((c) => c.id === (drag as { id: string }).id);
+      const starts = clipStarts(clips);
+      const ms = xToMs(x);
+      let to = starts.findIndex((s, i) => ms < s + clipDuration(clips[i]) / 2);
+      if (to < 0) to = clips.length;
+      if (to > from) to--;
+      if (to !== from) {
+        const [c] = clips.splice(from, 1);
+        clips.splice(to, 0, c);
+      }
+      dropX = null;
+    }
+    const wasEdit = drag.mode !== 'scrub';
+    drag = null;
+    if (wasEdit) changed({ left: tab === 'captions' });
+  };
+  tlCanvas.addEventListener('pointerup', end);
+  tlCanvas.addEventListener('pointercancel', end);
+
+  $('#tl-body')!.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    const { x } = pos(e);
+    if (e.ctrlKey || e.metaKey) zoomBy(e.deltaY < 0 ? 1.2 : 1 / 1.2, x);
+    else {
+      const maxScroll = Math.max(0, (timelineDuration(tl()) / 1000) * pxPerSec - tlCanvas.clientWidth + 120);
+      scrollX = clamp(scrollX + (e.deltaX || e.deltaY), 0, maxScroll);
+      drawTimeline();
+    }
+  }, { passive: false });
+}
+
+// ================= export =================
+
+function toggleExport() {
+  const pop = $('#export-pop');
+  if (!pop) return;
+  pop.hidden = !pop.hidden;
+  if (!pop.hidden) renderExport();
+}
+
+function renderExport() {
+  const pop = $('#export-pop');
+  if (!pop || pop.hidden || !P) return;
+  const d = timelineDuration(tl());
+  pop.replaceChildren(
+    h('div', { class: 'row-between' }, h('h3', {}, 'Ekspor'), h('button', { class: 'icon-btn', 'aria-label': 'Tutup', onclick: toggleExport }, '✕')),
+    h('div', { class: 'muted small' }, `${tl().width}×${tl().height} · ${tl().fps} fps · MP4 H.264 · ${tc(d, true)}`),
+    d > 180000 ? h('div', { class: 'warn small' }, 'Lebih dari 3 menit: YouTube Shorts membatasi 3 menit. TikTok masih bisa.') : h('span'),
+    h('div', { class: 'muted small' }, `Encoder: ${settings.encoder ? ENCODER_LABEL[settings.encoder] : 'mengecek…'}`),
+    h('button', {
+      class: 'ghost small path', title: settings.outDir,
+      onclick: async () => {
+        const dir = await dialog().open({ directory: true, title: 'Folder hasil ekspor' });
+        if (typeof dir === 'string') { settings.outDir = dir; await saveSettings(settings); renderExport(); }
+      },
+    }, `📁 ${settings.outDir}`),
+    h('button', {
+      class: 'primary wide', disabled: !tl().clips.length,
+      onclick: async () => {
+        pause();
+        try {
+          await flush();
+          await enqueueExport(P!, { outDir: settings.outDir, encoder: settings.encoder || (await detectEncoder()) });
+        } catch (e) { toast((e as Error).message, 'error'); }
+      },
+    }, 'Ekspor video'),
+    h('div', { id: 'queue' }),
+  );
+  renderQueue();
 }
 
 function renderQueue() {
   const el = $('#queue');
+  const btn = $('#export-btn');
+  const run = queue.find((j) => j.status === 'running');
+  if (btn) btn.textContent = run ? `Ekspor ${Math.round(run.progress * 100)}%` : 'Ekspor';
   if (!el) return;
-  const jobs = queue.filter((j) => j.status !== 'cancelled').slice(-8).reverse();
-  if (!jobs.length) { el.replaceChildren(); return; }
-  for (const j of queue) {
-    if (j.status === 'done' && project && j.projectId === project.id) {
-      const c = project.clips.find((x) => x.id === j.clipId);
-      if (c && !c.exported) { c.exported = true; void saveProject(project); renderClipList(); }
-    }
-  }
-  el.replaceChildren(
-    h('h3', {}, 'Antrean ekspor'),
-    ...jobs.map((j) => h('div', { class: `job ${j.status}` },
-      h('div', { class: 'job-head' },
-        h('span', {}, j.label),
-        h('span', { class: 'muted small' },
-          j.status === 'queued' ? 'menunggu' : j.status === 'running' ? `${Math.round(j.progress * 100)}%` : j.status === 'done' ? 'selesai' : 'gagal'),
-      ),
-      h('div', { class: 'bar-track' }, h('div', { class: 'bar-fill', style: `width:${Math.round(j.progress * 100)}%` })),
-      j.status === 'failed' ? h('div', { class: 'warn small' }, j.error) : null,
-      h('div', { class: 'job-actions' },
-        j.status === 'done' ? h('button', { class: 'ghost small', onclick: () => void invoke('reveal', { path: j.outPath }) }, 'Buka folder') : null,
-        j.status === 'queued' || j.status === 'running' ? h('button', { class: 'ghost small', onclick: () => void cancelExport(j) }, 'Batal') : null,
-      ),
-    )),
-  );
+  const jobs = queue.filter((j) => j.status !== 'cancelled').slice(-6).reverse();
+  el.replaceChildren(...jobs.map((j) => h('div', { class: `job ${j.status}` },
+    h('div', { class: 'row-between' },
+      h('span', { class: 'small' }, j.label),
+      h('span', { class: 'muted small' }, j.status === 'queued' ? 'menunggu' : j.status === 'running' ? `${Math.round(j.progress * 100)}%` : j.status === 'done' ? 'selesai' : 'gagal'),
+    ),
+    h('div', { class: 'bar-track' }, h('div', { class: 'bar-fill', style: `width:${Math.round(j.progress * 100)}%` })),
+    j.status === 'failed' ? h('div', { class: 'warn small' }, j.error) : null,
+    h('div', { class: 'row-between' },
+      j.status === 'done' ? h('button', { class: 'ghost small', onclick: () => void invoke('reveal', { path: j.outPath }) }, 'Buka folder') : h('span'),
+      j.status === 'queued' || j.status === 'running' ? h('button', { class: 'ghost small', onclick: () => void cancelExport(j) }, 'Batal') : null,
+    ),
+  )));
+  const done = queue.filter((j) => j.status === 'done' && !(j as { notified?: boolean }).notified);
+  for (const j of done) { (j as { notified?: boolean }).notified = true; toast(`Selesai: ${j.outPath.split('\\').pop()}`); }
 }
 
-// ---------------- 9:16 preview ----------------
-
-function drawPreview() {
-  if (!project || !preview || !video || video.readyState < 2) return;
-  const ctx = preview.getContext('2d');
-  if (!ctx) return;
-  const W = preview.width, H = preview.height;
-  const vw = video.videoWidth, vh = video.videoHeight;
-  const l = editingLayout();
-  ctx.fillStyle = '#000';
-  ctx.fillRect(0, 0, W, H);
-  const draw = (r: Rect, dy: number, dh: number) =>
-    ctx.drawImage(video, r.x * vw, r.y * vh, r.w * vw, r.h * vh, 0, dy, W, dh);
-  if (l.type === 'split' && l.cam) {
-    const s = splitHeights(l, H);
-    if (l.camPosition === 'bottom') { draw(l.main, 0, s.main); draw(l.cam, s.main, s.cam); }
-    else { draw(l.cam, 0, s.cam); draw(l.main, s.cam, s.main); }
-  } else {
-    draw(l.main, 0, H);
-  }
-  const c = selected();
-  const title = c ? stripEmoji(c.title) : '';
-  if (title) {
-    const k = W / 1080;
-    const size = 68 * k;
-    ctx.font = `600 ${size}px "Segoe UI", sans-serif`;
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'top';
-    const lines = title.split('\n');
-    const lh = size * 1.2;
-    const bw = Math.max(...lines.map((t) => ctx.measureText(t).width)) + 48 * k;
-    const bh = lines.length * lh + 48 * k - (lh - size);
-    const y = c!.titlePos === 'center' ? (H - bh) / 2 : c!.titlePos === 'bottom' ? H - bh - 360 * k : 200 * k - 24 * k;
-    ctx.fillStyle = 'rgba(0,0,0,.55)';
-    ctx.fillRect((W - bw) / 2, y, bw, bh);
-    ctx.fillStyle = '#fff';
-    lines.forEach((t, i) => ctx.fillText(t, W / 2, y + 24 * k + i * lh));
-  }
-}
-
-function loopPreview() {
-  if (!video || video.paused) return;
-  drawPreview();
-  requestAnimationFrame(loopPreview);
-}
-
-// ---------------- crop boxes over the player ----------------
-
-function videoRect() {
-  // where the picture actually sits inside the <video> element (object-fit: contain)
-  const box = video.getBoundingClientRect();
-  const wrap = overlay.parentElement!.getBoundingClientRect();
-  const ar = project!.width / project!.height;
-  let w = box.width, hh = box.width / ar;
-  if (hh > box.height) { hh = box.height; w = hh * ar; }
-  return { left: box.left - wrap.left + (box.width - w) / 2, top: box.top - wrap.top + (box.height - hh) / 2, w, h: hh };
-}
-
-function drawOverlay() {
-  if (!overlay || !project) return;
-  const vr = videoRect();
-  const l = editingLayout();
-  const parts: [Part, Rect][] = [['main', l.main]];
-  if (l.type === 'split' && l.cam) parts.push(['cam', l.cam]);
-  overlay.replaceChildren(...parts.map(([part, r]) => {
-    const box = h('div', {
-      class: `crop ${part}`, 'data-part': part,
-      style: `left:${vr.left + r.x * vr.w}px;top:${vr.top + r.y * vr.h}px;width:${r.w * vr.w}px;height:${r.h * vr.h}px`,
-    },
-      h('span', { class: 'crop-label' }, part === 'main' ? (l.type === 'split' ? 'Gameplay' : '9:16') : 'Facecam'),
-      h('span', { class: 'handle', 'data-handle': '1' }),
-    );
-    return box;
-  }));
-}
-
-function setupOverlay() {
-  let drag: { part: Part; mode: 'move' | 'resize'; sx: number; sy: number; start: Rect } | null = null;
-  overlay.addEventListener('pointerdown', (e) => {
-    const t = e.target as HTMLElement;
-    const box = t.closest('.crop') as HTMLElement | null;
-    if (!box) return;
-    const part = box.dataset.part as Part;
-    const l = editingLayout();
-    const start = part === 'cam' ? l.cam! : l.main;
-    drag = { part, mode: t.dataset.handle ? 'resize' : 'move', sx: e.clientX, sy: e.clientY, start: { ...start } };
-    overlay.setPointerCapture(e.pointerId);
-    e.preventDefault();
-  });
-  overlay.addEventListener('pointermove', (e) => {
-    if (!drag || !project) return;
-    const vr = videoRect();
-    const dx = (e.clientX - drag.sx) / vr.w;
-    const dy = (e.clientY - drag.sy) / vr.h;
-    const l = structuredClone(editingLayout());
-    const aspect = partAspect(l, drag.part, project.width, project.height);
-    const r = drag.mode === 'move' ? moveRect(drag.start, dx, dy) : resizeRect(drag.start, drag.start.w + dx, aspect);
-    if (drag.part === 'cam') l.cam = r; else l.main = r;
-    const c = selected();
-    if (c) c.layout = l; else project.defaultLayout = l;
-    drawOverlay();
-    drawPreview();
-  });
-  const end = () => { if (drag && project) void saveProject(project); drag = null; };
-  overlay.addEventListener('pointerup', end);
-  overlay.addEventListener('pointercancel', end);
-}
-
-// ---------------- timeline ----------------
-
-const TL = { ruler: 20, thumbs: 54, wave: 56, clips: 26 };
-const TL_H = TL.ruler + TL.thumbs + TL.wave + TL.clips;
-
-function sizeTimeline() {
-  if (!tl) return;
-  const r = tl.parentElement!.getBoundingClientRect();
-  const dpr = window.devicePixelRatio || 1;
-  tl.width = Math.max(100, Math.floor(r.width * dpr));
-  tl.height = Math.floor(TL_H * dpr);
-  tl.style.height = `${TL_H}px`;
-  drawTimeline();
-}
-
-const msToX = (ms: number, w: number) => ((ms - view.start) / (view.end - view.start)) * w;
-const xToMs = (x: number, w: number) => view.start + (x / w) * (view.end - view.start);
-
-function niceStep(spanMs: number, width: number) {
-  const target = (spanMs / width) * 90;
-  const steps = [1000, 2000, 5000, 10000, 15000, 30000, 60000, 120000, 300000, 600000, 900000, 1800000, 3600000];
-  return steps.find((s) => s >= target) ?? 3600000;
-}
-
-function drawTimeline() {
-  if (!tl || !project) return;
-  const ctx = tl.getContext('2d');
-  if (!ctx) return;
-  const dpr = window.devicePixelRatio || 1;
-  const W = tl.width / dpr;
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  ctx.fillStyle = '#1c1c1c';
-  ctx.fillRect(0, 0, W, TL_H);
-  const span = view.end - view.start;
-
-  // ruler
-  ctx.fillStyle = '#a3a3a3';
-  ctx.font = '11px "JetBrains Mono", Consolas, monospace';
-  ctx.textBaseline = 'middle';
-  const step = niceStep(span, W);
-  for (let t = Math.ceil(view.start / step) * step; t <= view.end; t += step) {
-    const x = msToX(t, W);
-    ctx.fillRect(x, TL.ruler - 6, 1, 6);
-    ctx.fillText(tc(t), x + 3, 9);
-  }
-
-  // thumbnails
-  const y0 = TL.ruler;
-  const every = project.thumbs.everySec * 1000;
-  const tw = 96, th = TL.thumbs;
-  if (sheets.length) {
-    for (let x = 0; x < W; x += tw) {
-      const t = xToMs(x + tw / 2, W);
-      const i = Math.floor(t / every);
-      const sheet = sheets[Math.floor(i / 100)];
-      if (!sheet || !sheet.complete || !sheet.naturalWidth) continue;
-      const k = i % 100;
-      ctx.drawImage(sheet, (k % 10) * 160, Math.floor(k / 10) * 90, 160, 90, x, y0, tw, th);
-    }
-  } else {
-    ctx.fillStyle = '#262626';
-    ctx.fillRect(0, y0, W, th);
-  }
-
-  // waveform: one bar per pixel, max of the 100 ms peaks under it
-  const wy = TL.ruler + TL.thumbs;
-  ctx.fillStyle = '#121212';
-  ctx.fillRect(0, wy, W, TL.wave);
-  if (wave) {
-    ctx.fillStyle = '#6b6b6b';
-    const mid = wy + TL.wave / 2;
-    for (let x = 0; x < W; x++) {
-      const a = Math.max(0, Math.floor(xToMs(x, W) / 100));
-      const b = Math.min(wave.length, Math.max(a + 1, Math.floor(xToMs(x + 1, W) / 100)));
-      let m = 0;
-      for (let i = a; i < b; i++) if (wave[i] > m) m = wave[i];
-      const hh = (m / 255) * (TL.wave - 6);
-      ctx.fillRect(x, mid - hh / 2, 1, Math.max(1, hh));
-    }
-  }
-
-  // clips lane
-  const cy = wy + TL.wave;
-  ctx.fillStyle = '#1c1c1c';
-  ctx.fillRect(0, cy, W, TL.clips);
-  for (const c of project.clips) {
-    const a = msToX(c.inMs, W), b = msToX(c.outMs, W);
-    if (b < 0 || a > W) continue;
-    const sel = c.id === selectedId;
-    ctx.fillStyle = sel ? 'rgba(255,106,26,.28)' : 'rgba(255,255,255,.07)';
-    ctx.fillRect(a, TL.ruler, b - a, TL_H - TL.ruler);
-    ctx.fillStyle = sel ? '#ff6a1a' : '#3a3a3a';
-    ctx.fillRect(a, cy + 3, Math.max(2, b - a), TL.clips - 6);
-    ctx.fillStyle = sel ? '#121212' : '#ededed';
-    ctx.font = '600 11px Inter, "Segoe UI", sans-serif';
-    ctx.save();
-    ctx.beginPath(); ctx.rect(a, cy, b - a, TL.clips); ctx.clip();
-    ctx.fillText(c.name, a + 6, cy + TL.clips / 2);
-    ctx.restore();
-    if (sel) { ctx.fillStyle = '#ff6a1a'; ctx.fillRect(a - 1, TL.ruler, 3, TL_H); ctx.fillRect(b - 2, TL.ruler, 3, TL_H); }
-  }
-
-  // pending marks
-  if (markIn !== null) {
-    const a = msToX(markIn, W);
-    const b = markOut !== null ? msToX(markOut, W) : null;
-    ctx.fillStyle = 'rgba(242,193,78,.18)';
-    if (b !== null) ctx.fillRect(Math.min(a, b), TL.ruler, Math.abs(b - a), TL_H);
-    ctx.fillStyle = '#f2c14e';
-    ctx.fillRect(a, TL.ruler, 2, TL_H);
-    if (b !== null) ctx.fillRect(b, TL.ruler, 2, TL_H);
-  }
-
-  // playhead
-  if (video) {
-    const x = msToX(video.currentTime * 1000, W);
-    ctx.fillStyle = '#ff6a1a';
-    ctx.fillRect(x - 1, 0, 2, TL_H);
-    ctx.beginPath(); ctx.moveTo(x - 6, 0); ctx.lineTo(x + 6, 0); ctx.lineTo(x, 8); ctx.fill();
-  }
-
-  // overview scrollbar hint
-  const vis = span / project.durationMs;
-  if (vis < 1) {
-    ctx.fillStyle = 'rgba(255,255,255,.18)';
-    ctx.fillRect((view.start / project.durationMs) * W, TL_H - 3, Math.max(8, vis * W), 3);
-  }
-}
-
-function setupTimeline() {
-  let drag: { mode: 'seek' | 'in' | 'out'; clip?: Clip } | null = null;
-  const pos = (e: MouseEvent) => {
-    const r = tl.getBoundingClientRect();
-    return { x: e.clientX - r.left, y: e.clientY - r.top, w: r.width };
-  };
-  tl.addEventListener('pointerdown', (e) => {
-    if (!project) return;
-    const { x, w } = pos(e);
-    const c = selected();
-    if (c) {
-      const a = msToX(c.inMs, w), b = msToX(c.outMs, w);
-      if (Math.abs(x - a) < 7) drag = { mode: 'in', clip: c };
-      else if (Math.abs(x - b) < 7) drag = { mode: 'out', clip: c };
-    }
-    if (!drag) {
-      const { y } = pos(e);
-      const ms = xToMs(x, w);
-      if (y > TL.ruler + TL.thumbs + TL.wave) {
-        const hit = project.clips.find((k) => ms >= k.inMs && ms <= k.outMs);
-        if (hit) { selectClip(hit.id); return; }
-      }
-      drag = { mode: 'seek' };
-      seek(ms);
-    }
-    tl.setPointerCapture(e.pointerId);
-  });
-  tl.addEventListener('pointermove', (e) => {
-    const { x, w } = pos(e);
-    if (!drag) {
-      const c = selected();
-      const near = c && (Math.abs(x - msToX(c.inMs, w)) < 7 || Math.abs(x - msToX(c.outMs, w)) < 7);
-      tl.style.cursor = near ? 'ew-resize' : 'pointer';
-      return;
-    }
-    const ms = Math.max(0, Math.min(project!.durationMs, xToMs(x, w)));
-    if (drag.mode === 'seek') seek(ms);
-    else if (drag.clip) {
-      if (drag.mode === 'in') drag.clip.inMs = Math.round(Math.min(ms, drag.clip.outMs - 1000));
-      else drag.clip.outMs = Math.round(Math.max(ms, drag.clip.inMs + 1000));
-      seek(drag.mode === 'in' ? drag.clip.inMs : drag.clip.outMs);
-      drawTimeline();
-    }
-  });
-  const end = () => {
-    if (drag?.clip && project) { void saveProject(project); renderInspector(); renderClipList(); }
-    drag = null;
-  };
-  tl.addEventListener('pointerup', end);
-  tl.addEventListener('pointercancel', end);
-  tl.addEventListener('wheel', (e) => {
-    if (!project) return;
-    e.preventDefault();
-    const { x, w } = pos(e);
-    const span = view.end - view.start;
-    if (e.shiftKey || Math.abs(e.deltaX) > Math.abs(e.deltaY)) {
-      const d = ((e.deltaX || e.deltaY) / w) * span;
-      const s = Math.max(0, Math.min(project.durationMs - span, view.start + d));
-      view = { start: s, end: s + span };
-    } else {
-      const at = xToMs(x, w);
-      const ns = Math.max(5000, Math.min(project.durationMs, span * (e.deltaY > 0 ? 1.25 : 0.8)));
-      let s = at - (x / w) * ns;
-      s = Math.max(0, Math.min(project.durationMs - ns, s));
-      view = { start: s, end: s + ns };
-    }
-    drawTimeline();
-  }, { passive: false });
-}
-
-// ---------------- keyboard ----------------
+// ================= keyboard =================
 
 function onKey(e: KeyboardEvent) {
-  if (!project || !video) return;
+  if (!P) return;
   const tag = (e.target as HTMLElement).tagName;
-  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
-  const now = video.currentTime * 1000;
+  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') {
+    if (e.key === 'Escape') (e.target as HTMLElement).blur();
+    return;
+  }
+  const ctrl = e.ctrlKey || e.metaKey;
+  const frame = 1000 / tl().fps;
+  if (ctrl && e.key.toLowerCase() === 'z') { e.preventDefault(); if (e.shiftKey) redo(); else undo(); return; }
+  if (ctrl && e.key.toLowerCase() === 'y') { e.preventDefault(); redo(); return; }
+  if (ctrl && e.key.toLowerCase() === 'b') { e.preventDefault(); splitHere(); return; }
   switch (e.key) {
     case ' ': e.preventDefault(); togglePlay(); break;
-    case 'i': case 'I': markIn = now; renderTransport(); drawTimeline(); break;
-    case 'o': case 'O': markOut = now; renderTransport(); drawTimeline(); break;
-    case 'Enter': addClipFromMarks(); break;
-    case 'j': case 'J': seek(now - 5000); break;
-    case 'l': case 'L': seek(now + 5000); break;
-    case 'k': case 'K': video.pause(); break;
-    case 'ArrowLeft': e.preventDefault(); seek(now - (e.shiftKey ? 1000 / project.fps : 1000)); break;
-    case 'ArrowRight': e.preventDefault(); seek(now + (e.shiftKey ? 1000 / project.fps : 1000)); break;
-    case 'Escape': markIn = markOut = null; renderTransport(); drawTimeline(); break;
-    case 'Delete': {
-      const c = selected();
-      if (c) void dialog().ask(`Hapus "${c.name}"?`, { title: 'Hapus klip', kind: 'warning' }).then((ok) => {
-        if (!ok || !project) return;
-        project.clips = project.clips.filter((x) => x.id !== c.id);
-        void saveProject(project);
-        selectClip(null);
-      });
-      break;
-    }
+    case 'Delete': case 'Backspace': e.preventDefault(); deleteSelected(); break;
+    case 'ArrowLeft': e.preventDefault(); pause(); seek(t - (e.shiftKey ? 1000 : frame)); break;
+    case 'ArrowRight': e.preventDefault(); pause(); seek(t + (e.shiftKey ? 1000 : frame)); break;
+    case 'Home': seek(0); break;
+    case 'End': seek(timelineDuration(tl())); break;
+    case 'Escape': sel = null; renderInspector(); drawTimeline(); renderFrame(); break;
+    case '=': case '+': zoomBy(1.25); break;
+    case '-': zoomBy(0.8); break;
   }
 }
 

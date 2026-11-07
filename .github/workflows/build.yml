@@ -34,6 +34,19 @@ jobs:
           Copy-Item $bin.FullName src-tauri/binaries/ffmpeg-x86_64-pc-windows-msvc.exe
           Copy-Item (Join-Path $bin.DirectoryName "ffprobe.exe") src-tauri/binaries/ffprobe-x86_64-pc-windows-msvc.exe
 
+      - name: Unduh whisper.cpp (subtitle otomatis)
+        shell: pwsh
+        run: |
+          $url = "https://github.com/ggml-org/whisper.cpp/releases/latest/download/whisper-bin-x64.zip"
+          Invoke-WebRequest $url -OutFile whisper.zip
+          Expand-Archive whisper.zip -DestinationPath whisper-tmp
+          $cli = Get-ChildItem whisper-tmp -Recurse -Filter whisper-cli.exe | Select-Object -First 1
+          if (-not $cli) { throw "whisper-cli.exe tidak ada di zip" }
+          New-Item -ItemType Directory -Force src-tauri/whisper | Out-Null
+          Copy-Item (Join-Path $cli.DirectoryName "*.exe") src-tauri/whisper/
+          Copy-Item (Join-Path $cli.DirectoryName "*.dll") src-tauri/whisper/
+          Get-ChildItem src-tauri/whisper
+
       - run: npm install
 
       - run: npx tauri icon app-icon.png
@@ -48,6 +61,6 @@ jobs:
       - name: Terbitkan installer
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v0.1.${{ github.run_number }}
-          name: GALSURKU Clipper 0.1.${{ github.run_number }}
+          tag_name: v0.2.${{ github.run_number }}
+          name: GALSURKU Clipper 0.2.${{ github.run_number }}
           files: src-tauri/target/release/bundle/nsis/*.exe

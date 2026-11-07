@@ -22,6 +22,7 @@ struct Jobs(Arc<Mutex<HashMap<String, Child>>>);
 struct Progress {
     job: String,
     out_ms: u64,
+    pct: f32,
 }
 
 #[derive(Clone, Serialize)]
@@ -72,38 +73,74 @@ fn ffmpeg_check(args: Vec<String>) -> bool {
         .unwrap_or(false)
 }
 
-/// Starts ffmpeg in the background. Emits `ffmpeg://progress` and finally `ffmpeg://done`.
+/// Starts ffmpeg or whisper in the background. Emits `ffmpeg://progress` and finally `ffmpeg://done`.
+/// ffmpeg reports time on stdout (`-progress pipe:1`); whisper reports "progress = N%" on stderr (`-pp`).
 #[tauri::command]
-fn ffmpeg_run(app: AppHandle, jobs: State<Jobs>, job: String, args: Vec<String>) -> Result<(), String> {
-    let mut child = command("ffmpeg")
+fn tool_run(app: AppHandle, jobs: State<Jobs>, job: String, tool: String, args: Vec<String>) -> Result<(), String> {
+    let mut cmd = match tool.as_str() {
+        "ffmpeg" => command("ffmpeg"),
+        "whisper" => {
+            let exe = whisper_exe(&app)?;
+            #[allow(unused_mut)]
+            let mut c = Command::new(&exe);
+            if let Some(dir) = exe.parent() { c.current_dir(dir); }
+            #[cfg(windows)]
+            c.creation_flags(CREATE_NO_WINDOW);
+            c
+        }
+        _ => return Err("alat tidak dikenal".into()),
+    };
+    let mut child = cmd
         .args(&args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|e| format!("ffmpeg tidak bisa dijalankan: {e}"))?;
+        .map_err(|e| format!("{tool} tidak bisa dijalankan: {e}"))?;
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
     jobs.0.lock().unwrap().insert(job.clone(), child);
     let map = jobs.0.clone();
 
     std::thread::spawn(move || {
-        // keep the last part of stderr for error messages
-        let err_tail = Arc::new(Mutex::new(String::new()));
-        let err_handle = stderr.map(|mut e| {
+        // keep the last lines of stderr for error messages, and pick up whisper's progress
+        let err_tail = Arc::new(Mutex::new(Vec::<String>::new()));
+        let err_handle = stderr.map(|e| {
             let tail = err_tail.clone();
+            let app2 = app.clone();
+            let job2 = job.clone();
             std::thread::spawn(move || {
+                let mut reader = BufReader::new(e);
                 let mut buf = Vec::new();
-                let _ = e.read_to_end(&mut buf);
-                let start = buf.len().saturating_sub(1500);
-                *tail.lock().unwrap() = String::from_utf8_lossy(&buf[start..]).to_string();
+                loop {
+                    buf.clear();
+                    match reader.read_until(b'\n', &mut buf) {
+                        Ok(0) | Err(_) => break,
+                        Ok(_) => {}
+                    }
+                    let line = String::from_utf8_lossy(&buf).trim().to_string();
+                    if let Some(i) = line.find("progress = ") {
+                        let n: String = line[i + 11..].chars().take_while(|c| c.is_ascii_digit()).collect();
+                        if let Ok(p) = n.parse::<f32>() {
+                            let _ = app2.emit("ffmpeg://progress", Progress { job: job2.clone(), out_ms: 0, pct: p });
+                        }
+                        continue;
+                    }
+                    let mut t = tail.lock().unwrap();
+                    t.push(line);
+                    if t.len() > 25 { t.remove(0); }
+                }
             })
         });
+        let mut stdout_text = String::new();
         if let Some(out) = stdout {
             for line in BufReader::new(out).lines().map_while(Result::ok) {
                 if let Some(v) = line.strip_prefix("out_time_us=") {
                     if let Ok(us) = v.trim().parse::<i64>() {
-                        let _ = app.emit("ffmpeg://progress", Progress { job: job.clone(), out_ms: (us.max(0) / 1000) as u64 });
+                        let _ = app.emit("ffmpeg://progress", Progress { job: job.clone(), out_ms: (us.max(0) / 1000) as u64, pct: -1.0 });
                     }
+                } else if stdout_text.len() < 4000 {
+                    stdout_text.push_str(&line);
+                    stdout_text.push('\n');
                 }
             }
         }
@@ -113,10 +150,58 @@ fn ffmpeg_run(app: AppHandle, jobs: State<Jobs>, job: String, args: Vec<String>)
             Some(mut c) => c.wait().map(|s| s.success()).unwrap_or(false),
             None => false, // removed by cancel
         };
-        let error = if ok { String::new() } else { err_tail.lock().unwrap().clone() };
+        let error = if ok { String::new() } else { err_tail.lock().unwrap().join("\n") };
         let _ = app.emit("ffmpeg://done", Done { job, ok, error });
     });
     Ok(())
+}
+
+fn whisper_exe(app: &AppHandle) -> Result<PathBuf, String> {
+    let name = if cfg!(windows) { "whisper-cli.exe" } else { "whisper-cli" };
+    let res = app.path().resource_dir().map_err(|e| e.to_string())?;
+    for p in [res.join("whisper").join(name), res.join(name)] {
+        if p.exists() { return Ok(p); }
+    }
+    Err("Mesin subtitle (whisper) tidak ditemukan di folder aplikasi. Coba install ulang.".into())
+}
+
+#[tauri::command]
+fn whisper_available(app: AppHandle) -> bool {
+    whisper_exe(&app).is_ok()
+}
+
+#[tauri::command]
+fn cpu_count() -> usize {
+    std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4)
+}
+
+#[tauri::command]
+fn file_size(path: String) -> u64 {
+    std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0)
+}
+
+/// Downloads a file with Windows' built-in curl.exe into `<dest>.part`, then renames it.
+#[tauri::command]
+async fn download(url: String, dest: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let part = format!("{dest}.part");
+        if let Some(parent) = PathBuf::from(&dest).parent() { std::fs::create_dir_all(parent).map_err(|e| e.to_string())?; }
+        #[allow(unused_mut)]
+        let mut c = Command::new("curl");
+        #[cfg(windows)]
+        c.creation_flags(CREATE_NO_WINDOW);
+        let out = c
+            .args(["-L", "--fail", "--retry", "3", "-s", "-S", "-o", &part, &url])
+            .output()
+            .map_err(|e| format!("curl tidak bisa dijalankan: {e}"))?;
+        if !out.status.success() {
+            let _ = std::fs::remove_file(&part);
+            return Err(format!("Unduhan gagal. Cek koneksi internet.\n{}", String::from_utf8_lossy(&out.stderr)));
+        }
+        std::fs::rename(&part, &dest).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -150,7 +235,7 @@ async fn waveform(app: AppHandle, path: String, track: u32, job: String) -> Resu
                 peaks.push(peak(&buf));
                 filled = 0;
                 if peaks.len() % 3000 == 0 {
-                    let _ = app.emit("ffmpeg://progress", Progress { job: job.clone(), out_ms: peaks.len() as u64 * 100 });
+                    let _ = app.emit("ffmpeg://progress", Progress { job: job.clone(), out_ms: peaks.len() as u64 * 100, pct: -1.0 });
                 }
             }
         }
@@ -252,7 +337,7 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .manage(Jobs::default())
         .invoke_handler(tauri::generate_handler![
-            probe, ffmpeg_check, ffmpeg_run, ffmpeg_cancel, waveform, data_dir, videos_dir,
+            probe, ffmpeg_check, tool_run, ffmpeg_cancel, whisper_available, cpu_count, file_size, download, waveform, data_dir, videos_dir,
             read_text, write_text, write_bytes, read_bytes, ensure_dir, exists, list_dir, remove_path, reveal
         ])
         .run(tauri::generate_context!())

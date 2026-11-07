@@ -3,3 +3,5 @@ dist/
 src-tauri/target/
 src-tauri/gen/
 src-tauri/binaries/*.exe
+src-tauri/whisper/*.exe
+src-tauri/whisper/*.dll
