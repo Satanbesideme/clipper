@@ -22,4 +22,4 @@ jobs:
       - run: sudo apt-get install -y fonts-dejavu-core >/dev/null
       - run: npm install
       - run: npx tsc --outDir build-test --module commonjs --target es2021 --lib es2021,dom --skipLibCheck --esModuleInterop tests/export-scenarios.ts || true
-      - run: mkdir -p work && node build-test/tests/export-scenarios.js "$PWD/ff/bin/ffmpeg" "$PWD/work" /usr/share/fonts/truetype/dejavu "DejaVu Sans"
+      - run: echo '{"type":"commonjs"}' > build-test/package.json && mkdir -p work && node build-test/tests/export-scenarios.js "$PWD/ff/bin/ffmpeg" "$PWD/work" /usr/share/fonts/truetype/dejavu "DejaVu Sans"
