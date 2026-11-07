@@ -3,7 +3,8 @@ import { dialog, fileSrc, invoke, isTauri, onDrop, extName, join } from './tauri
 import {
   DEFAULT_CAPTION, DEFAULT_TEXT, clipDuration, clipStarts, locate, splitAt, timelineDuration,
   type CaptionLine, type ImageItem, type Watermark, type SoundItem, type TextItem, type TextStyle, type Trans, type VideoClip, type Word,
-  transState, TRANS_IN_MS,
+  transState, TRANS_IN_MS, clipFx, removePauses, remapItems, invertRanges, DUCK_LEVEL,
+  type ClipTrans, type Duck, type MusicItem, type Range,
 } from './render';
 import {
   IMAGE_EXT, SOUND_EXT, deleteMeme, deletePad, importFiles as importLibFiles, loadLibrary, move, saveLibrary, soundOf,
@@ -15,7 +16,7 @@ import {
 } from './store';
 import {
   ENCODER_LABEL, MODELS, VIDEO_EXT, buildThumbs, cancelExport, detectEncoder, downloadModel, enqueueExport,
-  importMedia, modelReady, onQueueChange, queue, thumbPath, transcribe,
+  importMedia, modelReady, onQueueChange, queue, thumbPath, transcribe, silencesOf, probeAudio,
 } from './jobs';
 
 // ================= helpers =================
@@ -47,8 +48,10 @@ function tc(ms: number, frac = false): string {
 }
 
 function toast(msg: string, kind: 'info' | 'error' = 'info') {
+  let box = document.getElementById('toasts');
+  if (!box) { box = h('div', { id: 'toasts', class: 'toasts' }); document.body.append(box); }
   const t = h('div', { class: `toast ${kind}`, role: 'status' }, msg);
-  document.body.append(t);
+  box.append(t);
   const life = kind === 'error' ? 8000 : 3000;
   setTimeout(() => t.classList.add('out'), life);
   setTimeout(() => t.remove(), life + 400);
@@ -58,7 +61,7 @@ const FONTS = ['Segoe UI', 'Bahnschrift', 'Impact', 'Arial', 'Verdana', 'Trebuch
 
 // ================= state =================
 
-type SelKind = 'clip' | 'text' | 'line' | 'sound' | 'image';
+type SelKind = 'clip' | 'text' | 'line' | 'sound' | 'image' | 'music';
 type Sel = { kind: SelKind; id: string } | null;
 type LeftTab = 'media' | 'sound' | 'meme' | 'text' | 'captions';
 
@@ -80,12 +83,13 @@ const tl = () => P!.timeline;
 const mediaOf = (id: string) => P!.media.find((m) => m.id === id);
 const sounds = () => (tl().sounds ??= []);
 const images = () => (tl().images ??= []);
+const music = () => (tl().music ??= []);
 function listOf(kind: SelKind): { id: string }[] {
-  return kind === 'clip' ? tl().clips : kind === 'text' ? tl().texts : kind === 'line' ? tl().captions.lines : kind === 'sound' ? sounds() : images();
+  return kind === 'clip' ? tl().clips : kind === 'text' ? tl().texts : kind === 'line' ? tl().captions.lines : kind === 'sound' ? sounds() : kind === 'music' ? music() : images();
 }
 const selected = <T extends SelKind>(kind: T) =>
   (sel?.kind === kind ? listOf(kind).find((x) => x.id === sel!.id) : undefined) as
-  (T extends 'clip' ? VideoClip : T extends 'text' ? TextItem : T extends 'line' ? CaptionLine : T extends 'sound' ? SoundItem : ImageItem) | undefined;
+  (T extends 'clip' ? VideoClip : T extends 'text' ? TextItem : T extends 'line' ? CaptionLine : T extends 'sound' ? SoundItem : T extends 'music' ? MusicItem : ImageItem) | undefined;
 let library: Library | null = null;
 let libEdit = false;
 
@@ -212,6 +216,7 @@ async function openProject(id: string, importNow: string[] = []) {
   P = p;
   p.timeline.sounds ??= [];
   p.timeline.images ??= [];
+  p.timeline.music ??= [];
   sel = null;
   t = 0;
   void loadLibrary().then((l) => { library = l; if (tab === 'sound' || tab === 'meme') renderLeft(); });
@@ -324,6 +329,8 @@ function renderEditor() {
         h('span', { class: 'sep' }),
         h('button', { class: 'tool', title: 'Potong di playhead (Ctrl+B)', onclick: splitHere }, '✂ Split'),
         h('button', { class: 'tool', title: 'Hapus (Delete)', onclick: deleteSelected }, '🗑 Hapus'),
+        h('span', { class: 'sep' }),
+        h('button', { class: 'tool', id: 'pause-btn', title: 'Potong semua bagian diam', onclick: togglePausePop }, '⏸ Hapus jeda'),
         h('div', { class: 'spacer' }),
         h('button', { class: 'tool', title: 'Perkecil', onclick: () => zoomBy(0.8) }, '−'),
         h('input', { type: 'range', id: 'zoom', min: 0, max: 100, 'aria-label': 'Zoom timeline', oninput: (e) => setZoomFromSlider(Number((e.target as HTMLInputElement).value)) }),
@@ -333,6 +340,7 @@ function renderEditor() {
       h('div', { class: 'tl-body', id: 'tl-body' }, tlCanvas),
     ),
     h('div', { class: 'export-pop', id: 'export-pop', hidden: true }),
+    h('div', { class: 'export-pop pause-pop', id: 'pause-pop', hidden: true }),
   );
   setupTimeline();
   setupPreviewDrag();
@@ -375,6 +383,7 @@ function mediaPanel(): Node[] {
   const p = P!;
   return [
     h('button', { class: 'secondary wide', onclick: () => void pickAndImport() }, '+ Tambah video'),
+    h('button', { class: 'secondary wide', onclick: () => void addMusic() }, '♫ Tambah musik latar'),
     p.media.length ? h('div', { class: 'media-grid' },
       ...p.media.map((m) => {
         const thumb = h('div', { class: 'media-thumb' });
@@ -605,14 +614,47 @@ function renderInspector() {
           type: 'range', min: 100, max: 300, step: 5, value: Math.round((clip.zoom ?? 1) * 100),
           onpointerdown: () => snapshot(),
           oninput: (e) => { clip.zoom = Number((e.target as HTMLInputElement).value) / 100; ((e.target as HTMLElement).previousElementSibling as HTMLElement).textContent = `Zoom ${Math.round(clip.zoom * 100)}%`; renderFrame(); },
-          onchange: () => { void saveProject(P!); renderInspector(); },
+          onchange: () => {
+            const i = tl().clips.indexOf(clip);
+            if (i > 0 && (clip.zoom ?? 1) > 1 && (clip.trans ?? 'none') === 'none') { clip.trans = 'punch'; toast('Transisi Punch dipasang otomatis di sambungan ini.'); }
+            void saveProject(P!); drawTimeline(); renderInspector();
+          },
         })),
         (clip.zoom ?? 1) > 1 ? h('div', { class: 'muted small' }, 'Geser di preview untuk mengarahkan zoom ke wajah atau momennya.') : h('div', { class: 'muted small' }, 'Tip punch-in: split di momen lucu, lalu zoom potongan itu 130–160%.'),
         (clip.zoom ?? 1) > 1 ? h('button', { class: 'ghost small', onclick: () => set({ zoom: 1, zx: 0.5, zy: 0.5 }) }, 'Reset zoom') : h('span'),
       ),
+      transBlock(clip),
       h('div', { class: 'block' },
         h('button', { class: 'secondary wide', onclick: splitHere }, '✂ Split di playhead'),
         h('button', { class: 'danger-ghost wide', onclick: deleteSelected }, 'Hapus potongan'),
+      ),
+    );
+    return;
+  }
+
+  const mus = selected('music');
+  if (mus) {
+    const set = (patch: Partial<MusicItem>) => { snapshot(); Object.assign(mus, patch); changed(); };
+    el.replaceChildren(
+      h('h3', {}, 'Musik latar'),
+      h('div', { class: 'muted small' }, mus.name),
+      h('div', { class: 'muted small mono' }, `${tc(mus.startMs, true)} · ${tc(mus.lengthMs, true)}`),
+      h('div', { class: 'block' },
+        field(`Volume ${Math.round(mus.volume * 100)}%`, h('input', {
+          type: 'range', min: 0, max: 150, step: 5, value: Math.round(mus.volume * 100),
+          oninput: (e) => { ((e.target as HTMLElement).previousElementSibling as HTMLElement).textContent = `Volume ${(e.target as HTMLInputElement).value}%`; },
+          onchange: (e) => set({ volume: Number((e.target as HTMLInputElement).value) / 100 }),
+        })),
+        h('div', { class: 'label' }, 'Auto-ducking (musik mengecil saat kamu bicara)'),
+        h('div', { class: 'seg' }, ...(['off', 'light', 'medium', 'strong'] as Duck[]).map((d) =>
+          h('button', { class: mus.duck === d ? 'on' : '', onclick: () => { set({ duck: d }); void ensureSpeech(); } }, { off: 'Mati', light: 'Ringan', medium: 'Sedang', strong: 'Kuat' }[d]))),
+        field(`Mulai lagu dari ${tc(mus.inMs)}`, h('input', {
+          type: 'range', min: 0, max: Math.max(0, Math.floor((mus.sourceMs - 1000) / 1000)), value: Math.floor(mus.inMs / 1000),
+          oninput: (e) => { ((e.target as HTMLElement).previousElementSibling as HTMLElement).textContent = `Mulai lagu dari ${tc(Number((e.target as HTMLInputElement).value) * 1000)}`; },
+          onchange: (e) => { const v = Number((e.target as HTMLInputElement).value) * 1000; set({ inMs: v, lengthMs: Math.min(mus.lengthMs, mus.sourceMs - v) }); },
+        })),
+        h('div', { class: 'muted small' }, 'Lagu otomatis fade in di awal dan fade out di akhir. Tarik ujung kanannya di timeline untuk memendekkan.'),
+        h('button', { class: 'danger-ghost wide', onclick: deleteSelected }, 'Hapus musik'),
       ),
     );
     return;
@@ -753,6 +795,7 @@ function deleteSelected() {
   else if (sel.kind === 'text') tl().texts = tl().texts.filter((x) => x.id !== sel!.id);
   else if (sel.kind === 'sound') tl().sounds = sounds().filter((x) => x.id !== sel!.id);
   else if (sel.kind === 'image') tl().images = images().filter((x) => x.id !== sel!.id);
+  else if (sel.kind === 'music') tl().music = music().filter((x) => x.id !== sel!.id);
   else tl().captions.lines = tl().captions.lines.filter((x) => x.id !== sel!.id);
   sel = null;
   changed({ left: tab === 'captions' });
@@ -820,6 +863,7 @@ function pause() {
   playing = false;
   activeVideo?.pause();
   sfxEls.forEach((a) => a.pause());
+  musicEls.forEach((a) => a.pause());
   const btn = $('#play');
   if (btn) { btn.textContent = '▶'; btn.setAttribute('aria-label', 'Putar'); }
 }
@@ -851,6 +895,7 @@ function tick() {
     if (x > tb.clientWidth - 40) scrollX += tb.clientWidth * 0.6;
   }
   syncSfx();
+  syncMusic();
   renderFrame();
   drawTimeline();
   updateTime();
@@ -874,12 +919,24 @@ function renderFrame() {
     const v = videos.get(c.mediaId) ?? videoFor(c.mediaId);
     if (v && v.readyState >= 2 && v.videoWidth) {
       const vw = v.videoWidth, vh = v.videoHeight;
-      const z = Math.max(1, c.zoom ?? 1);
+      const kk = W / tl().width;
+      const fx = clipFx(loc.index > 0 ? (c.trans ?? 'none') : 'none', t - loc.startMs, Math.max(1, c.zoom ?? 1));
+      const z = fx.zoom;
+      if (fx.blur) ctx.filter = `blur(${Math.round(10 * kk * 2)}px)`;
+      ctx.translate(-fx.dx * kk, -fx.dy * kk);
       const s = c.fit === 'fill' ? Math.max((W * z) / vw, (H * z) / vh) : Math.min((W * z) / vw, (H * z) / vh);
       const dw = vw * s, dh = vh * s;
       const pw = Math.max(dw, W), ph = Math.max(dh, H);
       const ox = (pw - W) * (c.zx ?? 0.5), oy = (ph - H) * (c.zy ?? 0.5);
       ctx.drawImage(v, (pw - dw) / 2 - ox, (ph - dh) / 2 - oy, dw, dh);
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.filter = 'none';
+      // flash / dip-to-black, and the fade-out before a "Gelap" cut
+      const next = tl().clips[loc.index + 1];
+      const left = loc.startMs + clipDuration(c) - t;
+      const black = Math.max(fx.black, next?.trans === 'fade' && left < 250 ? 1 - left / 250 : 0);
+      if (fx.white > 0) { ctx.fillStyle = `rgba(255,255,255,${fx.white})`; ctx.fillRect(0, 0, W, H); }
+      if (black > 0) { ctx.fillStyle = `rgba(0,0,0,${black})`; ctx.fillRect(0, 0, W, H); }
     }
   } else {
     ctx.fillStyle = '#6b6b6b';
@@ -1083,7 +1140,7 @@ const snap = (v: number, to: number) => (Math.abs(v - to) < 0.015 ? to : v);
 const HEAD_W = 0;
 const RULER = 24, ROW_TEXT = 26, ROW_CAP = 26, ROW_MAIN = 64, GAP = 6;
 
-interface Lane { kind: 'text' | 'image' | 'captions' | 'main' | 'sound'; y: number; h: number }
+interface Lane { kind: 'text' | 'image' | 'captions' | 'main' | 'sound' | 'music'; y: number; h: number }
 let lanes: Lane[] = [];
 let textRows = new Map<string, number>();
 const ROW_SOUND = 24;
@@ -1114,6 +1171,8 @@ function computeLanes() {
   lanes.push({ kind: 'captions', y, h: ROW_CAP }); y += ROW_CAP + GAP;
   lanes.push({ kind: 'main', y, h: ROW_MAIN }); y += ROW_MAIN + GAP;
   for (let i = 0; i < nSnd; i++) { lanes.push({ kind: 'sound', y, h: ROW_SOUND }); y += ROW_SOUND + 3; }
+  const nMus = pack(music().map((m) => ({ id: m.id, startMs: m.startMs, endMs: m.startMs + m.lengthMs })), textRows);
+  for (let i = 0; i < nMus; i++) { lanes.push({ kind: 'music', y, h: ROW_SOUND }); y += ROW_SOUND + 3; }
   return y + GAP;
 }
 
@@ -1193,6 +1252,8 @@ function drawTimeline() {
   const li = laneOf('image'), ls = laneOf('sound');
   if (!images().length) ctx.fillText('GAMBAR', 8, li.y + li.h / 2);
   if (!sounds().length) ctx.fillText('SUARA · tekan 1–9 atau pad Soundboard', 8, ls.y + ls.h / 2);
+  const lmu = laneOf('music');
+  if (!music().length) ctx.fillText('MUSIK · tab Media → Tambah musik latar', 8, lmu.y + lmu.h / 2);
 
   // ruler
   ctx.fillStyle = '#121212';
@@ -1252,6 +1313,27 @@ function drawTimeline() {
     }
   });
 
+  // transition markers on the cuts
+  cutMarkers = [];
+  for (let i = 1; i < tl().clips.length; i++) {
+    const x = msToX(starts[i]);
+    if (x < -10 || x > W + 10) continue;
+    const tr = tl().clips[i].trans ?? 'none';
+    const box = { x: x - 8, y: lm.y + 3, w: 16, h: 16, index: i };
+    cutMarkers.push(box);
+    roundRect(ctx, box.x, box.y, box.w, box.h, 3);
+    ctx.fillStyle = tr === 'none' ? 'rgba(18,18,18,.85)' : '#ff6a1a';
+    ctx.fill();
+    ctx.strokeStyle = tr === 'none' ? '#6b6b6b' : '#121212';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+    ctx.fillStyle = tr === 'none' ? '#a3a3a3' : '#121212';
+    ctx.font = '700 9px "Segoe UI", sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText(TRANS_SHORT[tr], x, box.y + 8.5);
+    ctx.textAlign = 'left';
+  }
+
   // captions
   for (const l of tl().captions.lines) {
     const x = msToX(l.startMs), w = ((l.endMs - l.startMs) / 1000) * pxPerSec;
@@ -1308,6 +1390,22 @@ function drawTimeline() {
     ctx.restore();
   }
 
+  // background music
+  for (const mu of music()) {
+    const ln = laneOf('music', textRows.get(mu.id) ?? 0);
+    const xx = msToX(mu.startMs), w = (mu.lengthMs / 1000) * pxPerSec;
+    if (xx + w < 0 || xx > W) continue;
+    const isSel = sel?.kind === 'music' && sel.id === mu.id;
+    roundRect(ctx, xx + 0.5, ln.y, Math.max(6, w - 1), ln.h, 4);
+    ctx.fillStyle = isSel ? '#c77dff' : '#2e2140';
+    ctx.fill();
+    ctx.save(); ctx.beginPath(); ctx.rect(xx, ln.y, Math.max(6, w - 4), ln.h); ctx.clip();
+    ctx.fillStyle = isSel ? '#121212' : '#dcbcff';
+    ctx.font = '600 10px "Segoe UI", sans-serif';
+    ctx.fillText(`♫ ${mu.name}${mu.duck !== 'off' ? '  · ducking' : ''}`, xx + 5, ln.y + ln.h / 2);
+    ctx.restore();
+  }
+
   // sound effects
   for (const sn of sounds()) {
     const ln = laneOf('sound', textRows.get(sn.id) ?? 0);
@@ -1339,10 +1437,12 @@ function drawTimeline() {
 
 let dropX: number | null = null;
 
-type Hit = { kind: SelKind; id: string; edge: 'in' | 'out' | null } | null;
+type Hit = { kind: SelKind; id: string; edge: 'in' | 'out' | null; marker?: boolean } | null;
 
 function hitTest(x: number, y: number): Hit {
   const EDGE = 7;
+  const mk = cutMarkers.find((b) => x >= b.x - 2 && x <= b.x + b.w + 2 && y >= b.y - 2 && y <= b.y + b.h + 2);
+  if (mk) return { kind: 'clip', id: tl().clips[mk.index].id, edge: null, marker: true };
   const lm = laneOf('main');
   if (y >= lm.y && y <= lm.y + lm.h) {
     const starts = clipStarts(tl().clips);
@@ -1365,6 +1465,7 @@ function hitTest(x: number, y: number): Hit {
     ['text', 'text', tl().texts],
     ['image', 'image', images()],
     ['sound', 'sound', sounds().map((q) => ({ id: q.id, startMs: q.startMs, endMs: soundEnd(q) }))],
+    ['music', 'music', music().map((q) => ({ id: q.id, startMs: q.startMs, endMs: q.startMs + q.lengthMs }))],
   ];
   for (const [kind, laneKind, items] of groups) {
     for (const x2 of items) {
@@ -1372,7 +1473,7 @@ function hitTest(x: number, y: number): Hit {
       if (y < ln.y || y > ln.y + ln.h) continue;
       const a = msToX(x2.startMs), b = Math.max(a + 6, msToX(x2.endMs));
       if (x >= a && x <= b) {
-        const edge = x - a < EDGE && kind !== 'sound' ? 'in' : b - x < EDGE ? 'out' : null;
+        const edge = x - a < EDGE && kind !== 'sound' && kind !== 'music' ? 'in' : b - x < EDGE ? 'out' : null;
         return { kind, id: x2.id, edge };
       }
     }
@@ -1382,6 +1483,11 @@ function hitTest(x: number, y: number): Hit {
 
 /** Start/end of any movable item, and a setter, so one drag handler serves them all. */
 function span(kind: SelKind, id: string): { a: number; b: number; set: (a: number, b: number) => void; max: number } | null {
+  if (kind === 'music') {
+    const m = music().find((q) => q.id === id);
+    if (!m) return null;
+    return { a: m.startMs, b: m.startMs + m.lengthMs, max: m.sourceMs - m.inMs, set: (a, b) => { m.startMs = a; m.lengthMs = clamp(b - a, 300, m.sourceMs - m.inMs); } };
+  }
   if (kind === 'sound') {
     const s = sounds().find((q) => q.id === id);
     if (!s) return null;
@@ -1412,6 +1518,7 @@ function snapMs(ms: number, ignoreId?: string): number {
   for (const x of tl().texts) if (x.id !== ignoreId) pts.push(x.startMs, x.endMs);
   for (const x of images()) if (x.id !== ignoreId) pts.push(x.startMs, x.endMs);
   for (const x of sounds()) if (x.id !== ignoreId) pts.push(x.startMs, soundEnd(x));
+  for (const x of music()) if (x.id !== ignoreId) pts.push(x.startMs, x.startMs + x.lengthMs);
   const tol = (8 / pxPerSec) * 1000;
   let best = ms, d = tol;
   for (const p of pts) if (Math.abs(p - ms) < d) { d = Math.abs(p - ms); best = p; }
@@ -1436,6 +1543,15 @@ function setupTimeline() {
     if (!hit) { sel = null; renderInspector(); drag = { mode: 'scrub' }; seek(xToMs(x)); if (tab === 'captions') renderLeft(); return; }
     sel = { kind: hit.kind, id: hit.id };
     snapshot();
+    if (hit.marker) {
+      const c = tl().clips.find((q) => q.id === hit.id)!;
+      seek(clipStarts(tl().clips)[tl().clips.indexOf(c)]);
+      renderInspector();
+      setTimeout(() => $('#trans-block')?.scrollIntoView({ block: 'center', behavior: 'smooth' }), 30);
+      drag = { mode: 'scrub' };
+      drawTimeline();
+      return;
+    }
     if (hit.kind === 'clip') {
       const c = tl().clips.find((q) => q.id === hit.id)!;
       drag = hit.edge ? { mode: 'trim-clip', id: c.id, edge: hit.edge, start: { ...c }, sx: x } : { mode: 'move-clip', id: c.id, sx: x, moved: false };
@@ -1448,7 +1564,7 @@ function setupTimeline() {
       const sp = span(hit.kind, hit.id);
       if (!sp) return;
       drag = { mode: 'item', kind: hit.kind, id: hit.id, edge: hit.edge, sx: x, a: sp.a, b: sp.b };
-      if (hit.kind !== 'sound' && (t < sp.a || t >= sp.b)) seek(sp.a);
+      if (hit.kind !== 'sound' && hit.kind !== 'music' && (t < sp.a || t >= sp.b)) seek(sp.a);
     }
     renderInspector();
     if (tab === 'captions') renderLeft();
@@ -1493,11 +1609,11 @@ function setupTimeline() {
       const total = Math.max(timelineDuration(tl()), drag.b);
       const len = drag.b - drag.a;
       if (drag.edge === 'in') sp.set(Math.round(clamp(snapMs(drag.a + dms, drag.id), 0, drag.b - 100)), drag.b);
-      else if (drag.edge === 'out') sp.set(drag.a, Math.round(clamp(snapMs(drag.b + dms, drag.id), drag.a + 100, Math.min(drag.kind === 'sound' ? drag.a + sp.max : Infinity, Math.max(total, drag.b)))));
+      else if (drag.edge === 'out') sp.set(drag.a, Math.round(clamp(snapMs(drag.b + dms, drag.id), drag.a + 100, Math.min(drag.kind === 'sound' || drag.kind === 'music' ? drag.a + sp.max : Infinity, Math.max(total, drag.b)))));
       else {
         let a = snapMs(drag.a + dms, drag.id);
         if (a === drag.a + dms) a = snapMs(drag.b + dms, drag.id) - len;
-        a = Math.round(clamp(a, 0, Math.max(0, total - (drag.kind === 'sound' ? 50 : len))));
+        a = Math.round(clamp(a, 0, Math.max(0, total - (drag.kind === 'sound' || drag.kind === 'music' ? 50 : len))));
         sp.set(a, a + len);
       }
       drawTimeline();
@@ -1794,6 +1910,180 @@ function watermarkBlock(): HTMLElement {
     }), 'Pasang otomatis di proyek baru'),
     h('button', { class: 'danger-ghost small', onclick: () => { snapshot(); tl().watermark = null; changed(); } }, 'Lepas logo'),
   );
+}
+
+// ================= transitions, music, pause removal =================
+
+let cutMarkers: { x: number; y: number; w: number; h: number; index: number }[] = [];
+const TRANS_NAME: Record<ClipTrans, string> = { none: 'Potong', punch: 'Punch', shake: 'Guncang', flash: 'Kilat', blur: 'Blur cepat', fade: 'Gelap' };
+const TRANS_SHORT: Record<ClipTrans, string> = { none: '|', punch: 'P', shake: 'G', flash: 'K', blur: 'B', fade: 'F' };
+const TRANS_HINT: Record<ClipTrans, string> = {
+  none: 'Potong langsung tanpa efek.',
+  punch: 'Gambar menghentak masuk dari zoom besar. Paling pas untuk punch-in.',
+  shake: 'Layar bergetar sebentar. Cocok untuk momen kaget atau teriak.',
+  flash: 'Kilat putih singkat. Cocok untuk ganti momen yang heboh.',
+  blur: 'Whip cepat dengan blur. Cocok saat kembali dari zoom.',
+  fade: 'Meredup lewat hitam. Cocok untuk lompat waktu.',
+};
+
+function transBlock(clip: VideoClip): HTMLElement {
+  const i = tl().clips.indexOf(clip);
+  if (i <= 0) return h('div', { class: 'block muted small', id: 'trans-block' }, 'Transisi dipasang di sambungan antar potongan. Split dulu (Ctrl+B) untuk membuat sambungan.');
+  const cur = clip.trans ?? 'none';
+  return h('div', { class: 'block', id: 'trans-block' },
+    h('div', { class: 'label' }, 'Transisi masuk ke potongan ini'),
+    h('div', { class: 'trans-grid' }, ...(['none', 'punch', 'shake', 'flash', 'blur', 'fade'] as ClipTrans[]).map((k) =>
+      h('button', {
+        class: cur === k ? 'on' : '',
+        onclick: () => { snapshot(); clip.trans = k; changed(); seek(clipStarts(tl().clips)[i] - 400); if (k !== 'none') { play(); setTimeout(() => pause(), 1200); } },
+      }, TRANS_NAME[k]))),
+    h('div', { class: 'muted small' }, TRANS_HINT[cur]),
+    h('button', {
+      class: 'ghost small', onclick: () => {
+        snapshot();
+        tl().clips.forEach((c, j) => { if (j > 0) c.trans = cur; });
+        changed();
+        toast(`${TRANS_NAME[cur]} dipasang di ${tl().clips.length - 1} sambungan.`);
+      },
+    }, 'Terapkan ke semua sambungan'),
+  );
+}
+
+// ---- background music ----
+
+const musicEls = new Map<string, HTMLAudioElement>();
+const musicLevel = new Map<string, number>();
+
+async function addMusic() {
+  if (!P) return;
+  const f = await dialog().open({ title: 'Pilih musik latar', filters: [{ name: 'Audio', extensions: SOUND_EXT }] });
+  if (typeof f !== 'string') return;
+  setBusy('Menambahkan musik…');
+  try {
+    const info = await probeAudio(f);
+    const dest = join(await dataDir(), 'library', 'music', `${uid().slice(0, 8)}-${f.split(/[\\/]/).pop()}`);
+    await invoke('copy_file', { src: f, dest });
+    snapshot();
+    const total = Math.max(1000, timelineDuration(tl()));
+    const item: MusicItem = { id: uid(), file: dest, name: (f.split(/[\\/]/).pop() ?? 'Musik').replace(/\.[^.]+$/, ''), startMs: 0, inMs: 0, lengthMs: Math.min(info.durationMs, total), sourceMs: info.durationMs, volume: 0.35, duck: 'medium' };
+    music().push(item);
+    sel = { kind: 'music', id: item.id };
+    changed();
+    toast('Musik ditambahkan dengan auto-ducking sedang. Atur di panel kanan.');
+    void ensureSpeech();
+  } catch (e) {
+    toast((e as Error).message, 'error');
+  } finally {
+    setBusy('');
+  }
+}
+
+const SPEECH_DB = -38;
+let speechBusy = false;
+/** Finds where there is talking, so the preview can duck the music like the export does. */
+async function ensureSpeech() {
+  if (!P || speechBusy) return;
+  const todo = P.media.filter((m) => !m.silences?.[String(SPEECH_DB)]);
+  if (!todo.length) return;
+  speechBusy = true;
+  try {
+    for (const m of todo) { setBusy('Mendeteksi suara bicara…'); await silencesOf(m, SPEECH_DB); }
+    await saveProject(P);
+  } catch { /* preview ducking is best effort */ } finally {
+    speechBusy = false;
+    setBusy('');
+  }
+}
+
+function talkingAt(tt: number): boolean {
+  const loc = locate(tl().clips, tt);
+  if (!loc) return false;
+  const c = tl().clips[loc.index];
+  const m = mediaOf(c.mediaId);
+  const sil = m?.silences?.[String(SPEECH_DB)];
+  if (!m || !sil) return false;
+  return !sil.some((r) => loc.sourceMs >= r.startMs && loc.sourceMs < r.endMs);
+}
+
+function syncMusic() {
+  const talk = talkingAt(t);
+  for (const mu of music()) {
+    let a = musicEls.get(mu.id);
+    const inside = t >= mu.startMs && t < mu.startMs + mu.lengthMs;
+    if (!inside) { if (a && !a.paused) a.pause(); continue; }
+    if (!a) { a = new Audio(fileSrc(mu.file)); a.preload = 'auto'; musicEls.set(mu.id, a); }
+    const target = mu.volume * (talk ? DUCK_LEVEL[mu.duck] : 1);
+    const cur = musicLevel.get(mu.id) ?? target;
+    const next = cur + (target - cur) * (target < cur ? 0.35 : 0.06);  // fast down, slow up, like the export
+    musicLevel.set(mu.id, next);
+    a.volume = clamp(next, 0, 1);
+    const want = (mu.inMs + t - mu.startMs) / 1000;
+    if (a.paused) { a.currentTime = want; void a.play().catch(() => undefined); }
+    else if (Math.abs(a.currentTime - want) > 0.3) a.currentTime = want;
+  }
+}
+
+// ---- remove pauses ----
+
+let pauseOpts = { level: 'normal' as 'light' | 'normal' | 'strong', minGap: 0.6 };
+const PAUSE_DB = { light: -45, normal: -38, strong: -31 };
+
+function togglePausePop() {
+  const pop = $('#pause-pop');
+  if (!pop) return;
+  pop.hidden = !pop.hidden;
+  if (!pop.hidden) renderPausePop();
+}
+
+function renderPausePop() {
+  const pop = $('#pause-pop');
+  if (!pop || pop.hidden || !P) return;
+  pop.replaceChildren(
+    h('div', { class: 'row-between' }, h('h3', {}, 'Hapus jeda'), h('button', { class: 'icon-btn', 'aria-label': 'Tutup', onclick: togglePausePop }, '✕')),
+    h('div', { class: 'muted small' }, 'Memotong bagian diam dari semua potongan. Subtitle, teks, meme, dan suara ikut bergeser. Bisa dibatalkan dengan Ctrl+Z.'),
+    h('div', { class: 'label' }, 'Yang dianggap diam'),
+    h('div', { class: 'seg' }, ...(['light', 'normal', 'strong'] as const).map((k) =>
+      h('button', { class: pauseOpts.level === k ? 'on' : '', onclick: () => { pauseOpts.level = k; renderPausePop(); } }, { light: 'Hening saja', normal: 'Normal', strong: 'Agresif' }[k]))),
+    h('div', { class: 'muted small' }, { light: 'Hanya memotong yang benar-benar sunyi.', normal: 'Cocok untuk kebanyakan rekaman live.', strong: 'Ikut memotong gumaman pelan dan suara game yang kecil.' }[pauseOpts.level]),
+    field(`Jeda minimal ${pauseOpts.minGap.toFixed(1)} detik`, h('input', {
+      type: 'range', min: 3, max: 20, value: Math.round(pauseOpts.minGap * 10),
+      oninput: (e) => { pauseOpts.minGap = Number((e.target as HTMLInputElement).value) / 10; ((e.target as HTMLElement).previousElementSibling as HTMLElement).textContent = `Jeda minimal ${pauseOpts.minGap.toFixed(1)} detik`; },
+    })),
+    h('button', { class: 'primary wide', disabled: !tl().clips.length || !!busy, onclick: () => void runRemovePauses() }, 'Hapus jeda sekarang'),
+  );
+}
+
+async function runRemovePauses() {
+  const p = P!;
+  pause();
+  const db = PAUSE_DB[pauseOpts.level];
+  try {
+    const used = [...new Set(tl().clips.map((c) => c.mediaId))].map((id) => mediaOf(id)!).filter(Boolean);
+    const silences: Record<string, Range[]> = {};
+    for (const [i, m] of used.entries()) {
+      setBusy(`Mencari jeda… ${used.length > 1 ? `(${i + 1}/${used.length})` : ''}`);
+      silences[m.id] = await silencesOf(m, db);
+    }
+    const before = timelineDuration(tl());
+    const res = removePauses(tl().clips, silences, pauseOpts.minGap * 1000, 150, uid);
+    if (!res.cuts || res.removedMs < 100) { toast('Tidak ada jeda yang perlu dihapus dengan pengaturan ini.'); return; }
+    snapshot();
+    tl().clips = res.clips;
+    remapItems(tl(), res.map);
+    const total = timelineDuration(tl());
+    for (const m of music()) m.lengthMs = Math.max(300, Math.min(m.lengthMs, total - m.startMs));
+    sel = null;
+    t = res.map(t);
+    changed({ left: true });
+    fitZoom();
+    togglePausePop();
+    toast(`${res.cuts} jeda dihapus. Video jadi ${tc(timelineDuration(tl()))} (sebelumnya ${tc(before)}). Ctrl+Z untuk membatalkan.`);
+    await saveProject(p);
+  } catch (e) {
+    toast(`Hapus jeda gagal: ${(e as Error).message}`, 'error');
+  } finally {
+    setBusy('');
+  }
 }
 
 // ================= export =================

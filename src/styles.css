@@ -128,7 +128,8 @@ input[type=checkbox] { width: auto; accent-color: var(--accent); }
 .export-pop[hidden] { display: none; }
 .job { display: grid; gap: 4px; padding: 8px 0; border-top: 1px solid var(--border); }
 
-.toast { position: fixed; left: 50%; top: 56px; transform: translateX(-50%); background: var(--surface-2); border: 1px solid var(--border-input); padding: 10px 16px; border-radius: var(--r-md); box-shadow: 0 8px 24px rgba(0,0,0,.5); max-width: 560px; white-space: pre-wrap; z-index: 10; transition: opacity 300ms; }
+.toasts { position: fixed; left: 50%; top: 56px; transform: translateX(-50%); display: flex; flex-direction: column; align-items: center; gap: 6px; z-index: 10; pointer-events: none; }
+.toast { background: var(--surface-2); border: 1px solid var(--border-input); padding: 10px 16px; border-radius: var(--r-md); box-shadow: 0 8px 24px rgba(0,0,0,.5); max-width: 560px; white-space: pre-wrap; z-index: 10; transition: opacity 300ms; }
 .toast.error { border-color: var(--danger); }
 .toast.out { opacity: 0; }
 .center-msg { display: grid; place-items: center; height: 100%; color: var(--muted); }
@@ -161,3 +162,10 @@ input[type=checkbox] { width: auto; accent-color: var(--accent); }
 .meme .pad-key { color: #2ec4b6; }
 .meme-mini { width: 36px; height: 36px; object-fit: contain; flex: none; background: #111; border-radius: 4px; }
 .tabs button { padding: 10px 9px; }
+
+/* transitions & pause removal */
+.trans-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px; }
+.trans-grid button { background: var(--bg); border: 1px solid var(--border); font-size: 12px; padding: 7px 4px; color: var(--muted); }
+.trans-grid button:hover { border-color: var(--border-input); color: var(--text); }
+.trans-grid button.on { border-color: var(--accent); color: var(--text); font-weight: 600; background: rgba(255,106,26,.12); }
+.pause-pop { top: auto; bottom: 290px; left: 50%; right: auto; transform: translateX(-50%); }

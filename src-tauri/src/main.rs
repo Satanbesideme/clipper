@@ -165,6 +165,22 @@ fn whisper_exe(app: &AppHandle) -> Result<PathBuf, String> {
     Err("Mesin subtitle (whisper) tidak ditemukan di folder aplikasi. Coba install ulang.".into())
 }
 
+/// Runs ffmpeg to the end and returns its log (stderr). Used for audio analysis such as silencedetect.
+#[tauri::command]
+async fn ffmpeg_log(args: Vec<String>) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let out = command("ffmpeg")
+            .args(&args)
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .output()
+            .map_err(|e| format!("ffmpeg tidak bisa dijalankan: {e}"))?;
+        Ok(String::from_utf8_lossy(&out.stderr).to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 #[tauri::command]
 fn whisper_available(app: AppHandle) -> bool {
     whisper_exe(&app).is_ok()
@@ -349,7 +365,7 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .manage(Jobs::default())
         .invoke_handler(tauri::generate_handler![
-            probe, ffmpeg_check, tool_run, ffmpeg_cancel, whisper_available, cpu_count, file_size, download, waveform, data_dir, videos_dir,
+            probe, ffmpeg_check, ffmpeg_log, tool_run, ffmpeg_cancel, whisper_available, cpu_count, file_size, download, waveform, data_dir, videos_dir,
             read_text, write_text, write_bytes, read_bytes, ensure_dir, copy_file, starter_sfx_dir, exists, list_dir, remove_path, reveal
         ])
         .run(tauri::generate_context!())

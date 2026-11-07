@@ -27,6 +27,42 @@ export interface VideoClip {
   zoom?: number;  // 1..3, punch-in
   zx?: number;    // 0..1, where the zoom looks (horizontal)
   zy?: number;    // 0..1 (vertical)
+  trans?: ClipTrans;  // transition from the previous clip into this one
+}
+
+export type ClipTrans = 'none' | 'punch' | 'shake' | 'flash' | 'blur' | 'fade';
+export const CLIP_TRANS_MS: Record<ClipTrans, number> = { none: 0, punch: 280, shake: 450, flash: 180, blur: 200, fade: 250 };
+
+/** How a clip looks `lt` ms after it starts (and before the next one), shared by preview and export. */
+export function clipFx(trans: ClipTrans, lt: number, z0: number) {
+  let zoom = z0, dx = 0, dy = 0, blur = 0, white = 0, black = 0;
+  const s = lt / 1000;
+  if (trans === 'punch' && s < 0.28) zoom = z0 * (1 + 0.25 * Math.pow(1 - s / 0.28, 3));
+  if (trans === 'blur' && s < 0.2) { zoom = z0 * (1 + 0.12 * Math.pow(1 - s / 0.2, 2)); if (s < 0.12) blur = 1; }
+  if (trans === 'shake') {
+    zoom = Math.max(z0, 1.08);
+    if (s < 0.45) { dx = 30 * Math.sin(s * 90) * Math.exp(-s * 7); dy = 24 * Math.cos(s * 77) * Math.exp(-s * 7); }
+  }
+  if (trans === 'flash' && s < 0.18) white = 1 - s / 0.18;
+  if (trans === 'fade' && s < 0.25) black = 1 - s / 0.25;
+  return { zoom, dx, dy, blur, white, black };
+}
+
+/** Background music under the whole video, with optional ducking under speech. */
+export type Duck = 'off' | 'light' | 'medium' | 'strong';
+export const DUCK_RATIO: Record<Exclude<Duck, 'off'>, number> = { light: 4, medium: 9, strong: 20 };
+export const DUCK_LEVEL: Record<Duck, number> = { off: 1, light: 0.55, medium: 0.32, strong: 0.16 };
+
+export interface MusicItem {
+  id: string;
+  file: string;
+  name: string;
+  startMs: number;   // timeline time
+  inMs: number;      // where in the song it starts
+  lengthMs: number;
+  sourceMs: number;
+  volume: number;    // 0..1.5
+  duck: Duck;
 }
 
 export interface TextStyle {
@@ -130,6 +166,7 @@ export interface Timeline {
   sounds?: SoundItem[];
   images?: ImageItem[];
   watermark?: Watermark | null;
+  music?: MusicItem[];
 }
 
 export const DEFAULT_TEXT: TextStyle = {
@@ -305,7 +342,30 @@ export function renderArgs(spec: RenderSpec): string[] {
         `crop=${W}:${H}:x='(iw-${W})*${zx}':y='(ih-${H})*${zy}'`;
     }
     const sp = c.speed === 1 ? '' : `,setpts=PTS/${Number(c.speed.toFixed(4))}`;
-    f.push(`[${i}:v]setpts=PTS-STARTPTS${sp},${fit},setsar=1,fps=${F},format=yuv420p[v${i}]`);
+    const tr: ClipTrans = i > 0 ? (c.trans ?? 'none') : 'none';
+    const next: ClipTrans = tl.clips[i + 1]?.trans ?? 'none';
+    const durS = clipDuration(c) / 1000;
+    const zx = Number((c.zx ?? 0.5).toFixed(4)), zy = Number((c.zy ?? 0.5).toFixed(4));
+    let chain: string;
+    if (tr === 'punch' || tr === 'shake' || tr === 'blur') {
+      // animated zoom on the fitted canvas (zoompan evaluates per frame; it = time since the clip started)
+      const base = c.fit === 'fit'
+        ? `scale=${W}:${H}:force_original_aspect_ratio=decrease:flags=lanczos,pad=${W}:${H}:(ow-iw)/2:(oh-ih)/2:black`
+        : `scale=${W}:${H}:force_original_aspect_ratio=increase:flags=lanczos,crop=${W}:${H}`;
+      let zExpr = `${z}`, sx = '0', sy = '0';
+      if (tr === 'punch') zExpr = `${z}*(1+0.25*pow(1-min(1,it/0.28),3))`;
+      if (tr === 'blur') zExpr = `${z}*(1+0.12*pow(1-min(1,it/0.2),2))`;
+      if (tr === 'shake') { zExpr = `${Math.max(z, 1.08)}`; sx = `lt(it,0.45)*30*sin(it*90)*exp(-it*7)`; sy = `lt(it,0.45)*24*cos(it*77)*exp(-it*7)`; }
+      const x = `max(0,min(iw-iw/zoom,(iw-iw/zoom)*${zx}+${sx}))`, y = `max(0,min(ih-ih/zoom,(ih-ih/zoom)*${zy}+${sy}))`;
+      chain = `${base},setsar=1,fps=${F},zoompan=z='${zExpr}':x='${x}':y='${y}':d=1:s=${W}x${H}:fps=${F}`;
+      if (tr === 'blur') chain += `,boxblur=24:enable='lt(t,0.12)'`;
+    } else {
+      chain = `${fit},setsar=1,fps=${F}`;
+    }
+    if (tr === 'flash') chain += `,fade=t=in:st=0:d=0.18:color=white`;
+    if (tr === 'fade') chain += `,fade=t=in:st=0:d=0.25`;
+    if (next === 'fade' && durS > 0.3) chain += `,fade=t=out:st=${(durS - 0.25).toFixed(3)}:d=0.25`;
+    f.push(`[${i}:v]setpts=PTS-STARTPTS${sp},${chain},format=yuv420p[v${i}]`);
     const dur = (clipDuration(c) / 1000).toFixed(3);
     if (m.hasAudio) {
       const chain = ['asetpts=PTS-STARTPTS', ...atempoChain(c.speed), `volume=${Number(c.volume.toFixed(3))}`,
@@ -373,11 +433,34 @@ export function renderArgs(spec: RenderSpec): string[] {
     v = 'sv';
   }
 
-  // sound effects mixed over the main audio
+  // background music (optionally ducked under the main audio) and sound effects, mixed over the main audio
   let aOut = 'ca';
+  let main = 'ca';
+  const labels: string[] = [];
+  const music = (tl.music ?? []).filter((m) => m.startMs < total && m.lengthMs > 300);
+  const ducked = music.filter((m) => m.duck !== 'off');
+  if (ducked.length) {
+    f.push(`[ca]asplit=${ducked.length + 1}[cam]${ducked.map((_, j) => `[sc${j}]`).join('')}`);
+    main = 'cam';
+  }
+  let dj = 0;
+  music.forEach((m, k) => {
+    const len = Math.min(m.lengthMs, total - m.startMs) / 1000;
+    args.push('-ss', (m.inMs / 1000).toFixed(3), '-t', len.toFixed(3), '-i', m.file);
+    const d = Math.max(0, Math.round(m.startMs));
+    const fo = Math.max(0, len - 1.2).toFixed(3);
+    f.push(`[${input}:a]aformat=sample_fmts=fltp:channel_layouts=stereo,aresample=48000,volume=${Number(m.volume.toFixed(3))},afade=t=in:d=0.6,afade=t=out:st=${fo}:d=1.2,adelay=${d}|${d}[mu${k}]`);
+    if (m.duck !== 'off') {
+      f.push(`[mu${k}][sc${dj}]sidechaincompress=threshold=0.015:ratio=${DUCK_RATIO[m.duck]}:attack=20:release=450:makeup=1[md${k}]`);
+      labels.push(`[md${k}]`);
+      dj++;
+    } else {
+      labels.push(`[mu${k}]`);
+    }
+    input++;
+  });
   const sfx = (tl.sounds ?? []).filter((s) => s.startMs < total && s.lengthMs > 0);
   if (sfx.length) {
-    const labels: string[] = [];
     sfx.forEach((s, k) => {
       args.push('-t', (s.lengthMs / 1000).toFixed(3), '-i', s.file);
       const d = Math.max(0, Math.round(s.startMs));
@@ -385,7 +468,9 @@ export function renderArgs(spec: RenderSpec): string[] {
       labels.push(`[sfx${k}]`);
       input++;
     });
-    f.push(`[ca]${labels.join('')}amix=inputs=${sfx.length + 1}:duration=first:dropout_transition=0:normalize=0,alimiter=limit=0.97[mix]`);
+  }
+  if (labels.length) {
+    f.push(`[${main}]${labels.join('')}amix=inputs=${labels.length + 1}:duration=first:dropout_transition=0:normalize=0,alimiter=limit=0.97[mix]`);
     aOut = 'mix';
   }
 
@@ -452,4 +537,106 @@ export function sourceToTimeline(clips: VideoClip[], mediaId: string, sourceMs: 
     start += d;
   }
   return null;
+}
+
+// ---------- remove pauses ----------
+
+export interface Range { startMs: number; endMs: number }
+
+/** Parses ffmpeg silencedetect output into silent ranges (source time). */
+export function parseSilences(stderr: string, durationMs: number): Range[] {
+  const out: Range[] = [];
+  let open: number | null = null;
+  for (const line of stderr.split(/\r?\n/)) {
+    const a = /silence_start:\s*(-?[\d.]+)/.exec(line);
+    if (a) { open = Math.max(0, Number(a[1]) * 1000); continue; }
+    const b = /silence_end:\s*([\d.]+)/.exec(line);
+    if (b && open !== null) { out.push({ startMs: open, endMs: Number(b[1]) * 1000 }); open = null; }
+  }
+  if (open !== null) out.push({ startMs: open, endMs: durationMs });
+  return out;
+}
+
+/** Speech = the parts that are not silent. */
+export function invertRanges(silences: Range[], durationMs: number): Range[] {
+  const out: Range[] = [];
+  let t = 0;
+  for (const s of [...silences].sort((a, b) => a.startMs - b.startMs)) {
+    if (s.startMs > t) out.push({ startMs: t, endMs: s.startMs });
+    t = Math.max(t, s.endMs);
+  }
+  if (t < durationMs) out.push({ startMs: t, endMs: durationMs });
+  return out;
+}
+
+/**
+ * Cuts the silent parts (at least `minGapMs` long, keeping `padMs` of air on each side) out of every clip.
+ * Returns the new clips and a function that maps old timeline times to new ones, so text, captions,
+ * memes and sounds can follow the edit.
+ */
+export function removePauses(
+  clips: VideoClip[], silences: Record<string, Range[]>, minGapMs: number, padMs: number, newId: () => string,
+): { clips: VideoClip[]; map: (t: number) => number; removedMs: number; cuts: number } {
+  const pieces: { clip: VideoClip; from: number }[] = [];  // from = old clip index
+  const perOld: { inMs: number; outMs: number; newStart: number }[][] = [];
+  let cuts = 0;
+  clips.forEach((c, i) => {
+    const sil = (silences[c.mediaId] ?? [])
+      .map((r) => ({ startMs: Math.max(r.startMs, c.inMs) + padMs, endMs: Math.min(r.endMs, c.outMs) - padMs }))
+      .filter((r) => r.endMs - r.startMs + 2 * padMs >= minGapMs && r.endMs > r.startMs);
+    // a pause at the very start/end of a clip is cut right to the edge
+    for (const r of sil) {
+      if (r.startMs - padMs <= c.inMs + 1) r.startMs = c.inMs;
+      if (r.endMs + padMs >= c.outMs - 1) r.endMs = c.outMs;
+    }
+    const keep: Range[] = [];
+    let t = c.inMs;
+    for (const r of sil.sort((a, b) => a.startMs - b.startMs)) {
+      if (r.startMs > t) keep.push({ startMs: t, endMs: r.startMs });
+      t = Math.max(t, r.endMs);
+      cuts++;
+    }
+    if (t < c.outMs) keep.push({ startMs: t, endMs: c.outMs });
+    const kept = keep.filter((k) => k.endMs - k.startMs >= 120);
+    perOld.push([]);
+    kept.forEach((k, j) => {
+      pieces.push({ clip: { ...c, id: j === 0 ? c.id : newId(), inMs: Math.round(k.startMs), outMs: Math.round(k.endMs), trans: j === 0 ? c.trans : 'none' }, from: i });
+    });
+  });
+  // new start times
+  let acc = 0;
+  for (const p of pieces) {
+    perOld[p.from].push({ inMs: p.clip.inMs, outMs: p.clip.outMs, newStart: acc });
+    acc += clipDuration(p.clip);
+  }
+  const oldStarts = clipStarts(clips);
+  const nextKept = (from: number): number => {
+    for (let i = from; i < perOld.length; i++) if (perOld[i].length) return perOld[i][0].newStart;
+    return acc;
+  };
+  const map = (t: number): number => {
+    const loc = locate(clips, t);
+    if (!loc) return 0;
+    const c = clips[loc.index];
+    const src = c.inMs + (t - oldStarts[loc.index]) * c.speed;
+    for (const k of perOld[loc.index]) {
+      if (src < k.inMs) return k.newStart;
+      if (src <= k.outMs) return k.newStart + (src - k.inMs) / c.speed;
+    }
+    return nextKept(loc.index + 1);
+  };
+  const before = clips.reduce((a, c) => a + clipDuration(c), 0);
+  return { clips: pieces.map((p) => p.clip), map, removedMs: before - acc, cuts };
+}
+
+/** Moves every timeline item through `map` after an edit that removed time. Items that vanish are dropped. */
+export function remapItems(tl: Timeline, map: (t: number) => number) {
+  tl.texts = tl.texts.map((x) => ({ ...x, startMs: map(x.startMs), endMs: map(x.endMs) })).filter((x) => x.endMs - x.startMs >= 100);
+  tl.images = (tl.images ?? []).map((x) => ({ ...x, startMs: map(x.startMs), endMs: map(x.endMs) })).filter((x) => x.endMs - x.startMs >= 100);
+  tl.sounds = (tl.sounds ?? []).map((x) => ({ ...x, startMs: map(x.startMs) }));
+  tl.music = (tl.music ?? []).map((x) => ({ ...x, startMs: map(x.startMs) }));
+  tl.captions.lines = tl.captions.lines.map((l) => {
+    const words = l.words.map((w) => ({ ...w, startMs: map(w.startMs), endMs: map(w.endMs) })).filter((w) => w.endMs - w.startMs >= 30);
+    return { ...l, words, startMs: words[0]?.startMs ?? 0, endMs: words[words.length - 1]?.endMs ?? 0 };
+  }).filter((l) => l.words.length);
 }

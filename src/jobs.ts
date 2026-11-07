@@ -5,8 +5,8 @@ import {
   type Encoder,
 } from './ffmpeg';
 import {
-  buildAss, groupLines, renderArgs, sourceToTimeline, timelineDuration, wordsFromWhisper,
-  type CaptionLine, type Timeline, type Word,
+  buildAss, groupLines, parseSilences, renderArgs, sourceToTimeline, timelineDuration, wordsFromWhisper,
+  type CaptionLine, type Range, type Timeline, type Word,
 } from './render';
 import { dataDir, projectDir, uid, type MediaEntry, type ModelSize, type Project } from './store';
 
@@ -297,4 +297,27 @@ export async function cancelExport(job: ExportJob) {
     await invoke('remove_path', { path: job.outPath }).catch(() => undefined);
   }
   onChange();
+}
+
+// ---------- audio analysis ----------
+
+/** Silent parts of a media file's main audio track (source time), cached per noise threshold. */
+export async function silencesOf(m: MediaEntry, noiseDb: number): Promise<Range[]> {
+  const key = String(noiseDb);
+  if (m.silences?.[key]) return m.silences[key];
+  if (!m.hasAudio) return [{ startMs: 0, endMs: m.durationMs }];
+  const log = await invoke<string>('ffmpeg_log', {
+    args: ['-hide_banner', '-nostats', '-i', m.playable, '-map', '0:a:0', '-vn', '-af', `silencedetect=noise=${noiseDb}dB:d=0.3`, '-f', 'null', '-'],
+  });
+  const r = parseSilences(log, m.durationMs);
+  (m.silences ??= {})[key] = r;
+  return r;
+}
+
+export interface MusicInfo { durationMs: number }
+export async function probeAudio(path: string): Promise<MusicInfo> {
+  const info = JSON.parse(await invoke<string>('probe', { path })) as { streams: { codec_type: string }[]; format: { duration?: string } };
+  const ms = Math.round(Number(info.format.duration ?? 0) * 1000);
+  if (!info.streams.some((s) => s.codec_type === 'audio') || !ms) throw new Error('File ini bukan audio yang bisa dibaca.');
+  return { durationMs: ms };
 }

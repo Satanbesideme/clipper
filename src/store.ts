@@ -1,10 +1,11 @@
 // Projects live as JSON files in the app data folder. Nothing leaves the PC.
 import { invoke, join } from './tauri';
 import type { Encoder } from './ffmpeg';
-import { DEFAULT_CAPTION, timelineDuration, type Media, type Timeline, type Watermark } from './render';
+import { DEFAULT_CAPTION, timelineDuration, type Media, type Range, type Timeline, type Watermark } from './render';
 
 export interface MediaEntry extends Media {
   thumbs: { everySec: number; sheets: number; tw: number; th: number; ready: boolean };
+  silences?: Record<string, Range[]>;  // keyed by noise threshold, e.g. "-38"
 }
 
 export interface Project {
@@ -54,7 +55,7 @@ export function newProject(name: string): Project {
     name,
     media: [],
     timeline: {
-      width: 1080, height: 1920, fps: 60, clips: [], texts: [], sounds: [], images: [],
+      width: 1080, height: 1920, fps: 60, clips: [], texts: [], sounds: [], images: [], music: [],
       captions: { mode: 'word', y: 0.7, style: { ...DEFAULT_CAPTION }, lines: [] },
     },
     createdAt: now,

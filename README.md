@@ -12,8 +12,11 @@ Buka tab **Releases** di repo ini, unduh `GALSURKU Clipper_..._x64-setup.exe`, l
 4. **Suara (soundboard)**: tab **Suara**. Pause di momennya, pencet pad atau angka **1–9**, lalu lanjut putar. Tarik file MP3/WAV/OGG ke jendela untuk menambah.
 5. **Meme**: tab **Meme**. Klik gambar atau **Shift+1–9** untuk memasang meme di playhead, lengkap dengan animasi masuk/keluar (Pop, Fade, Geser). Klik **Atur** untuk mengubah default tiap meme.
 6. **Zoom (punch-in)**: pilih potongan video, atur **Zoom** di panel kanan, geser preview untuk mengarahkan.
-7. **Teks**: tab **Teks**, pilih gaya, ketik, lalu geser posisinya di preview.
-8. **Ekspor**: tombol **Ekspor** di kanan atas. Hasil 1080×1920 MP4 di `Videos\GALSURKU Clipper`.
+7. **Transisi**: klik penanda kotak di sambungan antar potongan (atau pilih potongan), lalu pilih Punch, Guncang, Kilat, Blur cepat, atau Gelap. Zoom sebuah potongan otomatis memasang Punch.
+8. **Musik latar**: tab **Media → Tambah musik latar**. Auto-ducking menurunkan musik saat kamu bicara (Ringan/Sedang/Kuat).
+9. **Hapus jeda**: tombol **Hapus jeda** di atas timeline memotong semua bagian diam sekaligus. Ctrl+Z untuk membatalkan.
+10. **Teks**: tab **Teks**, pilih gaya, ketik, lalu geser posisinya di preview.
+11. **Ekspor**: tombol **Ekspor** di kanan atas. Hasil 1080×1920 MP4 di `Videos\GALSURKU Clipper`.
 
 | Tombol | Fungsi |
 | --- | --- |
