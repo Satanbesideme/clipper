@@ -369,7 +369,9 @@ function updateTime() {
 
 // ================= left panel =================
 
-function renderLeft() {
+function renderLeft() { try { renderLeftInner(); } catch (e) { reportOnce(e); } }
+
+function renderLeftInner() {
   const el = $('#left');
   if (!el || !P) return;
   if (tab === 'media') el.replaceChildren(...mediaPanel());
@@ -584,7 +586,9 @@ function styleControls(st: TextStyle, set: (p: Partial<TextStyle>) => void, show
   ];
 }
 
-function renderInspector() {
+function renderInspector() { try { renderInspectorInner(); } catch (e) { reportOnce(e); } }
+
+function renderInspectorInner() {
   const el = $('#inspector');
   if (!el || !P) return;
   const clip = selected('clip');
@@ -877,6 +881,11 @@ function pause() {
 }
 
 function tick() {
+  try { tickInner(); } catch (e) { reportOnce(e); }
+  if (playing) requestAnimationFrame(tick);
+}
+
+function tickInner() {
   if (!playing || !P) return;
   const clips = tl().clips;
   const c = clips[activeIndex];
@@ -907,13 +916,20 @@ function tick() {
   renderFrame();
   drawTimeline();
   updateTime();
-  requestAnimationFrame(tick);
 }
 
 interface Box { kind: 'text' | 'captions' | 'image'; id: string; x: number; y: number; w: number; h: number }
 let boxes: Box[] = [];
 
 function renderFrame() {
+  try { renderFrameInner(); } catch (e) {
+    reportOnce(e);
+    const ctx = preview?.getContext('2d');
+    if (ctx) { ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.filter = 'none'; ctx.globalAlpha = 1; }
+  }
+}
+
+function renderFrameInner() {
   if (!preview || !P) return;
   const ctx = preview.getContext('2d');
   if (!ctx) return;
@@ -1231,11 +1247,25 @@ function laneOf(kind: Lane['kind'], row = 0) {
 }
 
 function roundRect(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, hh: number, r: number) {
+  // very short items can be narrower than a pixel when zoomed out; never pass a negative size or radius
+  const ww = Math.max(1, w), hhh = Math.max(1, hh);
   ctx.beginPath();
-  ctx.roundRect(x, y, Math.max(0, w), hh, Math.min(r, w / 2));
+  ctx.roundRect(x, y, ww, hhh, Math.max(0, Math.min(r, ww / 2, hhh / 2)));
 }
 
-function drawTimeline() {
+/** Reports a drawing error once (not every frame) and lets the rest of the app keep working. */
+const reported = new Set<string>();
+function reportOnce(e: unknown) {
+  const msg = (e as Error)?.message ?? String(e);
+  console.error(e);
+  if (reported.has(msg)) return;
+  reported.add(msg);
+  toast(`Terjadi error tampilan: ${msg}`, 'error');
+}
+
+function drawTimeline() { try { drawTimelineInner(); } catch (e) { reportOnce(e); } }
+
+function drawTimelineInner() {
   if (!tlCanvas || !P) return;
   const ctx = tlCanvas.getContext('2d');
   if (!ctx) return;

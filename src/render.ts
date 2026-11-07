@@ -527,7 +527,26 @@ export function groupLines(words: Word[], newId: () => string, maxWords = 4, max
     if (next.startMs - lines[i].endMs < 300) lines[i].endMs = next.startMs;
     lines[i].endMs = Math.min(lines[i].endMs, next.startMs);
   }
-  return lines;
+  // whisper can give a line's words the same time as the next line: merge lines too short to read
+  const out: CaptionLine[] = [];
+  for (const l of lines) {
+    const prev = out[out.length - 1];
+    if (l.endMs - l.startMs < 200 && prev) {
+      prev.words.push(...l.words);
+      prev.endMs = Math.max(prev.endMs, l.endMs, l.startMs + 200);
+    } else if (l.endMs - l.startMs < 200) {
+      l.endMs = l.startMs + 200;
+      out.push(l);
+    } else {
+      out.push(l);
+    }
+  }
+  for (let i = 0; i + 1 < out.length; i++) {
+    if (out[i].endMs > out[i + 1].startMs) out[i + 1].startMs = out[i].endMs;
+    if (out[i + 1].endMs <= out[i + 1].startMs) out[i + 1].endMs = out[i + 1].startMs + 200;
+  }
+  for (const l of out) l.words = l.words.map((w) => ({ ...w, startMs: Math.max(l.startMs, Math.min(w.startMs, l.endMs)), endMs: Math.max(l.startMs, Math.min(w.endMs, l.endMs)) }));
+  return out;
 }
 
 /** Maps caption words from source time of one clip to timeline time (respects split and speed). */
