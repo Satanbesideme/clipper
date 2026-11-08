@@ -76,6 +76,10 @@ export function saveProject(p: Project, now = false) {
   return Promise.resolve();
 }
 
+let savedCb: (at: Date) => void = () => undefined;
+/** Called after every successful save (autosave indicator). */
+export function onSaved(cb: (at: Date) => void) { savedCb = cb; }
+
 export async function flush() {
   const p = pending;
   pending = null;
@@ -85,6 +89,38 @@ export async function flush() {
   const list = all.filter((x) => x.id !== p.id && x.version === 2);
   list.unshift({ id: p.id, name: p.name, durationMs: timelineDuration(p.timeline), clips: p.timeline.clips.length, updatedAt: p.updatedAt, version: 2 });
   await writeJson(join(await dataDir(), 'projects.json'), list);
+  savedCb(new Date());
+}
+
+// ---------- version history ----------
+
+export interface Version { file: string; at: Date; reason: string }
+const HISTORY_KEEP = 40;
+
+async function historyDir(id: string) { return join(await projectDir(id), 'history'); }
+
+/** Keeps a copy of the project as it is now. File name: <unix ms>_<reason>.json */
+export async function snapshotProject(p: Project, reason: string) {
+  const dir = await historyDir(p.id);
+  await invoke('ensure_dir', { path: dir });
+  const safe = reason.replace(/[^a-z0-9-]/gi, '-').slice(0, 30) || 'auto';
+  await writeJson(join(dir, `${Date.now()}_${safe}.json`), p);
+  const all = (await listVersions(p.id)).slice(HISTORY_KEEP);
+  for (const v of all) await invoke('remove_path', { path: join(dir, v.file) }).catch(() => undefined);
+}
+
+/** Newest first. */
+export async function listVersions(id: string): Promise<Version[]> {
+  const files = await invoke<string[]>('list_dir', { path: await historyDir(id) }).catch(() => [] as string[]);
+  return files
+    .map((f) => /^(\d{12,})_(.*)\.json$/.exec(f))
+    .filter((m): m is RegExpExecArray => !!m)
+    .map((m) => ({ file: m[0], at: new Date(Number(m[1])), reason: m[2] }))
+    .sort((a, b) => b.at.getTime() - a.at.getTime());
+}
+
+export async function loadVersion(id: string, file: string): Promise<Project | null> {
+  return readJson<Project | null>(join(await historyDir(id), file), null);
 }
 
 export async function deleteProject(id: string) {

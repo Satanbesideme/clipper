@@ -84,6 +84,54 @@ export interface TextItem {
   x: number;        // 0..1, centre of the text
   y: number;        // 0..1
   style: TextStyle;
+  anim?: TextAnim;
+}
+
+export type TextAnim = 'none' | 'pop' | 'fade' | 'rise' | 'type' | 'shake';
+
+/** Typewriter speed: ms per character, and when the whole text is shown. */
+export function typeTiming(chars: number, durMs: number) {
+  const per = Math.max(15, Math.min(55, (Math.min(1400, durMs * 0.6)) / Math.max(1, chars)));
+  return { per, total: per * chars };
+}
+
+/**
+ * How animated text looks `lt` ms after it appears (the preview copies what the export's ASS tags do).
+ * scale/rot are around the text centre, dy is in canvas pixels at 1080 wide, chars = characters shown.
+ */
+export function textAnimState(anim: TextAnim | undefined, lt: number, durMs: number, chars: number) {
+  let scale = 1, alpha = 1, dy = 0, rot = 0, shown = chars;
+  const left = durMs - lt;
+  switch (anim) {
+    case 'pop':
+      if (lt < 140) scale = 0.3 + (1.12 - 0.3) * (lt / 140);
+      else if (lt < 240) scale = 1.12 - 0.12 * ((lt - 140) / 100);
+      if (left < 150) alpha = Math.max(0, left / 150);
+      break;
+    case 'fade':
+      if (lt < 250) alpha = lt / 250;
+      if (left < 200) alpha = Math.min(alpha, Math.max(0, left / 200));
+      break;
+    case 'rise':
+      if (lt < 280) dy = 90 * (1 - lt / 280);
+      if (lt < 120) alpha = lt / 120;
+      if (left < 150) alpha = Math.min(alpha, Math.max(0, left / 150));
+      break;
+    case 'shake': {
+      const keys: [number, number][] = [[0, 0], [70, 7], [140, -6], [210, 4], [280, 0]];
+      for (let i = 0; i + 1 < keys.length; i++) {
+        const [t0, a0] = keys[i], [t1, a1] = keys[i + 1];
+        if (lt >= t0 && lt < t1) rot = a0 + (a1 - a0) * ((lt - t0) / (t1 - t0));
+      }
+      break;
+    }
+    case 'type': {
+      const { per } = typeTiming(chars, durMs);
+      shown = Math.min(chars, Math.floor(lt / per) + 1);
+      break;
+    }
+  }
+  return { scale, alpha, dy, rot, chars: shown };
 }
 
 export interface Word { text: string; startMs: number; endMs: number }
@@ -321,7 +369,32 @@ export function buildAss(tl: Timeline, fontScale: (font: string, bold: boolean) 
       ev(1, a, b, cap.style, pre + text);
     });
   }
-  for (const t of tl.texts) ev(2, t.startMs, t.endMs, t.style, overrides(t.style, t.x, t.y, W, H, fontScale(t.style.font, t.style.bold)) + assEscape(t.text));
+  for (const t of tl.texts) {
+    let pre = overrides(t.style, t.x, t.y, W, H, fontScale(t.style.font, t.style.bold));
+    let body = assEscape(t.text);
+    const px = Math.round(t.x * W), py = Math.round(t.y * H);
+    const extra: string[] = [];
+    switch (t.anim) {
+      case 'pop': extra.push('\\fscx30\\fscy30\\t(0,140,\\fscx112\\fscy112)\\t(140,240,\\fscx100\\fscy100)\\fad(0,150)'); break;
+      case 'fade': extra.push('\\fad(250,200)'); break;
+      case 'rise':
+        pre = pre.replace(`\\pos(${px},${py})`, `\\move(${px},${py + 90},${px},${py},0,280)`);
+        extra.push('\\fad(120,150)');
+        break;
+      case 'shake': extra.push('\\t(0,70,\\frz7)\\t(70,140,\\frz-6)\\t(140,210,\\frz4)\\t(210,280,\\frz0)'); break;
+      case 'type': {
+        // karaoke reveal: each character switches from invisible (secondary alpha FF) to visible
+        const chars = [...t.text].filter((c) => c !== '\n').length;
+        const { per } = typeTiming(chars, t.endMs - t.startMs);
+        const cs = Math.max(1, Math.round(per / 10));
+        extra.push('\\2a&HFF&');
+        body = [...t.text].map((c) => (c === '\n' ? '\\N' : `{\\ko${cs}}${assEscape(c)}`)).join('');
+        break;
+      }
+    }
+    if (extra.length) pre = pre.replace(/}$/, `${extra.join('')}}`);
+    ev(2, t.startMs, t.endMs, t.style, pre + body);
+  }
   return lines.join('\n') + '\n';
 }
 

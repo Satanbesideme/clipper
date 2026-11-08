@@ -1,7 +1,7 @@
 // Running ffmpeg / whisper: import, thumbnails, speech-to-text and the export queue.
 import { invoke, listen, join, extName, dirName, stem, baseName } from './tauri';
 import {
-  ENCODER_ORDER, encoderProbeArgs, qualityBitrate, type WhisperOpts, remuxArgs, safeName, speechWavArgs, stripEmoji, thumbArgs, whisperArgs,
+  ENCODER_ORDER, encoderProbeArgs, qualityBitrate, chunkPlan, whisperChunksArgs, type WhisperOpts, remuxArgs, safeName, speechWavArgs, stripEmoji, thumbArgs, whisperArgs,
   type Encoder,
 } from './ffmpeg';
 import {
@@ -252,10 +252,29 @@ export async function transcribe(p: Project, size: ModelSize, onStatus: (msg: st
       sttJob = uid();
       await runTool('ffmpeg', timelineWavArgs(b.clips, media, wav, opts.tracks ?? 'all', true), undefined, sttJob);
       if (sttCancelled) throw new Error('Dibatalkan.');
-      onStatus(`Mendengarkan ucapan${tag}…`, done / total);
+      // short overlapping windows, each decoded on its own (see whisperChunksArgs)
+      const plan = opts.careful === false ? chunkPlan(b.dur, b.dur + 1, 0) : chunkPlan(b.dur);
+      const chunkWavs = plan.map((_, ci) => join(dir, `part-${bi}-c${ci}.wav`));
+      if (plan.length > 1) {
+        onStatus(`Membagi audio${tag}…`, done / total);
+        const cut: string[] = ['-hide_banner', '-y', '-nostats', '-i', wav];
+        plan.forEach((c, ci) => cut.push('-ss', (c.startMs / 1000).toFixed(3), '-t', (c.lenMs / 1000).toFixed(3), '-af', 'apad=pad_dur=1', '-c:a', 'pcm_s16le', chunkWavs[ci]));
+        sttJob = uid();
+        await runTool('ffmpeg', cut, undefined, sttJob);
+      } else {
+        chunkWavs[0] = wav;
+      }
+      if (sttCancelled) throw new Error('Dibatalkan.');
+      for (const w of chunkWavs) await invoke('remove_path', { path: `${w}.json` }).catch(() => undefined);
       await invoke('remove_path', { path: `${base}.json` }).catch(() => undefined);
+      onStatus(`Mendengarkan ucapan${tag}…`, done / total);
+      let fileIdx = 0, lastPct = 0;
       const progress = (_ms: number, pct: number) => {
-        if (pct >= 0) onStatus(`Mendengarkan ucapan${tag}… ${Math.round(pct)}%`, (done + (b.dur * pct) / 100) / total);
+        if (pct < 0) return;
+        if (pct + 20 < lastPct) fileIdx = Math.min(plan.length - 1, fileIdx + 1);
+        lastPct = pct;
+        const frac = (fileIdx + pct / 100) / plan.length;
+        onStatus(`Mendengarkan ucapan${tag}… ${Math.round(frac * 100)}%`, (done + b.dur * frac) / total);
       };
       // try the most precise settings first; a whisper build that does not know an option fails at once,
       // so step down until one works and remember it for the next run
@@ -263,27 +282,47 @@ export async function transcribe(p: Project, size: ModelSize, onStatus: (msg: st
         { dtw: size, careful: opts.careful }, { careful: opts.careful }, { dtw: size }, {},
       ].filter((v, i, all) => (opts.careful || !v.careful) && all.findIndex((w) => JSON.stringify(w) === JSON.stringify(v)) === i);
       let lastErr: unknown = null;
+      let ok = false;
       for (let vi = Math.min(whisperLevel, variants.length - 1); vi < variants.length; vi++) {
         sttJob = uid();
+        fileIdx = 0; lastPct = 0;
         try {
-          await runTool('whisper', whisperArgs(model, wav, base, threads, variants[vi]), progress, sttJob);
+          await runTool('whisper', whisperChunksArgs(model, chunkWavs, threads, variants[vi]), progress, sttJob);
           whisperLevel = vi;
-          lastErr = null;
+          ok = true;
           break;
         } catch (e) {
           if (sttCancelled) throw e;
           lastErr = e;
         }
       }
-      if (lastErr) throw lastErr;
-      if (sttCancelled) throw new Error('Dibatalkan.');
-      let json: string;
-      try { json = await invoke<string>('read_text', { path: `${base}.json` }); }
-      catch { throw new Error('Hasil subtitle tidak ditemukan. Coba lagi, atau pilih model Cepat.'); }
-      for (const w of wordsFromWhisper(json, 0)) {
-        if (w.startMs >= b.dur) continue;  // inside the silent padding
-        words.push({ text: w.text, startMs: b.offset + w.startMs, endMs: b.offset + Math.min(b.dur, Math.max(w.endMs, w.startMs + 60)) });
+      // very old whisper builds: one file per run, written with -of
+      if (!ok) {
+        for (const [ci, w] of chunkWavs.entries()) {
+          sttJob = uid();
+          await runTool('whisper', whisperArgs(model, w, w, threads, {}), progress, sttJob).catch((e) => { lastErr = e; });
+          if (sttCancelled) throw new Error('Dibatalkan.');
+          void ci;
+        }
       }
+      if (sttCancelled) throw new Error('Dibatalkan.');
+      let found = 0;
+      for (const [ci, c] of plan.entries()) {
+        const w = chunkWavs[ci];
+        let json = '';
+        for (const candidate of [`${w}.json`, `${w.replace(/\.wav$/, '')}.json`, ...(plan.length === 1 ? [`${base}.json`] : [])]) {
+          try { json = await invoke<string>('read_text', { path: candidate }); break; } catch { /* try next name */ }
+        }
+        if (!json) continue;
+        found++;
+        for (const wd of wordsFromWhisper(json, c.startMs)) {
+          if (wd.startMs < c.keepFrom || wd.startMs >= c.keepTo || wd.startMs >= b.dur) continue;
+          words.push({ text: wd.text, startMs: b.offset + wd.startMs, endMs: b.offset + Math.min(b.dur, Math.max(wd.endMs, wd.startMs + 60)) });
+        }
+        if (w !== wav) await invoke('remove_path', { path: w }).catch(() => undefined);
+        await invoke('remove_path', { path: `${w}.json` }).catch(() => undefined);
+      }
+      if (!found) throw (lastErr instanceof Error ? lastErr : new Error('Hasil subtitle tidak ditemukan. Coba lagi, atau pilih model Cepat.'));
     } catch (e) {
       if (sttCancelled) throw new Error('Dibatalkan.');
       throw new Error(`${(e as Error).message}`);

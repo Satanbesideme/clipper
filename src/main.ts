@@ -4,7 +4,7 @@ import { qualityBitrate } from './ffmpeg';
 import {
   DEFAULT_CAPTION, DEFAULT_TEXT, clipDuration, clipStarts, locate, splitAt, timelineDuration,
   type CaptionLine, type ImageItem, type Watermark, type SoundItem, type TextItem, type TextStyle, type Trans, type VideoClip, type Word,
-  transState, TRANS_IN_MS, clipFx, removePauses, remapItems, invertRanges, DUCK_LEVEL,
+  transState, TRANS_IN_MS, textAnimState, type TextAnim, clipFx, removePauses, remapItems, invertRanges, DUCK_LEVEL,
   type ClipTrans, type Duck, type MusicItem, type Range, type VideoLayer, type Crop, NO_CROP, cropSize,
 } from './render';
 import {
@@ -12,7 +12,7 @@ import {
   type Library, type Meme, type Pad, type VideoMeme,
 } from './library';
 import {
-  dataDir, deleteProject, flush, listProjects, loadProject, loadSettings, newProject, saveProject, saveSettings, uid,
+  dataDir, deleteProject, flush, listProjects, listVersions, loadVersion, onSaved, snapshotProject, loadProject, loadSettings, newProject, saveProject, saveSettings, uid,
   type MediaEntry, type Project, type Settings,
 } from './store';
 import {
@@ -59,6 +59,19 @@ function toast(msg: string, kind: 'info' | 'error' = 'info') {
 }
 
 const APP_NAME = 'Gals Clip Studio';
+
+let lastSavedAt = 0;
+let lastSnapshotAt = 0;
+/** Saves a version when something changed since the last one. */
+async function autoSnapshot(reason: string, force = false) {
+  if (!P) return;
+  if (!force && lastSavedAt <= lastSnapshotAt) return;
+  try {
+    await flush();
+    await snapshotProject(P, reason);
+    lastSnapshotAt = Date.now();
+  } catch { /* history is a safety net; never interrupt editing */ }
+}
 
 /** The GALSURKU mark: two rings and a diamond. */
 function logoMark(size: number, cls = 'mark'): SVGSVGElement {
@@ -169,6 +182,13 @@ async function boot() {
     void wv?.onDragDropEvent((e) => document.body.classList.toggle('dragging', e.payload.type === 'enter' || e.payload.type === 'over'));
   } catch { /* cosmetic */ }
   onQueueChange(renderQueue);
+  onSaved((at) => {
+    const el = $('#saved');
+    if (el) { el.textContent = `Tersimpan ${at.toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' })}`; el.classList.remove('pulse'); void el.offsetWidth; el.classList.add('pulse'); }
+    lastSavedAt = at.getTime();
+  });
+  // a copy every 3 minutes while editing, kept in the project's history
+  setInterval(() => { void autoSnapshot('auto'); }, 180_000);
   window.addEventListener('keydown', onKey);
   window.addEventListener('resize', () => { layoutPreview(); sizeTimeline(); });
   await renderHome();
@@ -263,6 +283,8 @@ async function openProject(id: string, importNow: string[] = []) {
   const p = await loadProject(id);
   if (!p) { toast('Proyek tidak bisa dibuka.', 'error'); return; }
   P = p;
+  lastSnapshotAt = 0; lastSavedAt = 0;
+  void snapshotProject(p, 'dibuka').catch(() => undefined);
   p.timeline.sounds ??= [];
   p.timeline.images ??= [];
   p.timeline.music ??= [];
@@ -351,6 +373,7 @@ function renderEditor() {
       }),
       h('div', { class: 'spacer' }),
       h('span', { id: 'busy', class: 'busy muted small' }),
+      h('span', { id: 'saved', class: 'saved muted small', title: 'Proyek tersimpan otomatis setiap ada perubahan' }, 'Tersimpan otomatis'),
       h('button', { class: 'icon-btn help-btn', title: 'Tombol keyboard', 'aria-label': 'Tombol keyboard', onclick: toggleHelp }, '?'),
       h('button', { class: 'primary export-btn', id: 'export-btn', onclick: toggleExport }, 'Ekspor'),
     ),
@@ -575,12 +598,14 @@ function textPanel(): Node[] {
   ];
 }
 
+const ANIM_NAME: Record<TextAnim, string> = { none: 'Tanpa', pop: 'Pop', fade: 'Fade', rise: 'Naik', type: 'Ketik', shake: 'Goyang' };
+
 function addText(style: TextStyle) {
   if (!P) return;
   snapshot();
   const total = Math.max(3000, timelineDuration(tl()));
   const start = Math.round(clamp(t, 0, total - 500));
-  const item: TextItem = { id: uid(), startMs: start, endMs: Math.min(total, start + 3000), text: 'Ketik teks', x: 0.5, y: 0.2, style: { ...style } };
+  const item: TextItem = { id: uid(), startMs: start, endMs: Math.min(total, start + 3000), text: 'Ketik teks', x: 0.5, y: 0.2, style: { ...style }, anim: 'pop' };
   tl().texts.push(item);
   sel = { kind: 'text', id: item.id };
   changed();
@@ -708,6 +733,7 @@ async function runCaptions() {
   const p = P!;
   if (tl().captions.lines.length && !(await dialog().ask('Subtitle yang sekarang akan diganti. Lanjut?', { title: 'Buat ulang subtitle', kind: 'warning' }))) return;
   pause();
+  await autoSnapshot('sebelum-subtitle', true);
   captionsRunning = true;
   renderLeft();
   try {
@@ -903,6 +929,13 @@ function renderInspectorInner() {
         oninput: (e) => { text.text = (e.target as HTMLTextAreaElement).value; void saveProject(P!); renderFrame(); drawTimeline(); },
       }),
       /\p{Extended_Pictographic}/u.test(text.text) ? h('div', { class: 'muted small' }, 'Emoji belum ikut di video hasil ekspor.') : h('span'),
+      h('div', { class: 'block' },
+        h('div', { class: 'label' }, 'Animasi'),
+        h('div', { class: 'anim-grid' }, ...(['none', 'pop', 'fade', 'rise', 'type', 'shake'] as TextAnim[]).map((a) => h('button', {
+          class: (text.anim ?? 'none') === a ? 'on' : '',
+          onclick: () => { snapshot(); text.anim = a; changed(); seek(text.startMs); if (a !== 'none') { play(); setTimeout(() => pause(), 1100); } },
+        }, ANIM_NAME[a]))),
+      ),
       h('div', { class: 'block' }, ...styleControls(text.style, set, false)),
       h('div', { class: 'block' },
         h('div', { class: 'muted small mono' }, `${tc(text.startMs, true)} → ${tc(text.endMs, true)}`),
@@ -945,6 +978,7 @@ function renderInspectorInner() {
     )),
     h('div', { class: 'muted small' }, `Durasi ${tc(timelineDuration(tl()), true)} · ${tl().clips.length} potongan · ${tl().texts.length} teks · ${tl().captions.lines.length} baris subtitle`),
     watermarkBlock(),
+    historyBlock(),
     h('div', { class: 'block muted small' },
       h('div', {}, h('kbd', {}, 'Spasi'), ' putar / jeda'),
       h('div', {}, h('kbd', {}, 'Ctrl'), h('kbd', {}, 'B'), ' split di playhead'),
@@ -1195,8 +1229,37 @@ function renderFrameInner() {
   drawSafeGuide(ctx, W, H);
   for (const x of tl().texts) {
     if (t < x.startMs || t >= x.endMs || !x.text.trim()) continue;
-    const lines = x.text.split('\n').flatMap((l) => wrapSegs(ctx, l.split(/\s+/).filter(Boolean).map((w) => ({ text: w, color: x.style.color })), x.style, k, W - 120 * k));
-    const b = drawText(ctx, lines, x.x * W, x.y * H, x.style, k);
+    const toLines = (txt: string) => txt.split('\n').flatMap((l) => wrapSegs(ctx, l.split(/\s+/).filter(Boolean).map((w) => ({ text: w, color: x.style.color })), x.style, k, W - 120 * k));
+    const full = toLines(x.text);
+    const total = [...x.text].filter((c) => c !== '\n').length;
+    const an = textAnimState(x.anim, t - x.startMs, x.endMs - x.startMs, total);
+    // the box for selecting/dragging is the full, still text; the drawing below may be animated
+    ctx.save(); ctx.globalAlpha = 0;
+    const b = drawText(ctx, full, x.x * W, x.y * H, x.style, k);
+    ctx.restore();
+    if (an.alpha > 0.01) {
+      ctx.save();
+      ctx.globalAlpha = an.alpha;
+      const cx = x.x * W, cy = x.y * H + an.dy * k;
+      ctx.translate(cx, cy);
+      if (an.rot) ctx.rotate((-an.rot * Math.PI) / 180);
+      ctx.scale(an.scale, an.scale);
+      ctx.translate(-cx, -cy);
+      let shown = full;
+      if (an.chars < total) {
+        // typewriter: keep the final layout, draw only the characters revealed so far
+        let left = an.chars;
+        shown = full.map((line) => line.map((seg) => {
+          const take = Math.max(0, Math.min(seg.text.length, left));
+          left -= seg.text.length;
+          return { ...seg, text: seg.text.slice(0, take) };
+        }));
+        drawTextFixed(ctx, full, shown, cx, cy, x.style, k);
+      } else {
+        drawText(ctx, shown, cx, cy, x.style, k);
+      }
+      ctx.restore();
+    }
     boxes.push({ kind: 'text', id: x.id, ...b });
     if (sel?.kind === 'text' && sel.id === x.id) {
       ctx.strokeStyle = '#37b8ac';
@@ -1250,6 +1313,31 @@ function wrapSegs(ctx: CanvasRenderingContext2D, segs: Seg[], st: TextStyle, k: 
   }
   if (cur.length) lines.push(cur);
   return lines;
+}
+
+/** Draws `shown` (a prefix of `full`) at the positions `full` would have, so typing does not shift the text. */
+function drawTextFixed(ctx: CanvasRenderingContext2D, full: Seg[][], shown: Seg[][], cx: number, cy: number, st: TextStyle, k: number) {
+  ctx.font = fontOf(st, k);
+  ctx.textBaseline = 'middle';
+  ctx.textAlign = 'left';
+  const space = ctx.measureText(' ').width;
+  const lh = st.size * k * 1.18;
+  const widths = full.map((l) => l.reduce((s, x, i) => s + ctx.measureText(x.text).width + (i ? space : 0), 0));
+  const top = cy - (lh * full.length) / 2;
+  full.forEach((l, li) => {
+    let x = cx - widths[li] / 2;
+    const y = top + lh * (li + 0.5);
+    l.forEach((seg, si) => {
+      const part = shown[li]?.[si]?.text ?? '';
+      if (part) {
+        if (st.box) { ctx.fillStyle = 'rgba(0,0,0,.62)'; ctx.fillRect(x - 4 * k, y - lh / 2, ctx.measureText(part).width + 8 * k, lh); }
+        if (!st.box && st.outline > 0) { ctx.lineJoin = 'round'; ctx.lineWidth = st.outline * 2 * k; ctx.strokeStyle = '#000'; ctx.strokeText(part, x, y); }
+        ctx.fillStyle = seg.color;
+        ctx.fillText(part, x, y);
+      }
+      x += ctx.measureText(seg.text).width + space;
+    });
+  });
 }
 
 function drawText(ctx: CanvasRenderingContext2D, lines: Seg[][], cx: number, cy: number, st: TextStyle, k: number) {
@@ -2258,6 +2346,50 @@ function previewTrans() {
   setTimeout(() => pause(), TRANS_IN_MS + 600);
 }
 
+const REASON: Record<string, string> = {
+  auto: 'Simpan berkala', dibuka: 'Saat proyek dibuka', 'sebelum-hapus-jeda': 'Sebelum hapus jeda',
+  'sebelum-subtitle': 'Sebelum buat subtitle', 'sebelum-pulihkan': 'Sebelum memulihkan versi', manual: 'Disimpan manual',
+};
+
+function historyBlock(): HTMLElement {
+  const box = h('div', { class: 'block history' },
+    h('div', { class: 'row-between' },
+      h('div', { class: 'label' }, 'Riwayat versi'),
+      h('button', { class: 'ghost small', onclick: async () => { await autoSnapshot('manual', true); toast('Versi disimpan.'); renderInspector(); } }, 'Simpan versi'),
+    ),
+    h('div', { class: 'muted small' }, 'Proyek tersimpan otomatis. Salinan juga dibuat tiap 3 menit dan sebelum hapus jeda atau buat subtitle.'),
+  );
+  const list = h('ol', { class: 'versions' });
+  box.append(list);
+  void listVersions(P!.id).then((vs) => {
+    if (!vs.length) { list.replaceChildren(h('li', { class: 'muted small' }, 'Belum ada versi tersimpan.')); return; }
+    const today = new Date().toDateString();
+    list.replaceChildren(...vs.slice(0, 15).map((v) => h('li', {},
+      h('div', {},
+        h('div', { class: 'small' }, `${v.at.toDateString() === today ? '' : `${v.at.toLocaleDateString('id-ID', { day: 'numeric', month: 'short' })}, `}${v.at.toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' })}`),
+        h('div', { class: 'muted small' }, REASON[v.reason] ?? v.reason),
+      ),
+      h('button', {
+        class: 'ghost small', onclick: async () => {
+          if (!P) return;
+          if (!(await dialog().ask(`Kembalikan proyek ke versi ${v.at.toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' })}?\nKondisi sekarang disimpan dulu sebagai versi, dan bisa dibatalkan dengan Ctrl+Z.`, { title: 'Pulihkan versi', kind: 'warning' }))) return;
+          const old = await loadVersion(P.id, v.file);
+          if (!old) { toast('Versi itu tidak bisa dibaca.', 'error'); return; }
+          await autoSnapshot('sebelum-pulihkan', true);
+          snapshot();
+          P.timeline = old.timeline;
+          for (const m of old.media) if (!P.media.some((x) => x.id === m.id)) P.media.push(m);
+          sel = null;
+          changed({ left: true });
+          fitZoom();
+          toast('Versi dipulihkan.');
+        },
+      }, 'Pulihkan'),
+    )));
+  });
+  return box;
+}
+
 function watermarkBlock(): HTMLElement {
   const wm = tl().watermark;
   const setWm = (patch: Partial<Watermark>) => { if (!tl().watermark) return; snapshot(); Object.assign(tl().watermark!, patch); changed(); };
@@ -2439,6 +2571,7 @@ function renderPausePop() {
 async function runRemovePauses() {
   const p = P!;
   pause();
+  await autoSnapshot('sebelum-hapus-jeda', true);
   const db = PAUSE_DB[pauseOpts.level];
   try {
     const used = [...new Set(tl().clips.map((c) => c.mediaId))].map((id) => mediaOf(id)!).filter(Boolean);

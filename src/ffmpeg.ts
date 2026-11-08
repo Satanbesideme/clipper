@@ -66,6 +66,36 @@ export function whisperArgs(model: string, wav: string, outBase: string, threads
     '-oj', '-of', outBase, '-pp'];
 }
 
+/**
+ * One whisper run over many short WAV files (the model is loaded once). Each file is decoded on its own,
+ * with no carry-over context (-mc 0), so a noisy stretch cannot make whisper jump past the rest of a
+ * 30-second window. Results land next to each input as <file>.json.
+ */
+export function whisperChunksArgs(model: string, wavs: string[], threads: number, o: WhisperOpts = {}): string[] {
+  return ['-m', model, '-l', o.lang ?? 'id', '-t', String(Math.max(1, Math.min(8, threads))),
+    '-ml', '1', '-sow', '-mc', '0',
+    ...(o.dtw ? ['-dtw', o.dtw] : []),
+    ...(o.careful ? ['-bs', '5', '-bo', '5', '-nth', '0.8'] : []),
+    '-oj', '-pp', ...wavs.flatMap((w) => ['-f', w])];
+}
+
+/** Window starts for chunked transcription: `len` ms windows overlapping by `overlap` ms. */
+export function chunkPlan(durMs: number, len = 10000, overlap = 1500): { startMs: number; lenMs: number; keepFrom: number; keepTo: number }[] {
+  if (durMs <= len + 2000) return [{ startMs: 0, lenMs: durMs, keepFrom: 0, keepTo: durMs }];
+  const out: { startMs: number; lenMs: number; keepFrom: number; keepTo: number }[] = [];
+  for (let a = 0; a < durMs; a += len - overlap) {
+    const l = Math.min(len, durMs - a);
+    out.push({ startMs: a, lenMs: l, keepFrom: 0, keepTo: 0 });
+    if (a + l >= durMs) break;
+  }
+  // each word belongs to the window whose middle part it falls in
+  out.forEach((c, i) => {
+    c.keepFrom = i === 0 ? 0 : c.startMs + overlap / 2;
+    c.keepTo = i === out.length - 1 ? durMs : c.startMs + c.lenMs - overlap / 2;
+  });
+  return out;
+}
+
 export function safeName(s: string): string {
   const cleaned = s.replace(/[<>:"/\\|?*\x00-\x1f]/g, '').replace(/\s+/g, ' ').trim().slice(0, 60);
   return cleaned || 'video';
