@@ -11,6 +11,7 @@ export interface Media {
   height: number;
   fps: number;
   hasAudio: boolean;
+  audioTracks?: number;   // OBS can record mic, game and Discord on separate tracks
 }
 
 export type Fit = 'fill' | 'fit';
@@ -331,6 +332,7 @@ export interface RenderSpec {
   media: Record<string, Media>;
   encoder: Encoder;
   bitrateK: number;
+  quality?: number;   // 0.4..1
   assFile?: string;   // written by the caller from buildAss()
   fontsDir?: string;  // e.g. C:/Windows/Fonts
   outPath: string;
@@ -558,7 +560,7 @@ export function renderArgs(spec: RenderSpec): string[] {
   }
 
   args.push('-filter_complex', f.join(';'), '-map', `[${v}]`, '-map', `[${aOut}]`,
-    ...encoderArgs(spec.encoder, spec.bitrateK),
+    ...encoderArgs(spec.encoder, spec.bitrateK, spec.quality ?? 1),
     '-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart', spec.outPath);
   return args;
 }

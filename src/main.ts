@@ -1,5 +1,6 @@
 import './styles.css';
 import { dialog, fileSrc, invoke, isTauri, onDrop, extName, join } from './tauri';
+import { qualityBitrate } from './ffmpeg';
 import {
   DEFAULT_CAPTION, DEFAULT_TEXT, clipDuration, clipStarts, locate, splitAt, timelineDuration,
   type CaptionLine, type ImageItem, type Watermark, type SoundItem, type TextItem, type TextStyle, type Trans, type VideoClip, type Word,
@@ -7,8 +8,8 @@ import {
   type ClipTrans, type Duck, type MusicItem, type Range, type VideoLayer, type Crop, NO_CROP, cropSize,
 } from './render';
 import {
-  IMAGE_EXT, SOUND_EXT, deleteMeme, deletePad, importFiles as importLibFiles, loadLibrary, move, saveLibrary, soundOf,
-  type Library, type Meme, type Pad,
+  IMAGE_EXT, SOUND_EXT, VIDEO_MEME_EXT, addVideoMeme, categoriesOf, deleteMeme, deletePad, deleteVideoMeme, importFiles as importLibFiles, loadLibrary, move, saveLibrary, soundOf,
+  type Library, type Meme, type Pad, type VideoMeme,
 } from './library';
 import {
   dataDir, deleteProject, flush, listProjects, loadProject, loadSettings, newProject, saveProject, saveSettings, uid,
@@ -16,7 +17,7 @@ import {
 } from './store';
 import {
   ENCODER_LABEL, MODELS, VIDEO_EXT, buildThumbs, cancelExport, detectEncoder, downloadModel, enqueueExport,
-  importMedia, modelReady, onQueueChange, queue, thumbPath, transcribe, silencesOf, probeAudio, cancelTranscribe, calibrateFont,
+  importMedia, modelReady, onQueueChange, queue, thumbPath, transcribe, silencesOf, probeAudio, cancelTranscribe, calibrateFont, runTool,
 } from './jobs';
 
 // ================= helpers =================
@@ -57,13 +58,37 @@ function toast(msg: string, kind: 'info' | 'error' = 'info') {
   setTimeout(() => t.remove(), life + 400);
 }
 
+const APP_NAME = 'Gals Clip Studio';
+
+/** The GALSURKU mark: two rings and a diamond. */
+function logoMark(size: number, cls = 'mark'): SVGSVGElement {
+  const ns = 'http://www.w3.org/2000/svg';
+  const svg = document.createElementNS(ns, 'svg');
+  svg.setAttribute('viewBox', '0 0 100 100');
+  svg.setAttribute('width', String(size));
+  svg.setAttribute('height', String(size));
+  svg.setAttribute('class', cls);
+  svg.setAttribute('aria-hidden', 'true');
+  for (const [r, w] of [[35, 1.6], [23, 1.6]] as const) {
+    const c = document.createElementNS(ns, 'circle');
+    c.setAttribute('cx', '50'); c.setAttribute('cy', '50'); c.setAttribute('r', String(r));
+    c.setAttribute('fill', 'none'); c.setAttribute('stroke-width', String(w)); c.setAttribute('class', 'mark-ring');
+    svg.append(c);
+  }
+  const d = document.createElementNS(ns, 'path');
+  d.setAttribute('d', 'M50 45 L55 50 L50 55 L45 50 Z');
+  d.setAttribute('class', 'mark-diamond');
+  svg.append(d);
+  return svg;
+}
+
 const FONTS = ['Segoe UI', 'Bahnschrift', 'Impact', 'Arial', 'Verdana', 'Trebuchet MS', 'Georgia', 'Comic Sans MS'];
 
 // ================= state =================
 
 type SelKind = 'clip' | 'text' | 'line' | 'sound' | 'image' | 'music' | 'layer';
 type Sel = { kind: SelKind; id: string } | null;
-type LeftTab = 'media' | 'layers' | 'sound' | 'meme' | 'text' | 'captions';
+type LeftTab = 'media' | 'layers' | 'sound' | 'meme' | 'vmeme' | 'text' | 'captions';
 
 let settings: Settings = { outDir: '', encoder: '', model: 'small' };
 let P: Project | null = null;
@@ -133,11 +158,16 @@ function redo() {
 
 async function boot() {
   if (!isTauri()) {
-    app.append(h('div', { class: 'center-msg' }, 'Buka lewat aplikasi GALSURKU Clipper.'));
+    app.append(h('div', { class: 'center-msg' }, `Buka lewat aplikasi ${APP_NAME}.`));
     return;
   }
   settings = await loadSettings();
   void onDrop((paths) => void dropped(paths));
+  // light up the home rings while a file is dragged over the window
+  try {
+    const wv = window.__TAURI__?.webview.getCurrentWebview() as unknown as { onDragDropEvent(cb: (e: { payload: { type: string } }) => void): Promise<unknown> };
+    void wv?.onDragDropEvent((e) => document.body.classList.toggle('dragging', e.payload.type === 'enter' || e.payload.type === 'over'));
+  } catch { /* cosmetic */ }
   onQueueChange(renderQueue);
   window.addEventListener('keydown', onKey);
   window.addEventListener('resize', () => { layoutPreview(); sizeTimeline(); });
@@ -149,6 +179,10 @@ async function boot() {
 }
 
 async function dropped(paths: string[]) {
+  if (P && tab === 'vmeme') {
+    const vids = paths.filter((p) => VIDEO_MEME_EXT.includes(extName(p)));
+    if (vids.length) { await addVideoMemes(vids); return; }
+  }
   const libFiles = paths.filter((p) => SOUND_EXT.includes(extName(p)) || IMAGE_EXT.includes(extName(p)));
   if (libFiles.length && P) await addToLibrary(libFiles);
   const vids = paths.filter((p) => VIDEO_EXT.includes(extName(p)));
@@ -173,39 +207,53 @@ async function renderHome() {
   videos.clear();
   sheets.clear();
   const list = await listProjects();
+  const pick = async () => {
+    const files = await dialog().open({ multiple: true, title: 'Pilih rekaman', filters: [{ name: 'Video', extensions: VIDEO_EXT }] });
+    const arr = typeof files === 'string' ? [files] : files ?? [];
+    if (arr.length) await dropped(arr);
+  };
+  const when = (iso: string) => {
+    const d = new Date(iso), now = new Date();
+    const days = Math.floor((now.setHours(0, 0, 0, 0) - new Date(iso).setHours(0, 0, 0, 0)) / 86400000);
+    const time = d.toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' });
+    return days === 0 ? `Hari ini, ${time}` : days === 1 ? `Kemarin, ${time}` : d.toLocaleDateString('id-ID', { day: 'numeric', month: 'short', year: 'numeric' });
+  };
   app.replaceChildren(
-    h('header', { class: 'bar' },
-      h('div', { class: 'brand' }, h('span', { class: 'dot' }), 'GALSURKU Clipper'),
-    ),
     h('main', { class: 'home' },
-      h('button', {
-        class: 'drop', onclick: async () => {
-          const files = await dialog().open({ multiple: true, title: 'Pilih rekaman', filters: [{ name: 'Video', extensions: VIDEO_EXT }] });
-          const arr = typeof files === 'string' ? [files] : files ?? [];
-          if (arr.length) await dropped(arr);
-        },
-      },
-        h('div', { class: 'drop-plus' }, '+'),
-        h('div', { class: 'drop-title' }, 'Proyek baru'),
-        h('div', { class: 'muted' }, 'Klik untuk memilih rekaman, atau tarik file video ke jendela ini'),
+      h('section', { class: 'home-hero' },
+        h('button', { class: 'ring-drop', onclick: () => void pick(), 'aria-label': 'Proyek baru: pilih rekaman' },
+          logoMark(420, 'ring-mark'),
+          h('span', { class: 'ring-cta' }, h('span', { class: 'ring-plus' }, '+'), 'Proyek baru'),
+        ),
+        h('div', { class: 'home-copy' },
+          h('h1', { class: 'home-title' }, APP_NAME),
+          h('p', { class: 'home-lede' }, 'Potong rekaman vertikal dari OBS jadi shorts. Tarik file video ke mana saja di jendela ini, atau klik lingkaran untuk memilih.'),
+          h('div', { class: 'home-meta muted small' }, settings.encoder ? `Ekspor memakai ${ENCODER_LABEL[settings.encoder]}` : 'Mengecek kartu grafis…'),
+        ),
       ),
-      list.length ? h('h2', { class: 'section' }, 'Proyek') : null,
-      h('ul', { class: 'projects' },
-        ...list.map((p) => h('li', {},
-          h('button', { class: 'proj', onclick: () => void openProject(p.id) },
-            h('div', { class: 'proj-name' }, p.name),
-            h('div', { class: 'muted small' }, `${tc(p.durationMs)} · ${p.clips} potongan · ${new Date(p.updatedAt).toLocaleString('id-ID', { dateStyle: 'medium', timeStyle: 'short' })}`),
-          ),
-          h('button', {
-            class: 'icon-btn', title: 'Hapus proyek', 'aria-label': `Hapus proyek ${p.name}`,
-            onclick: async () => {
-              if (await dialog().ask(`Hapus proyek "${p.name}"?\nFile rekaman asli tidak ikut terhapus.`, { title: 'Hapus proyek', kind: 'warning' })) {
-                await deleteProject(p.id);
-                await renderHome();
-              }
-            },
-          }, '✕'),
-        )),
+      h('section', { class: 'home-projects' },
+        h('div', { class: 'row-between' },
+          h('h2', { class: 'home-h2' }, list.length ? 'Lanjutkan proyek' : 'Belum ada proyek'),
+          list.length ? h('span', { class: 'muted small' }, `${list.length} proyek`) : h('span'),
+        ),
+        list.length ? h('ul', { class: 'projects' },
+          ...list.map((p) => h('li', {},
+            h('button', { class: 'proj', onclick: () => void openProject(p.id) },
+              h('span', { class: 'proj-name' }, p.name),
+              h('span', { class: 'proj-dur mono' }, tc(p.durationMs)),
+              h('span', { class: 'proj-when muted small' }, `${when(p.updatedAt)} · ${p.clips} potongan`),
+            ),
+            h('button', {
+              class: 'icon-btn proj-del', title: 'Hapus proyek', 'aria-label': `Hapus proyek ${p.name}`,
+              onclick: async () => {
+                if (await dialog().ask(`Hapus proyek "${p.name}"?\nFile rekaman asli tidak ikut terhapus.`, { title: 'Hapus proyek', kind: 'warning' })) {
+                  await deleteProject(p.id);
+                  await renderHome();
+                }
+              },
+            }, '✕'),
+          )),
+        ) : h('p', { class: 'muted' }, 'Rekaman yang kamu buka akan muncul di sini, siap dilanjutkan kapan saja.'),
       ),
     ),
   );
@@ -222,7 +270,7 @@ async function openProject(id: string, importNow: string[] = []) {
   cropMode = false;
   sel = null;
   t = 0;
-  void loadLibrary().then((l) => { library = l; if (tab === 'sound' || tab === 'meme') renderLeft(); });
+  void loadLibrary().then((l) => { library = l; if (tab === 'sound' || tab === 'meme' || tab === 'vmeme') renderLeft(); });
   scrollX = 0;
   undoStack.length = redoStack.length = 0;
   renderEditor();
@@ -296,7 +344,7 @@ function renderEditor() {
   tlCanvas = h('canvas', { class: 'tl-canvas', 'aria-label': 'Timeline' });
   app.replaceChildren(
     h('header', { class: 'bar' },
-      h('button', { class: 'ghost', onclick: () => void renderHome() }, '← Proyek'),
+      h('button', { class: 'ghost home-btn', title: 'Kembali ke daftar proyek', onclick: () => void renderHome() }, logoMark(22), h('span', {}, 'Proyek')),
       h('input', {
         class: 'title-input', value: p.name, 'aria-label': 'Nama proyek',
         onchange: (e) => { p.name = (e.target as HTMLInputElement).value.trim() || p.name; void saveProject(p); },
@@ -370,7 +418,7 @@ function renderEditor() {
 }
 
 const RAIL: [LeftTab, string, string][] = [
-  ['media', '▦', 'Media'], ['layers', '◧', 'Layer'], ['sound', '♪', 'Suara'], ['meme', '☺', 'Meme'], ['text', 'T', 'Teks'], ['captions', '≋', 'Subtitle'],
+  ['media', '▦', 'Media'], ['layers', '◧', 'Layer'], ['sound', '♪', 'Suara'], ['meme', '☺', 'Meme'], ['vmeme', '▶', 'Video meme'], ['text', 'T', 'Teks'], ['captions', '≋', 'Subtitle'],
 ];
 let safeGuide = false;
 
@@ -460,6 +508,7 @@ function renderLeftInner() {
   if (tab === 'media') el.replaceChildren(...mediaPanel());
   else if (tab === 'layers') el.replaceChildren(...layerPanel());
   else if (tab === 'sound') el.replaceChildren(...soundPanel());
+  else if (tab === 'vmeme') el.replaceChildren(...videoMemePanel());
   else if (tab === 'meme') el.replaceChildren(...memePanel());
   else if (tab === 'text') el.replaceChildren(...textPanel());
   else el.replaceChildren(...captionPanel());
@@ -588,6 +637,7 @@ function captionPanel(): Node[] {
     h('div', { class: 'block' },
       h('div', { class: 'label' }, 'Bahasa: Indonesia · jalan offline di PC ini'),
       modelSeg,
+      sttOptions(),
       action,
       downloading >= 0 ? h('div', {}, h('div', { class: 'bar-track' }, h('div', { class: 'bar-fill', id: 'dl-bar', style: `width:${Math.round(downloading * 100)}%` })), h('div', { class: 'muted small', id: 'dl-label' }, 'Mengunduh model…')) : null,
       !hasClips ? h('div', { class: 'muted small' }, 'Tambahkan video ke timeline dulu.') : null,
@@ -625,6 +675,25 @@ function captionPanel(): Node[] {
   ];
 }
 
+function sttOptions(): HTMLElement {
+  const maxTracks = Math.max(1, ...(P?.media ?? []).map((m) => m.audioTracks ?? 1));
+  const cur = settings.sttTracks ?? 'all';
+  return h('div', { class: 'stack' },
+    h('label', { class: 'check' }, h('input', {
+      type: 'checkbox', checked: settings.sttCareful ?? true,
+      onchange: async (e) => { settings.sttCareful = (e.target as HTMLInputElement).checked; await saveSettings(settings); },
+    }), 'Mode cermat: tangkap suara pelan & teman di Discord (sedikit lebih lama)'),
+    maxTracks > 1 ? h('div', { class: 'stack' },
+      h('div', { class: 'label' }, 'Sumber suara'),
+      h('div', { class: 'seg' },
+        h('button', { class: cur === 'all' ? 'on' : '', onclick: async () => { settings.sttTracks = 'all'; await saveSettings(settings); renderLeft(); } }, 'Semua track'),
+        ...Array.from({ length: maxTracks }, (_, i) => h('button', { class: cur === i ? 'on' : '', onclick: async () => { settings.sttTracks = i; await saveSettings(settings); renderLeft(); } }, `Track ${i + 1}`)),
+      ),
+      h('div', { class: 'muted small' }, 'Rekaman ini punya beberapa track audio (mis. mic, game, Discord). "Semua track" mendengarkan semuanya.'),
+    ) : h('span'),
+  );
+}
+
 function setLineText(l: CaptionLine, text: string) {
   const parts = text.trim().split(/\s+/).filter(Boolean);
   if (!parts.length) { tl().captions.lines = tl().captions.lines.filter((x) => x.id !== l.id); return; }
@@ -642,7 +711,7 @@ async function runCaptions() {
   captionsRunning = true;
   renderLeft();
   try {
-    const lines = await transcribe(p, settings.model, (msg, frac) => setBusy(`${msg}${frac >= 0 && !/%$/.test(msg) ? ` ${Math.round(frac * 100)}%` : ''}`));
+    const lines = await transcribe(p, settings.model, (msg, frac) => setBusy(`${msg}${frac >= 0 && !/%$/.test(msg) ? ` ${Math.round(frac * 100)}%` : ''}`), { tracks: settings.sttTracks ?? 'all', careful: settings.sttCareful ?? true });
     snapshot();
     tl().captions.lines = lines;
     changed({ left: true });
@@ -989,6 +1058,7 @@ function pause() {
   sfxEls.forEach((a) => a.pause());
   musicEls.forEach((a) => a.pause());
   layerVideos.forEach((v) => v.pause());
+  vmPreview?.pause();
   const btn = $('#play');
   if (btn) { btn.textContent = '▶'; btn.setAttribute('aria-label', 'Putar'); }
 }
@@ -1129,7 +1199,7 @@ function renderFrameInner() {
     const b = drawText(ctx, lines, x.x * W, x.y * H, x.style, k);
     boxes.push({ kind: 'text', id: x.id, ...b });
     if (sel?.kind === 'text' && sel.id === x.id) {
-      ctx.strokeStyle = '#ff6a1a';
+      ctx.strokeStyle = '#37b8ac';
       ctx.lineWidth = 2;
       ctx.setLineDash([6, 4]);
       ctx.strokeRect(b.x - 6, b.y - 6, b.w + 12, b.h + 12);
@@ -1437,16 +1507,16 @@ function drawTimelineInner() {
     ctx.fillRect(0, l.y, W, l.h);
   }
   ctx.fillStyle = '#6b6b6b';
-  ctx.font = '500 10px "Segoe UI", sans-serif';
+  ctx.font = '500 11px "Segoe UI Variable Text", "Segoe UI", sans-serif';
   ctx.textBaseline = 'middle';
   const lt = laneOf('text'), lc = laneOf('captions');
-  if (!tl().texts.length) ctx.fillText('TEKS', 8, lt.y + lt.h / 2);
-  if (!tl().captions.lines.length) ctx.fillText('SUBTITLE', 8, lc.y + lc.h / 2);
+  if (!tl().texts.length) ctx.fillText('Teks', 8, lt.y + lt.h / 2);
+  if (!tl().captions.lines.length) ctx.fillText('Subtitle', 8, lc.y + lc.h / 2);
   const li = laneOf('image'), ls = laneOf('sound');
-  if (!images().length) ctx.fillText('GAMBAR', 8, li.y + li.h / 2);
-  if (!sounds().length) ctx.fillText('SUARA · tekan 1–9 atau pad Soundboard', 8, ls.y + ls.h / 2);
+  if (!images().length) ctx.fillText('Meme', 8, li.y + li.h / 2);
+  if (!sounds().length) ctx.fillText('Suara: pause, lalu klik pad di panel Suara', 8, ls.y + ls.h / 2);
   const lmu = laneOf('music');
-  if (!music().length) ctx.fillText('MUSIK · tab Media → Tambah musik latar', 8, lmu.y + lmu.h / 2);
+  if (!music().length) ctx.fillText('Musik latar: panel Media', 8, lmu.y + lmu.h / 2);
 
   // ruler
   ctx.fillStyle = '#121212';
@@ -1515,7 +1585,7 @@ function drawTimelineInner() {
     const box = { x: x - 8, y: lm.y + 3, w: 16, h: 16, index: i };
     cutMarkers.push(box);
     roundRect(ctx, box.x, box.y, box.w, box.h, 3);
-    ctx.fillStyle = tr === 'none' ? 'rgba(18,18,18,.85)' : '#ff6a1a';
+    ctx.fillStyle = tr === 'none' ? 'rgba(26,27,27,.88)' : '#37b8ac';
     ctx.fill();
     ctx.strokeStyle = tr === 'none' ? '#6b6b6b' : '#121212';
     ctx.lineWidth = 1;
@@ -1551,10 +1621,10 @@ function drawTimelineInner() {
     if (xx + w < 0 || xx > W) continue;
     const isSel = sel?.kind === 'text' && sel.id === x.id;
     roundRect(ctx, xx + 0.5, ln.y, w - 1, ln.h, 4);
-    ctx.fillStyle = isSel ? '#ff6a1a' : '#4a2a18';
+    ctx.fillStyle = isSel ? '#e8836f' : '#4a2a24';
     ctx.fill();
     ctx.save(); ctx.beginPath(); ctx.rect(xx, ln.y, w - 4, ln.h); ctx.clip();
-    ctx.fillStyle = isSel ? '#121212' : '#ffc29e';
+    ctx.fillStyle = isSel ? '#1a1b1b' : '#f5c2b8';
     ctx.font = '600 10px "Segoe UI", sans-serif';
     ctx.fillText(`T  ${x.text.replace(/\n/g, ' ')}`, xx + 6, ln.y + ln.h / 2);
     ctx.restore();
@@ -1634,15 +1704,15 @@ function drawTimelineInner() {
 
   // drop marker while dragging a clip
   if (dropX !== null) {
-    ctx.fillStyle = '#ff6a1a';
+    ctx.fillStyle = '#37b8ac';
     ctx.fillRect(dropX - 1, lm.y - 4, 3, lm.h + 8);
   }
 
   // playhead
   const px = msToX(t);
-  ctx.fillStyle = '#ffffff';
-  ctx.fillRect(px - 0.5, 0, 1.5, H);
-  ctx.beginPath(); ctx.moveTo(px - 6, 0); ctx.lineTo(px + 6, 0); ctx.lineTo(px + 6, 8); ctx.lineTo(px, 14); ctx.lineTo(px - 6, 8); ctx.fill();
+  ctx.fillStyle = '#37b8ac';
+  ctx.fillRect(px - 0.75, 6, 1.5, H);
+  ctx.beginPath(); ctx.moveTo(px, 1); ctx.lineTo(px + 7, 8); ctx.lineTo(px, 15); ctx.lineTo(px - 7, 8); ctx.closePath(); ctx.fill();
 }
 
 let dropX: number | null = null;
@@ -1929,10 +1999,10 @@ function switchTab(k: LeftTab) {
   markActiveLine();
 }
 
-async function addToLibrary(paths: string[]) {
+async function addToLibrary(paths: string[], cat?: string) {
   setBusy('Menambahkan ke library…');
   try {
-    const r = await importLibFiles(paths);
+    const r = await importLibFiles(paths, cat, (i, n) => { if (n > 1) setBusy(`Menambahkan ke library… ${i + 1}/${n}`); });
     library = await loadLibrary();
     const parts = [r.sounds ? `${r.sounds} suara` : '', r.memes ? `${r.memes} meme` : ''].filter(Boolean);
     if (parts.length) toast(`${parts.join(' dan ')} ditambahkan ke library.`);
@@ -1978,6 +2048,81 @@ function flash(id: string) {
   setTimeout(() => el?.classList.remove('hit'), 220);
 }
 
+type LibKind = 'sound' | 'meme' | 'vmeme';
+interface LibItem { id: string; name: string; cat?: string; fav?: boolean }
+const libFilter: Record<LibKind, { q: string; cat: string }> = { sound: { q: '', cat: '' }, meme: { q: '', cat: '' }, vmeme: { q: '', cat: '' } };
+const FAV = '\u2605';
+
+function libList(kind: LibKind): LibItem[] {
+  if (!library) return [];
+  return kind === 'sound' ? library.pads : kind === 'meme' ? library.memes : (library.clips ?? []);
+}
+
+function filtered<T extends LibItem>(kind: LibKind, list: T[]): T[] {
+  const f = libFilter[kind];
+  const q = f.q.trim().toLowerCase();
+  return list.filter((x) =>
+    (!q || x.name.toLowerCase().includes(q) || (x.cat ?? '').toLowerCase().includes(q)) &&
+    (!f.cat || (f.cat === FAV ? !!x.fav : (x.cat ?? '') === f.cat)));
+}
+
+/** Search box and category chips shared by the three libraries. */
+function libBar(kind: LibKind): HTMLElement {
+  const list = libList(kind);
+  const f = libFilter[kind];
+  const cats = categoriesOf(list);
+  const hasFav = list.some((x) => x.fav);
+  const search = h('input', {
+    type: 'search', class: 'lib-search', id: `lib-search-${kind}`, placeholder: `Cari di ${list.length} item…`, value: f.q, 'aria-label': 'Cari di library',
+    oninput: (e) => {
+      f.q = (e.target as HTMLInputElement).value;
+      const pos = (e.target as HTMLInputElement).selectionStart ?? f.q.length;
+      renderLeft();
+      const el = document.getElementById(`lib-search-${kind}`) as HTMLInputElement | null;
+      el?.focus(); el?.setSelectionRange(pos, pos);
+    },
+  });
+  const chip = (value: string, label: string) => h('button', {
+    class: `chip ${f.cat === value ? 'on' : ''}`, onclick: () => { f.cat = f.cat === value ? '' : value; renderLeft(); },
+  }, label);
+  return h('div', { class: 'lib-bar' },
+    search,
+    (cats.length || hasFav) ? h('div', { class: 'lib-cats' }, chip('', 'Semua'), hasFav ? chip(FAV, `${FAV} Favorit`) : null, ...cats.map((c) => chip(c, c))) : h('span'),
+  );
+}
+
+function favButton(item: LibItem, cls: string) {
+  return h('button', {
+    class: `${cls} ${item.fav ? 'is-fav' : ''}`, title: item.fav ? 'Hapus dari favorit' : 'Jadikan favorit', 'aria-label': item.fav ? `Hapus ${item.name} dari favorit` : `Jadikan ${item.name} favorit`,
+    onclick: async (e: Event) => { e.stopPropagation(); item.fav = !item.fav; await saveLibrary(); renderLeft(); },
+  }, item.fav ? FAV : '\u2606');
+}
+
+function catEditor(item: LibItem, kind: LibKind) {
+  const id = `cats-${kind}`;
+  return h('div', { class: 'row-between' },
+    h('input', {
+      class: 'cat-input', value: item.cat ?? '', placeholder: 'Kategori (mis. Ketawa)', list: id, 'aria-label': 'Kategori',
+      onchange: async (e) => { item.cat = (e.target as HTMLInputElement).value.trim() || undefined; await saveLibrary(); },
+    }),
+    h('datalist', { id }, ...categoriesOf(libList(kind)).map((c) => h('option', { value: c }))),
+    favButton(item, 'icon-btn fav-btn'),
+  );
+}
+
+async function importFolder(kind: LibKind) {
+  const dir = await dialog().open({ directory: true, title: 'Pilih folder untuk diimpor' });
+  if (typeof dir !== 'string') return;
+  const exts = kind === 'sound' ? SOUND_EXT : kind === 'meme' ? IMAGE_EXT : VIDEO_MEME_EXT;
+  const files = (await invoke<string[]>('list_dir', { path: dir })).filter((f) => exts.includes(extName(f))).sort((a, b) => a.localeCompare(b, 'id')).map((f) => join(dir, f));
+  if (!files.length) { toast('Tidak ada file yang cocok di folder itu.'); return; }
+  const cat = dir.split(/[\\/]/).filter(Boolean).pop();
+  if (kind === 'vmeme') await addVideoMemes(files, cat);
+  else await addToLibrary(files, cat);
+  libFilter[kind] = { q: '', cat: cat ?? '' };
+  renderLeft();
+}
+
 function libHead(kind: 'sound' | 'meme') {
   return h('div', { class: 'row-between' },
     h('button', {
@@ -1989,7 +2134,8 @@ function libHead(kind: 'sound' | 'meme') {
         const arr = typeof files === 'string' ? [files] : files ?? [];
         if (arr.length) await addToLibrary(arr);
       },
-    }, kind === 'sound' ? '+ Tambah suara' : '+ Tambah meme'),
+    }, kind === 'sound' ? '+ Suara' : '+ Meme'),
+    h('button', { class: 'ghost', title: 'Impor semua file di satu folder; nama folder jadi kategori', onclick: () => void importFolder(kind) }, 'Impor folder'),
     h('button', { class: libEdit ? 'secondary on-accent-border' : 'ghost', onclick: () => { libEdit = !libEdit; renderLeft(); } }, libEdit ? 'Selesai' : 'Atur'),
   );
 }
@@ -2006,28 +2152,31 @@ function soundPanel(): Node[] {
   const L = library;
   if (!libEdit) {
     return [
-      h('p', { class: 'muted small hint-p' }, 'Pause di momennya, pencet pad atau angka 1–9, lalu lanjut putar.'),
       libHead('sound'),
+      libBar('sound'),
       L.pads.length ? h('div', { class: 'pads' },
-        ...L.pads.map((pad, i) => h('div', { class: 'pad-wrap' },
+        ...filtered('sound', L.pads).map((pad) => ({ pad, i: L.pads.indexOf(pad) })).map(({ pad, i }) => h('div', { class: 'pad-wrap' },
           h('button', { class: 'pad', 'data-pad': pad.id, style: `--pad:${pad.color}`, title: `${pad.name}${i < 9 ? ` (tombol ${i + 1})` : ''}`, onclick: () => insertSound(pad) },
             h('span', { class: 'pad-name' }, pad.name),
             h('span', { class: 'pad-meta' }, tc(soundOf(pad)?.durationMs ?? 0, true)),
             i < 9 ? h('span', { class: 'pad-key' }, String(i + 1)) : null,
           ),
           h('button', { class: 'pad-play', title: 'Dengarkan', 'aria-label': `Dengarkan ${pad.name}`, onclick: (e) => { e.stopPropagation(); const s = soundOf(pad); if (s) audition(s.file); } }, '▶'),
+          favButton(pad, 'pad-fav'),
         )),
-      ) : h('p', { class: 'muted small' }, 'Belum ada suara. Tarik file MP3/WAV/OGG ke jendela.'),
+      ) : h('p', { class: 'muted small' }, 'Belum ada suara. Tarik file MP3/WAV/OGG ke jendela, atau impor satu folder.'),
+      L.pads.length && !filtered('sound', L.pads).length ? h('p', { class: 'muted small' }, 'Tidak ada yang cocok dengan pencarian ini.') : h('span'),
     ];
   }
   return [
-    h('p', { class: 'muted small hint-p' }, 'Urutan menentukan tombol 1–9.'),
     libHead('sound'),
-    ...L.pads.map((pad, i) => h('div', { class: 'pad-edit' },
+    libBar('sound'),
+    ...filtered('sound', L.pads).map((pad) => ({ pad, i: L.pads.indexOf(pad) })).map(({ pad, i }) => h('div', { class: 'pad-edit' },
       h('div', { class: 'row-between' },
         h('input', { value: pad.name, 'aria-label': 'Nama suara', onchange: async (e) => { pad.name = (e.target as HTMLInputElement).value.trim() || pad.name; await saveLibrary(); } }),
         h('input', { type: 'color', value: pad.color, class: 'pad-color', 'aria-label': 'Warna pad', onchange: async (e) => { pad.color = (e.target as HTMLInputElement).value; await saveLibrary(); } }),
       ),
+      catEditor(pad, 'sound'),
       h('div', { class: 'row-between' },
         h('span', { class: 'muted small' }, i < 9 ? `Tombol ${i + 1}` : 'Tanpa tombol'),
         h('div', {}, ...orderButtons(L.pads, i),
@@ -2054,25 +2203,30 @@ function memePanel(): Node[] {
   const L = library;
   if (!libEdit) {
     return [
-      h('p', { class: 'muted small hint-p' }, 'Pause di momennya, klik meme atau Shift + 1–9. Gambar muncul dengan animasi masuk dan keluar.'),
       libHead('meme'),
+      libBar('meme'),
       L.memes.length ? h('div', { class: 'memes' },
-        ...L.memes.map((m, i) => h('button', { class: 'meme', 'data-pad': m.id, title: `${m.name}${i < 9 ? ` (Shift+${i + 1})` : ''}`, onclick: () => insertMeme(m) },
-          h('img', { src: fileSrc(m.file), alt: m.name, loading: 'lazy' }),
-          h('span', { class: 'meme-name' }, m.name),
-          i < 9 ? h('span', { class: 'pad-key' }, `⇧${i + 1}`) : null,
+        ...filtered('meme', L.memes).map((m) => ({ m, i: L.memes.indexOf(m) })).map(({ m, i }) => h('div', { class: 'meme-wrap' },
+          h('button', { class: 'meme', 'data-pad': m.id, title: `${m.name}${i < 9 ? ` (Shift+${i + 1})` : ''}`, onclick: () => insertMeme(m) },
+            h('img', { src: fileSrc(m.file), alt: m.name, loading: 'lazy', decoding: 'async' }),
+            h('span', { class: 'meme-name' }, m.name),
+            i < 9 ? h('span', { class: 'pad-key' }, `⇧${i + 1}`) : null,
+          ),
+          favButton(m, 'tile-fav'),
         )),
-      ) : h('p', { class: 'muted small' }, 'Belum ada meme. Tarik gambar PNG/JPG/GIF ke jendela.'),
+      ) : h('p', { class: 'muted small' }, 'Belum ada meme. Tarik gambar PNG/JPG/GIF ke jendela, atau impor satu folder.'),
+      L.memes.length && !filtered('meme', L.memes).length ? h('p', { class: 'muted small' }, 'Tidak ada yang cocok dengan pencarian ini.') : h('span'),
     ];
   }
   return [
-    h('p', { class: 'muted small hint-p' }, 'Atur default tiap meme. Urutan menentukan Shift + 1–9.'),
     libHead('meme'),
-    ...L.memes.map((m, i) => h('div', { class: 'pad-edit' },
+    libBar('meme'),
+    ...filtered('meme', L.memes).map((m) => ({ m, i: L.memes.indexOf(m) })).map(({ m, i }) => h('div', { class: 'pad-edit' },
       h('div', { class: 'row-between' },
-        h('img', { class: 'meme-mini', src: fileSrc(m.file), alt: '' }),
+        h('img', { class: 'meme-mini', src: fileSrc(m.file), alt: '', loading: 'lazy' }),
         h('input', { value: m.name, 'aria-label': 'Nama meme', onchange: async (e) => { m.name = (e.target as HTMLInputElement).value.trim() || m.name; await saveLibrary(); } }),
       ),
+      catEditor(m, 'meme'),
       field(`Tampil ${(m.durationMs / 1000).toFixed(1)} detik`, h('input', {
         type: 'range', min: 6, max: 60, value: Math.round(m.durationMs / 100),
         oninput: (e) => { m.durationMs = Number((e.target as HTMLInputElement).value) * 100; ((e.target as HTMLElement).previousElementSibling as HTMLElement).textContent = `Tampil ${(m.durationMs / 1000).toFixed(1)} detik`; },
@@ -2313,6 +2467,164 @@ async function runRemovePauses() {
   } finally {
     setBusy('');
   }
+}
+
+// ================= video meme library =================
+
+let vmSelected: string | null = null;
+let vmPreview: HTMLVideoElement | null = null;
+
+async function addVideoMemes(paths: string[], cat?: string) {
+  let n = 0;
+  const errors: string[] = [];
+  for (const [i, f] of paths.entries()) {
+    setBusy(`Menambahkan video meme${paths.length > 1 ? ` ${i + 1}/${paths.length}` : ''}…`);
+    try { const c = await addVideoMeme(f, (args) => runTool('ffmpeg', args), cat, false); vmSelected = c.id; n++; }
+    catch (e) { errors.push((e as Error).message); }
+  }
+  await saveLibrary();
+  if (errors.length) toast(errors.slice(0, 5).join('\n') + (errors.length > 5 ? `\n…dan ${errors.length - 5} lainnya` : ''), 'error');
+  setBusy('');
+  library = await loadLibrary();
+  if (n) toast(`${n} video meme ditambahkan.`);
+  switchTab('vmeme');
+}
+
+/** Puts a video meme on the timeline as a layer with sound, at the playhead. */
+async function insertVideoMeme(c: VideoMeme) {
+  if (!P) return;
+  if (!tl().clips.length) { toast('Tambahkan video ke timeline dulu.'); return; }
+  if (!(await invoke<boolean>('exists', { path: c.file }))) { toast(`File "${c.name}" tidak ditemukan di library.`, 'error'); return; }
+  pause();
+  snapshot();
+  let m = P.media.find((x) => x.playable === c.file);
+  if (!m) {
+    m = {
+      id: uid(), path: c.file, playable: c.file, name: c.name, durationMs: c.durationMs, width: c.width, height: c.height,
+      fps: c.fps, hasAudio: c.hasAudio, audioTracks: c.hasAudio ? 1 : 0,
+      thumbs: { everySec: 1, sheets: 0, tw: 54, th: 96, ready: false },
+    };
+    P.media.push(m);
+  }
+  const start = Math.floor(t);
+  const portrait = c.width / c.height < 0.8;
+  const box = boxFor(NO_CROP, { w: c.width, h: c.height }, portrait ? 0.62 : 0.86, 0.5, 0.42);
+  if (box.h > 0.9) { const k = 0.9 / box.h; box.w *= k; box.h = 0.9; }
+  const ly: VideoLayer = {
+    id: uid(), name: c.name, source: 'media', mediaId: m.id, inMs: 0, startMs: start, endMs: start + c.durationMs,
+    crop: { ...NO_CROP }, box, opacity: 1, volume: c.hasAudio ? c.volume : 0,
+  };
+  layers().push(ly);
+  changed({ inspector: false });
+  flash(c.id);
+}
+
+function videoMemePanel(): Node[] {
+  if (!library) return [h('p', { class: 'muted small hint-p' }, 'Memuat library…')];
+  const clips = library.clips ?? [];
+  const cur = clips.find((c) => c.id === vmSelected) ?? clips[0];
+  const head = h('div', { class: 'row-between' },
+    h('button', {
+      class: 'secondary', onclick: async () => {
+        const files = await dialog().open({ multiple: true, title: 'Tambah video meme', filters: [{ name: 'Video', extensions: VIDEO_MEME_EXT }] });
+        const arr = typeof files === 'string' ? [files] : files ?? [];
+        if (arr.length) await addVideoMemes(arr);
+      },
+    }, '+ Video'),
+    h('button', { class: 'ghost', title: 'Impor semua video di satu folder; nama folder jadi kategori', onclick: () => void importFolder('vmeme') }, 'Impor folder'),
+    h('button', { class: libEdit ? 'secondary on-accent-border' : 'ghost', onclick: () => { libEdit = !libEdit; renderLeft(); } }, libEdit ? 'Selesai' : 'Atur'),
+  );
+  if (!clips.length) {
+    return [
+      head,
+      h('div', { class: 'empty-drop' },
+        h('div', { class: 'empty-title' }, 'Tarik video meme ke sini'),
+        h('div', { class: 'muted small' }, 'MP4, MOV, WebM atau MKV, maksimal 3 menit. Video disimpan di library dan bisa dipakai di semua proyek.'),
+      ),
+    ];
+  }
+  if (libEdit) {
+    return [
+      head,
+      libBar('vmeme'),
+      ...filtered('vmeme', clips).map((c) => ({ c, i: clips.indexOf(c) })).map(({ c, i }) => h('div', { class: 'pad-edit' },
+        h('div', { class: 'row-between' },
+          h('img', { class: 'meme-mini', src: fileSrc(c.thumb), alt: '', loading: 'lazy' }),
+          h('input', { value: c.name, 'aria-label': 'Nama video meme', onchange: async (e) => { c.name = (e.target as HTMLInputElement).value.trim() || c.name; await saveLibrary(); } }),
+        ),
+        catEditor(c, 'vmeme'),
+        c.hasAudio ? field(`Volume saat dipasang ${Math.round(c.volume * 100)}%`, h('input', {
+          type: 'range', min: 0, max: 150, step: 5, value: Math.round(c.volume * 100),
+          oninput: (e) => { c.volume = Number((e.target as HTMLInputElement).value) / 100; ((e.target as HTMLElement).previousElementSibling as HTMLElement).textContent = `Volume saat dipasang ${Math.round(c.volume * 100)}%`; },
+          onchange: () => void saveLibrary(),
+        })) : h('div', { class: 'muted small' }, 'Tanpa suara'),
+        h('div', { class: 'row-between' },
+          h('span', { class: 'muted small' }, i < 9 ? `Alt + ${i + 1}` : 'Tanpa tombol'),
+          h('div', {}, ...orderButtons(clips, i),
+            h('button', {
+              class: 'icon-btn', 'aria-label': `Hapus ${c.name}`, onclick: async () => {
+                if (!(await dialog().ask(`Hapus "${c.name}" dari library?\nYang sudah ada di timeline tetap aman.`, { title: 'Hapus video meme', kind: 'warning' }))) return;
+                await deleteVideoMeme(c.id); library = await loadLibrary(); renderLeft();
+              },
+            }, '✕'),
+          ),
+        ),
+      )),
+    ];
+  }
+  // review player for the selected clip
+  vmPreview?.pause();
+  vmPreview = h('video', { class: 'vm-player', src: fileSrc(cur.file), preload: 'auto', playsinline: true });
+  const player = vmPreview;
+  const playBtn = h('button', { class: 'vm-play', 'aria-label': 'Putar preview' }, '▶');
+  const bar = h('div', { class: 'vm-bar' }, h('div', { class: 'vm-fill' }));
+  const time = h('span', { class: 'muted small mono' }, `0:00 / ${tc(cur.durationMs)}`);
+  playBtn.addEventListener('click', () => { if (player.paused) { pause(); void player.play(); } else player.pause(); });
+  player.addEventListener('click', () => playBtn.click());
+  player.addEventListener('play', () => { playBtn.textContent = '❚❚'; });
+  player.addEventListener('pause', () => { playBtn.textContent = '▶'; });
+  player.addEventListener('ended', () => { playBtn.textContent = '▶'; });
+  player.addEventListener('timeupdate', () => {
+    (bar.firstChild as HTMLElement).style.width = `${(player.currentTime * 1000 / cur.durationMs) * 100}%`;
+    time.textContent = `${tc(player.currentTime * 1000)} / ${tc(cur.durationMs)}`;
+  });
+  bar.addEventListener('pointerdown', (e) => { const r = bar.getBoundingClientRect(); player.currentTime = ((e.clientX - r.left) / r.width) * cur.durationMs / 1000; });
+  return [
+    head,
+    h('div', { class: 'vm-review' },
+      h('div', { class: 'vm-stage' }, player),
+      h('div', { class: 'vm-controls' }, playBtn, bar, time),
+      h('div', { class: 'vm-meta' },
+        h('div', { class: 'vm-name' }, cur.name),
+        h('div', { class: 'muted small' }, `${tc(cur.durationMs, true)} · ${cur.width}×${cur.height}${cur.hasAudio ? '' : ' · tanpa suara'}`),
+      ),
+      h('button', { class: 'primary wide', onclick: () => void insertVideoMeme(cur) }, 'Pasang di playhead'),
+    ),
+    libBar('vmeme'),
+    h('div', { class: 'vm-grid' }, ...filtered('vmeme', clips).map((c) => ({ c, i: clips.indexOf(c) })).map(({ c, i }) => {
+      const tile = h('button', {
+        class: `vm-tile ${c.id === cur.id ? 'on' : ''}`, 'data-pad': c.id, title: `${c.name}${i < 9 ? ` (Alt+${i + 1})` : ''} · klik dua kali untuk langsung pasang`,
+        onclick: () => { vmSelected = c.id; renderLeft(); setTimeout(() => { pause(); void vmPreview?.play().catch(() => undefined); }, 30); },
+        ondblclick: () => void insertVideoMeme(c),
+      },
+        h('img', { src: fileSrc(c.thumb), alt: '', loading: 'lazy', decoding: 'async' }),
+        h('span', { class: 'vm-dur' }, tc(c.durationMs)),
+        i < 9 ? h('span', { class: 'pad-key' }, `⌥${i + 1}`) : null,
+        h('span', { class: 'vm-tile-name' }, c.name),
+      );
+      const wrap = h('div', { class: 'meme-wrap' }, tile, favButton(c, 'tile-fav'));
+      // hover: a silent moving preview in the tile itself
+      let hv: HTMLVideoElement | null = null;
+      tile.addEventListener('pointerenter', () => {
+        hv = h('video', { class: 'vm-hover', src: fileSrc(c.file), muted: true, autoplay: true, loop: true, playsinline: true });
+        hv.muted = true;
+        tile.append(hv);
+      });
+      tile.addEventListener('pointerleave', () => { hv?.pause(); hv?.remove(); hv = null; });
+      return wrap;
+    })),
+    h('p', { class: 'muted small hint-p' }, 'Klik untuk review, klik dua kali atau Alt + 1–9 untuk langsung pasang. Video meme jadi layer yang bisa digeser, di-resize dan di-crop.'),
+  ];
 }
 
 // ================= video layers =================
@@ -2735,6 +3047,7 @@ function renderExport() {
     h('div', { class: 'row-between' }, h('h3', {}, 'Ekspor'), h('button', { class: 'icon-btn', 'aria-label': 'Tutup', onclick: toggleExport }, '✕')),
     h('div', { class: 'muted small' }, `${tl().width}×${tl().height} · ${tl().fps} fps · MP4 H.264 · ${tc(d, true)}`),
     d > 180000 ? h('div', { class: 'warn small' }, 'Lebih dari 3 menit: YouTube Shorts membatasi 3 menit. TikTok masih bisa.') : h('span'),
+    qualityBlock(d),
     h('div', { class: 'muted small' }, `Encoder: ${settings.encoder ? ENCODER_LABEL[settings.encoder] : 'mengecek…'}`),
     h('button', {
       class: 'ghost small path', title: settings.outDir,
@@ -2750,13 +3063,48 @@ function renderExport() {
         try {
           await flush();
           const fontScale = await fontScales();
-          await enqueueExport(P!, { outDir: settings.outDir, encoder: settings.encoder || (await detectEncoder()), fontScale });
+          await enqueueExport(P!, { outDir: settings.outDir, encoder: settings.encoder || (await detectEncoder()), fontScale, quality: settings.quality ?? 0.75 });
         } catch (e) { toast((e as Error).message, 'error'); }
       },
     }, 'Ekspor video'),
     h('div', { id: 'queue' }),
   );
   renderQueue();
+}
+
+const QUALITY_STOPS: [number, string][] = [[0.5, 'Hemat'], [0.75, 'Shorts'], [1, 'Maksimal']];
+function qualityBlock(durMs: number): HTMLElement {
+  const q = settings.quality ?? 0.75;
+  const est = (qq: number) => {
+    const kbps = qualityBitrate(tl().fps, qq) * 0.7 + 192;   // encoders land below the cap on most game footage
+    return Math.max(1, Math.round((kbps * durMs) / 8 / 1000 / 1000));
+  };
+  const label = $('#q-label');
+  void label;
+  const wrap = h('div', { class: 'quality' },
+    h('div', { class: 'row-between' },
+      h('span', { class: 'label' }, 'Kualitas'),
+      h('span', { class: 'q-value', id: 'q-value' }, `${Math.round(q * 100)}%`),
+    ),
+    h('input', {
+      type: 'range', min: 40, max: 100, step: 5, value: Math.round(q * 100), 'aria-label': 'Kualitas ekspor',
+      oninput: (e) => {
+        const v = Number((e.target as HTMLInputElement).value) / 100;
+        settings.quality = v;
+        $('#q-value')!.textContent = `${Math.round(v * 100)}%`;
+        $('#q-est')!.textContent = `Perkiraan ukuran ±${est(v)} MB`;
+        document.querySelectorAll('.q-stops button').forEach((b) => b.classList.toggle('on', Number((b as HTMLElement).dataset.q) === v));
+      },
+      onchange: () => void saveSettings(settings),
+    }),
+    h('div', { class: 'q-stops' }, ...QUALITY_STOPS.map(([v, name]) => h('button', {
+      class: `chip ${Math.abs(q - v) < 0.001 ? 'on' : ''}`, 'data-q': v,
+      onclick: () => { settings.quality = v; void saveSettings(settings); renderExport(); },
+    }, `${name} ${Math.round(v * 100)}%`))),
+    h('div', { class: 'muted small', id: 'q-est' }, `Perkiraan ukuran ±${est(q)} MB`),
+    h('div', { class: 'muted small' }, '70–80% sudah tajam di layar HP. 100% hanya kalau mau diedit ulang.'),
+  );
+  return wrap;
 }
 
 /** Size factors so exported text matches the preview; measured once per font on this PC and remembered. */
@@ -2816,6 +3164,11 @@ function onKey(e: KeyboardEvent) {
   if (ctrl && e.key.toLowerCase() === 'y') { e.preventDefault(); redo(); return; }
   if (ctrl && e.key.toLowerCase() === 'b') { e.preventDefault(); splitHere(); return; }
   const digit = /^Digit([1-9])$/.exec(e.code);
+  if (!ctrl && e.altKey && digit && library) {
+    const c = (library.clips ?? [])[Number(digit[1]) - 1];
+    if (c) { e.preventDefault(); void insertVideoMeme(c); }
+    return;
+  }
   if (!ctrl && !e.altKey && digit && library) {
     const n = Number(digit[1]) - 1;
     if (e.shiftKey) { const m = library.memes[n]; if (m) { e.preventDefault(); insertMeme(m); } }

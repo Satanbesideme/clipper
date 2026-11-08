@@ -9,7 +9,7 @@ export const SOUND_EXT = ['mp3', 'wav', 'ogg', 'm4a', 'aac', 'flac', 'opus'];
 export const IMAGE_EXT = ['png', 'jpg', 'jpeg', 'gif', 'webp'];
 
 export interface LibSound { id: string; name: string; file: string; durationMs: number }
-export interface Pad { id: string; name: string; soundId: string; color: string }
+export interface Pad { id: string; name: string; soundId: string; color: string; cat?: string; fav?: boolean }
 
 export interface Meme {
   id: string;
@@ -21,6 +21,24 @@ export interface Meme {
   durationMs: number;  // how long it stays on screen when placed
   transIn: Trans;
   transOut: Trans;
+  cat?: string;
+  fav?: boolean;
+}
+
+/** A short video meme (reaction clip) kept in the library, ready to drop on the timeline as a layer. */
+export interface VideoMeme {
+  id: string;
+  name: string;
+  file: string;       // copy in the library (MP4/MOV/WebM, remuxed if needed)
+  thumb: string;      // still frame for the grid
+  width: number;
+  height: number;
+  durationMs: number;
+  fps: number;
+  hasAudio: boolean;
+  volume: number;     // default volume when placed
+  cat?: string;
+  fav?: boolean;
 }
 
 export interface Library {
@@ -28,8 +46,11 @@ export interface Library {
   sounds: LibSound[];
   pads: Pad[];     // order = hotkeys 1..9
   memes: Meme[];   // order = hotkeys Shift+1..9
+  clips?: VideoMeme[];  // order = hotkeys Alt+1..9
   starterInstalled: boolean;
 }
+
+export const VIDEO_MEME_EXT = ['mp4', 'mov', 'webm', 'mkv', 'm4v', 'gifv'];
 
 const PAD_COLORS = ['#ff6a1a', '#ffd400', '#4cc38a', '#4ea1ff', '#c77dff', '#ff5c8a', '#2ec4b6', '#f2c14e', '#a3a3a3'];
 
@@ -85,7 +106,7 @@ async function copyIn(path: string, sub: 'sounds' | 'images'): Promise<string> {
   return dest;
 }
 
-async function addSound(path: string, name = stem(path)): Promise<Pad> {
+async function addSound(path: string, name = stem(path), cat?: string): Promise<Pad> {
   const L = await loadLibrary();
   const info = await probe(path).catch(() => null);
   const ms = Math.round(Number(info?.format.duration ?? 0) * 1000);
@@ -93,12 +114,12 @@ async function addSound(path: string, name = stem(path)): Promise<Pad> {
   if (ms > 5 * 60_000) throw new Error(`${baseName(path)} terlalu panjang untuk soundboard (maks 5 menit).`);
   const s: LibSound = { id: uid(), name, file: await copyIn(path, 'sounds'), durationMs: ms };
   L.sounds.push(s);
-  const pad: Pad = { id: uid(), name, soundId: s.id, color: PAD_COLORS[L.pads.length % PAD_COLORS.length] };
+  const pad: Pad = { id: uid(), name, soundId: s.id, color: PAD_COLORS[L.pads.length % PAD_COLORS.length], cat };
   L.pads.push(pad);
   return pad;
 }
 
-async function addMeme(path: string): Promise<Meme> {
+async function addMeme(path: string, cat?: string): Promise<Meme> {
   const L = await loadLibrary();
   const info = await probe(path).catch(() => null);
   const v = info?.streams.find((s) => s.codec_type === 'video' && s.width && s.height);
@@ -106,21 +127,68 @@ async function addMeme(path: string): Promise<Meme> {
   const animated = extName(path) === 'gif' && Number(v.nb_frames ?? '2') !== 1;
   const m: Meme = {
     id: uid(), name: stem(path), file: await copyIn(path, 'images'), width: v.width, height: v.height, animated,
-    durationMs: 2000, transIn: 'pop', transOut: 'fade',
+    durationMs: 2000, transIn: 'pop', transOut: 'fade', cat,
   };
   L.memes.push(m);
   return m;
 }
 
+interface VProbe { streams: { codec_type: string; width?: number; height?: number; avg_frame_rate?: string; r_frame_rate?: string }[]; format: { duration?: string } }
+
+/** Adds a video meme: copies it in (remuxing containers the player cannot read) and makes a still for the grid. */
+export async function addVideoMeme(path: string, run: (args: string[]) => Promise<void>, cat?: string, save = true): Promise<VideoMeme> {
+  const L = await loadLibrary();
+  const info = JSON.parse(await invoke<string>('probe', { path }).catch(() => '{"streams":[],"format":{}}')) as VProbe;
+  const v = info.streams.find((s) => s.codec_type === 'video' && s.width && s.height);
+  const ms = Math.round(Number(info.format.duration ?? 0) * 1000);
+  if (!v || !v.width || !v.height || !ms) throw new Error(`${baseName(path)} bukan video yang bisa dibaca.`);
+  if (ms > 3 * 60_000) throw new Error(`${baseName(path)} terlalu panjang untuk video meme (maks 3 menit).`);
+  const dir = join(await libDir(), 'videos');
+  const id = uid();
+  const ext = extName(path);
+  let file: string;
+  if (['mp4', 'mov', 'webm', 'm4v'].includes(ext)) {
+    file = join(dir, `${id.slice(0, 8)}-${baseName(path)}`);
+    await invoke('copy_file', { src: path, dest: file });
+  } else {
+    file = join(dir, `${id.slice(0, 8)}-${stem(path)}.mp4`);
+    await invoke('ensure_dir', { path: dir });
+    await run(['-hide_banner', '-y', '-nostats', '-i', path, '-map', '0:v:0', '-map', '0:a?', '-c', 'copy', '-movflags', '+faststart', file]);
+  }
+  const thumb = join(dir, `${id.slice(0, 8)}-thumb.jpg`);
+  await run(['-hide_banner', '-y', '-nostats', '-ss', String(Math.min(1, ms / 2000)), '-i', file, '-frames:v', '1', '-vf', 'scale=320:320:force_original_aspect_ratio=decrease', '-q:v', '4', thumb]).catch(() => undefined);
+  const rate = (r?: string) => { const [a, b] = (r ?? '').split('/').map(Number); return b ? a / b : a || 30; };
+  const clip: VideoMeme = {
+    id, name: stem(path), file, thumb, width: v.width, height: v.height, durationMs: ms,
+    fps: Math.round(rate(v.avg_frame_rate || v.r_frame_rate) * 100) / 100,
+    hasAudio: info.streams.some((s) => s.codec_type === 'audio'), volume: 1, cat,
+  };
+  (L.clips ??= []).push(clip);
+  if (save) await saveLibrary();
+  return clip;
+}
+
+export async function deleteVideoMeme(id: string) {
+  const L = await loadLibrary();
+  const c = (L.clips ?? []).find((x) => x.id === id);
+  if (c) {
+    await invoke('remove_path', { path: c.file }).catch(() => undefined);
+    await invoke('remove_path', { path: c.thumb }).catch(() => undefined);
+  }
+  L.clips = (L.clips ?? []).filter((x) => x.id !== id);
+  await saveLibrary();
+}
+
 /** Sorts dropped files into the right library. */
-export async function importFiles(paths: string[]): Promise<{ sounds: number; memes: number; errors: string[] }> {
+export async function importFiles(paths: string[], cat?: string, onEach?: (i: number, n: number) => void): Promise<{ sounds: number; memes: number; errors: string[] }> {
   const errors: string[] = [];
   let sounds = 0, memes = 0;
-  for (const p of paths) {
+  for (const [i, p] of paths.entries()) {
     const ext = extName(p);
+    onEach?.(i, paths.length);
     try {
-      if (SOUND_EXT.includes(ext)) { await addSound(p); sounds++; }
-      else if (IMAGE_EXT.includes(ext)) { await addMeme(p); memes++; }
+      if (SOUND_EXT.includes(ext)) { await addSound(p, stem(p), cat); sounds++; }
+      else if (IMAGE_EXT.includes(ext)) { await addMeme(p, cat); memes++; }
       else errors.push(`${baseName(p)}: format belum didukung`);
     } catch (e) {
       errors.push((e as Error).message);
@@ -169,3 +237,8 @@ export function move<T>(list: T[], from: number, to: number) {
 }
 
 export const soundOf = (pad: Pad) => lib?.sounds.find((s) => s.id === pad.soundId);
+
+/** Categories in use in a list, sorted. */
+export function categoriesOf(list: { cat?: string }[]): string[] {
+  return [...new Set(list.map((x) => (x.cat ?? '').trim()).filter(Boolean))].sort((a, b) => a.localeCompare(b, 'id'));
+}

@@ -31,7 +31,7 @@ declare global {
 
 function T(): TauriGlobal {
   const t = window.__TAURI__;
-  if (!t) throw new Error('Aplikasi harus dibuka lewat GALSURKU Clipper, bukan browser.');
+  if (!t) throw new Error('Aplikasi harus dibuka lewat Gals Clip Studio, bukan browser.');
   return t;
 }
 

@@ -1,7 +1,7 @@
 // Running ffmpeg / whisper: import, thumbnails, speech-to-text and the export queue.
 import { invoke, listen, join, extName, dirName, stem, baseName } from './tauri';
 import {
-  ENCODER_ORDER, encoderProbeArgs, remuxArgs, safeName, speechWavArgs, stripEmoji, thumbArgs, whisperArgs,
+  ENCODER_ORDER, encoderProbeArgs, qualityBitrate, type WhisperOpts, remuxArgs, safeName, speechWavArgs, stripEmoji, thumbArgs, whisperArgs,
   type Encoder,
 } from './ffmpeg';
 import {
@@ -114,6 +114,7 @@ export async function importMedia(path: string, onStatus: (msg: string) => void)
     id: uid(), path, playable, name: stem(path), durationMs, width, height,
     fps: Math.round((rate(v.avg_frame_rate) || rate(v.r_frame_rate) || 30) * 100) / 100,
     hasAudio: info.streams.some((s) => s.codec_type === 'audio'),
+    audioTracks: info.streams.filter((s) => s.codec_type === 'audio').length,
     thumbs: { everySec: Math.min(20, Math.max(1, Math.ceil(durationMs / 1000 / 400))), sheets: 0, tw, th, ready: false },
   };
 }
@@ -169,18 +170,29 @@ export async function cancelTranscribe() {
  * ffmpeg args that write the timeline's audio (clips in order, speed applied) as one 16 kHz mono WAV,
  * padded with a second of silence: whisper refuses inputs shorter than one second.
  */
-export function timelineWavArgs(clips: Timeline['clips'], media: Record<string, MediaEntry>, out: string): string[] {
+export function timelineWavArgs(clips: Timeline['clips'], media: Record<string, MediaEntry>, out: string, tracks: 'all' | number = 'all', enhance = true): string[] {
   const args = ['-hide_banner', '-y', '-nostats', '-progress', 'pipe:1'];
   const f: string[] = [];
   clips.forEach((c, i) => {
     const m = media[c.mediaId];
     args.push('-ss', (c.inMs / 1000).toFixed(3), '-t', ((c.outMs - c.inMs) / 1000).toFixed(3), '-i', m.playable);
     const dur = (Math.max(1, Math.round((c.outMs - c.inMs) / c.speed)) / 1000).toFixed(3);
+    const n = Math.max(1, m.audioTracks ?? 1);
+    // every audio track mixed together (mic + game + Discord), or one chosen track
+    let src = `[${i}:a:0]`;
+    if (tracks === 'all' && n > 1) {
+      f.push(`${Array.from({ length: n }, (_, k) => `[${i}:a:${k}]`).join('')}amix=inputs=${n}:duration=longest:normalize=0[mx${i}]`);
+      src = `[mx${i}]`;
+    } else if (typeof tracks === 'number') {
+      src = `[${i}:a:${Math.min(tracks, n - 1)}]`;
+    }
     f.push(m.hasAudio
-      ? `[${i}:a]asetpts=PTS-STARTPTS,${[...atempo(c.speed), 'aresample=16000', 'aformat=sample_fmts=s16:channel_layouts=mono', 'apad', `atrim=0:${dur}`].join(',')}[a${i}]`
+      ? `${src}asetpts=PTS-STARTPTS,${[...atempo(c.speed), 'aresample=16000', 'aformat=sample_fmts=s16:channel_layouts=mono', 'apad', `atrim=0:${dur}`].join(',')}[a${i}]`
       : `anullsrc=r=16000:cl=mono,atrim=0:${dur},aformat=sample_fmts=s16:channel_layouts=mono[a${i}]`);
   });
-  f.push(`${clips.map((_, i) => `[a${i}]`).join('')}concat=n=${clips.length}:v=0:a=1,apad=pad_dur=1[out]`);
+  // voice clean-up: cut rumble and hiss, then lift quiet voices (a friend on Discord) to the same level as loud ones
+  const clean = enhance ? ',highpass=f=90,lowpass=f=7600,afftdn=nr=10:nf=-30,dynaudnorm=f=150:g=15:m=25:p=0.9' : '';
+  f.push(`${clips.map((_, i) => `[a${i}]`).join('')}concat=n=${clips.length}:v=0:a=1${clean},apad=pad_dur=1[out]`);
   args.push('-filter_complex', f.join(';'), '-map', '[out]', '-c:a', 'pcm_s16le', '-ar', '16000', '-ac', '1', out);
   return args;
 }
@@ -199,8 +211,8 @@ function atempo(speed: number): string[] {
  * The timeline audio is cut into a few batches (so the model is loaded a few times, not once per clip)
  * and each batch is one WAV in timeline order, so whisper's times are already timeline times.
  */
-export async function transcribe(p: Project, size: ModelSize, onStatus: (msg: string, frac: number) => void): Promise<CaptionLine[]> {
-  if (!(await invoke<boolean>('whisper_available'))) throw new Error('Mesin subtitle tidak ditemukan. Install ulang GALSURKU Clipper versi terbaru.');
+export async function transcribe(p: Project, size: ModelSize, onStatus: (msg: string, frac: number) => void, opts: { tracks?: 'all' | number; careful?: boolean } = {}): Promise<CaptionLine[]> {
+  if (!(await invoke<boolean>('whisper_available'))) throw new Error('Mesin subtitle tidak ditemukan. Install ulang Gals Clip Studio versi terbaru.');
   if (!(await modelReady(size))) throw new Error('Model subtitle belum lengkap. Unduh ulang modelnya di tab Subtitle.');
   const model = await modelPath(size);
   const dir = join(await projectDir(p.id), 'stt');
@@ -210,6 +222,13 @@ export async function transcribe(p: Project, size: ModelSize, onStatus: (msg: st
   const clips = p.timeline.clips.filter((c) => media[c.mediaId]);
   if (!clips.length) return [];
   sttCancelled = false;
+  for (const m of p.media) {
+    if (m.audioTracks !== undefined || !m.hasAudio) continue;
+    try {
+      const info = JSON.parse(await invoke<string>('probe', { path: m.playable })) as { streams: { codec_type: string }[] };
+      m.audioTracks = info.streams.filter((s) => s.codec_type === 'audio').length;
+    } catch { m.audioTracks = 1; }
+  }
 
   // batches of at most 40 clips / 10 minutes, so the command line stays short on Windows
   const batches: { clips: typeof clips; offset: number; dur: number }[] = [];
@@ -231,25 +250,32 @@ export async function transcribe(p: Project, size: ModelSize, onStatus: (msg: st
     try {
       onStatus(`Menyiapkan audio${tag}…`, done / total);
       sttJob = uid();
-      await runTool('ffmpeg', timelineWavArgs(b.clips, media, wav), undefined, sttJob);
+      await runTool('ffmpeg', timelineWavArgs(b.clips, media, wav, opts.tracks ?? 'all', true), undefined, sttJob);
       if (sttCancelled) throw new Error('Dibatalkan.');
       onStatus(`Mendengarkan ucapan${tag}…`, done / total);
       await invoke('remove_path', { path: `${base}.json` }).catch(() => undefined);
       const progress = (_ms: number, pct: number) => {
         if (pct >= 0) onStatus(`Mendengarkan ucapan${tag}… ${Math.round(pct)}%`, (done + (b.dur * pct) / 100) / total);
       };
-      // precise word timing (DTW); older whisper builds without it fall back to normal timing
-      sttJob = uid();
-      try {
-        if (dtwOk === false) throw new Error('skip');
-        await runTool('whisper', whisperArgs(model, wav, base, threads, size), progress, sttJob);
-        dtwOk = true;
-      } catch (e) {
-        if (sttCancelled) throw e;
-        dtwOk = false;
+      // try the most precise settings first; a whisper build that does not know an option fails at once,
+      // so step down until one works and remember it for the next run
+      const variants: WhisperOpts[] = [
+        { dtw: size, careful: opts.careful }, { careful: opts.careful }, { dtw: size }, {},
+      ].filter((v, i, all) => (opts.careful || !v.careful) && all.findIndex((w) => JSON.stringify(w) === JSON.stringify(v)) === i);
+      let lastErr: unknown = null;
+      for (let vi = Math.min(whisperLevel, variants.length - 1); vi < variants.length; vi++) {
         sttJob = uid();
-        await runTool('whisper', whisperArgs(model, wav, base, threads), progress, sttJob);
+        try {
+          await runTool('whisper', whisperArgs(model, wav, base, threads, variants[vi]), progress, sttJob);
+          whisperLevel = vi;
+          lastErr = null;
+          break;
+        } catch (e) {
+          if (sttCancelled) throw e;
+          lastErr = e;
+        }
       }
+      if (lastErr) throw lastErr;
       if (sttCancelled) throw new Error('Dibatalkan.');
       let json: string;
       try { json = await invoke<string>('read_text', { path: `${base}.json` }); }
@@ -279,7 +305,7 @@ export async function transcribe(p: Project, size: ModelSize, onStatus: (msg: st
   return groupLines(snapped, uid);
 }
 
-let dtwOk: boolean | undefined;
+let whisperLevel = 0;
 
 // ---------- font calibration (export text = preview text) ----------
 
@@ -347,7 +373,7 @@ async function uniquePath(dir: string, base: string): Promise<string> {
   return p;
 }
 
-export async function enqueueExport(p: Project, opts: { outDir: string; encoder: Encoder; fontScale?: Record<string, number> }) {
+export async function enqueueExport(p: Project, opts: { outDir: string; encoder: Encoder; fontScale?: Record<string, number>; quality?: number }) {
   const tl: Timeline = structuredClone(p.timeline);
   if (!tl.clips.length) throw new Error('Timeline masih kosong. Tambahkan video dulu.');
   tl.texts = tl.texts.map((t) => ({ ...t, text: stripEmoji(t.text) })).filter((t) => t.text);
@@ -362,7 +388,8 @@ export async function enqueueExport(p: Project, opts: { outDir: string; encoder:
   }
   const outPath = await uniquePath(opts.outDir, safeName(p.name));
   const media = Object.fromEntries(p.media.map((m) => [m.id, m]));
-  const build = (encoder: Encoder) => renderArgs({ tl, media, encoder, bitrateK: tl.fps === 60 ? 16000 : 12000, assFile, fontsDir: FONTS_DIR, outPath });
+  const quality = opts.quality ?? 0.75;
+  const build = (encoder: Encoder) => renderArgs({ tl, media, encoder, bitrateK: qualityBitrate(tl.fps, quality), quality, assFile, fontsDir: FONTS_DIR, outPath });
   const job: ExportJob = {
     id, projectId: p.id, label: p.name, outPath, totalMs: timelineDuration(tl), progress: 0, status: 'queued', error: '',
     args: build(opts.encoder), encoder: opts.encoder, build, assFile,

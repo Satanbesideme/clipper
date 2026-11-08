@@ -1,9 +1,9 @@
-# GALSURKU Clipper
+# Gals Clip Studio
 
 Editor video ringan untuk Windows, untuk mengedit rekaman vertikal dari OBS jadi video TikTok dan YouTube Shorts. Ada subtitle otomatis Bahasa Indonesia yang jalan offline.
 
 ## Pasang
-Buka tab **Releases** di repo ini, unduh `GALSURKU Clipper_..._x64-setup.exe`, lalu jalankan. Kalau muncul "Windows protected your PC", klik **More info → Run anyway**.
+Buka tab **Releases** di repo ini, unduh `Gals Clip Studio_..._x64-setup.exe`, lalu jalankan. Kalau muncul "Windows protected your PC", klik **More info → Run anyway**.
 
 ## Cara pakai
 1. **Proyek baru**: pilih rekaman, atau tarik file dari folder OBS ke jendela.
@@ -16,7 +16,7 @@ Buka tab **Releases** di repo ini, unduh `GALSURKU Clipper_..._x64-setup.exe`, l
 8. **Musik latar**: tab **Media → Tambah musik latar**. Auto-ducking menurunkan musik saat kamu bicara (Ringan/Sedang/Kuat).
 9. **Hapus jeda**: tombol **Hapus jeda** di atas timeline memotong semua bagian diam sekaligus. Ctrl+Z untuk membatalkan.
 10. **Teks**: tab **Teks**, pilih gaya, ketik, lalu geser posisinya di preview.
-11. **Ekspor**: tombol **Ekspor** di kanan atas. Hasil 1080×1920 MP4 di `Videos\GALSURKU Clipper`.
+11. **Ekspor**: tombol **Ekspor** di kanan atas. Hasil 1080×1920 MP4 di `Videos\Gals Clip Studio`.
 
 | Tombol | Fungsi |
 | --- | --- |
@@ -35,6 +35,12 @@ Panel **Layer** (rail kiri). Setiap layer bisa digeser, di-resize (tarik pojok, 
 - **Layer dari video utama** mengikuti potongan, speed, dan hapus jeda video utama.
 - **Layer dari video lain**: file lain dengan waktu dan volume sendiri.
 - Posisi cepat (Penuh, Setengah atas/bawah) mengisi area dengan zoom, tidak gepeng.
+
+## Video meme
+Panel **Video meme**: tambah klip reaksi (MP4/MOV/WebM/MKV) atau impor satu folder. Klik untuk review, **Pasang di playhead** (atau klik dua kali / Alt+1–9) untuk menaruhnya sebagai layer bersuara.
+
+## Library
+Suara, meme, dan video meme tidak dibatasi jumlahnya. Pakai kolom cari, kategori (nama folder saat impor folder), dan favorit ★.
 
 ## Watermark
 Klik area kosong di timeline, lalu di panel kanan pilih **+ Pasang logo**. Atur pojok, ukuran, dan transparansi. Centang **Pasang otomatis di proyek baru** agar logo GALSURKU selalu ikut.

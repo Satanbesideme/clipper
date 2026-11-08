@@ -57,6 +57,7 @@ const scenarios: [string, (tl: Timeline) => void][] = [
   ['layer video lain dengan suara', (tl) => {
     tl.layers = [{ id: 'o', name: 'Lain', source: 'media', mediaId: 'm', inMs: 6000, startMs: 2000, endMs: 5000, crop: { l: 0.1, t: 0.1, r: 0.1, b: 0.5 }, box: { x: 0.5, y: 0.5, w: 0.6, h: 0.3 }, opacity: 1, volume: 0.8 }];
   }],
+  ['kualitas 40%', () => undefined],
   ['teks dengan kotak', (tl) => { tl.texts = [{ id: 't', startMs: 0, endMs: 3000, text: 'MOMEN', x: 0.5, y: 0.2, style: { ...DEFAULT_TEXT, font, box: true } }]; }],
 ];
 scenarios.push(['SEMUA SEKALIGUS', (tl) => { for (const [name, f] of scenarios) if (name !== 'SEMUA SEKALIGUS' && !name.startsWith('meme') && !name.startsWith('layer') && name !== 'speed 2x') f(tl); tl.images = [meme('i', `${dir}/meme.png`, 500, 2500, 'pop', 'fade'), meme('g', `${dir}/anim.gif`, 4500, 6500, 'slide', 'pop', true)]; tl.clips[1].trans = 'punch'; tl.layers = [{ id: 'g', name: 'G', source: 'main', inMs: 0, startMs: 0, endMs: 99999, crop: { l: 0, t: 0, r: 0, b: 0.5 }, box: { x: 0.5, y: 0.25, w: 1, h: 0.5 }, opacity: 1, volume: 0 }, { id: 'o', name: 'O', source: 'media', mediaId: 'm', inMs: 2000, startMs: 1000, endMs: 4000, crop: { l: 0, t: 0.5, r: 0, b: 0 }, box: { x: 0.5, y: 0.75, w: 1, h: 0.5 }, opacity: 1, volume: 0.5 }]; tl.hideMain = true; }]);
@@ -67,7 +68,8 @@ for (const [name, setup] of scenarios) {
   setup(tl);
   let assFile: string | undefined;
   if (tl.texts.length || tl.captions.lines.length) { assFile = `${dir}/subs.ass`; writeFileSync(assFile, buildAss(tl)); }
-  const args = renderArgs({ tl, media, encoder: 'libx264', bitrateK: 8000, assFile, fontsDir, outPath: `${dir}/out.mp4` });
+  const q = name.startsWith('kualitas') ? 0.4 : 1;
+  const args = renderArgs({ tl, media, encoder: 'libx264', bitrateK: Math.round(8000 * q), quality: q, assFile, fontsDir, outPath: `${dir}/out.mp4` });
   const r = run(args);
   if (r.status === 0) { console.log(`OK    ${name}`); continue; }
   failed++;

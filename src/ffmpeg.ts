@@ -3,14 +3,27 @@
 export type Encoder = 'h264_nvenc' | 'h264_qsv' | 'h264_amf' | 'libx264';
 export const ENCODER_ORDER: Encoder[] = ['h264_nvenc', 'h264_qsv', 'h264_amf', 'libx264'];
 
-export function encoderArgs(enc: Encoder, bitrateK: number): string[] {
+/**
+ * Quality 0.4..1 (40-100 %). Lower = smaller file: the bitrate cap and the constant-quality target
+ * both move. For shorts ~70 % looks clean on a phone at a fraction of the size.
+ */
+export function qualityBitrate(fps: number, quality: number): number {
+  const base = fps >= 50 ? 16000 : 12000;
+  const q = Math.min(1, Math.max(0.4, quality));
+  return Math.round(base * Math.pow(q, 1.6));
+}
+
+export function encoderArgs(enc: Encoder, bitrateK: number, quality = 1): string[] {
+  const q = Math.min(1, Math.max(0.4, quality));
   const b = `${bitrateK}k`, max = `${Math.round(bitrateK * 1.4)}k`, buf = `${bitrateK * 2}k`;
+  const crf = String(Math.round(17 + (1 - q) * 16));     // 100% -> 17, 70% -> 22, 40% -> 27
+  const cq = String(Math.round(19 + (1 - q) * 15));
   const common = ['-pix_fmt', 'yuv420p', '-profile:v', 'high'];
   switch (enc) {
-    case 'h264_nvenc': return ['-c:v', 'h264_nvenc', '-preset', 'p5', '-rc', 'vbr', '-cq', '21', '-b:v', b, '-maxrate', max, '-bufsize', buf, ...common];
-    case 'h264_qsv': return ['-c:v', 'h264_qsv', '-preset', 'medium', '-b:v', b, '-maxrate', max, ...common];
+    case 'h264_nvenc': return ['-c:v', 'h264_nvenc', '-preset', 'p5', '-rc', 'vbr', '-cq', cq, '-b:v', b, '-maxrate', max, '-bufsize', buf, ...common];
+    case 'h264_qsv': return ['-c:v', 'h264_qsv', '-preset', 'medium', '-global_quality', cq, '-b:v', b, '-maxrate', max, ...common];
     case 'h264_amf': return ['-c:v', 'h264_amf', '-quality', 'quality', '-rc', 'vbr_peak', '-b:v', b, '-maxrate', max, ...common];
-    default: return ['-c:v', 'libx264', '-preset', 'veryfast', '-crf', '20', '-maxrate', max, '-bufsize', buf, ...common];
+    default: return ['-c:v', 'libx264', '-preset', 'veryfast', '-crf', crf, '-maxrate', max, '-bufsize', buf, ...common];
   }
 }
 
@@ -37,11 +50,20 @@ export function speechWavArgs(src: string, inMs: number, outMs: number, out: str
     '-i', src, '-map', '0:a:0', '-vn', '-ac', '1', '-ar', '16000', '-c:a', 'pcm_s16le', out];
 }
 
-export function whisperArgs(model: string, wav: string, outBase: string, threads: number, dtw?: 'base' | 'small', lang = 'id'): string[] {
-  // -ml 1 + -sow: one segment per word, which gives word timing for the highlight style;
-  // -dtw: token timestamps aligned with the model's attention, much closer to when each word is said
-  return ['-m', model, '-f', wav, '-l', lang, '-t', String(Math.max(1, Math.min(8, threads))),
-    '-ml', '1', '-sow', ...(dtw ? ['-dtw', dtw] : []), '-oj', '-of', outBase, '-pp'];
+export interface WhisperOpts { dtw?: 'base' | 'small'; careful?: boolean; lang?: string }
+
+/**
+ * -ml 1 + -sow: one segment per word, which gives word timing for the highlight style.
+ * -dtw: token timestamps aligned with the model's attention, closer to when each word is said.
+ * careful: beam search (tries several readings and keeps the best) and a higher no-speech threshold,
+ * so quiet or overlapping voices (a friend on Discord) are kept instead of dropped as silence.
+ */
+export function whisperArgs(model: string, wav: string, outBase: string, threads: number, o: WhisperOpts = {}): string[] {
+  return ['-m', model, '-f', wav, '-l', o.lang ?? 'id', '-t', String(Math.max(1, Math.min(8, threads))),
+    '-ml', '1', '-sow',
+    ...(o.dtw ? ['-dtw', o.dtw] : []),
+    ...(o.careful ? ['-bs', '5', '-bo', '5', '-nth', '0.8', '--prompt', 'Obrolan santai main game bareng teman di Discord.'] : []),
+    '-oj', '-of', outBase, '-pp'];
 }
 
 export function safeName(s: string): string {

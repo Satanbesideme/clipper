@@ -1,4 +1,4 @@
-// GALSURKU Clipper — thin native layer: runs the bundled ffmpeg/ffprobe, reads/writes app files.
+// Gals Clip Studio — thin native layer: runs the bundled ffmpeg/ffprobe, reads/writes app files.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::collections::HashMap;
@@ -371,5 +371,5 @@ fn main() {
             read_text, write_text, write_bytes, read_bytes, ensure_dir, copy_file, starter_sfx_dir, exists, list_dir, remove_path, reveal
         ])
         .run(tauri::generate_context!())
-        .expect("gagal menjalankan GALSURKU Clipper");
+        .expect("gagal menjalankan Gals Clip Studio");
 }
