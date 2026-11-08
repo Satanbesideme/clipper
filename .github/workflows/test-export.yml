@@ -16,7 +16,7 @@ jobs:
           node-version: 22
       - name: Unduh FFmpeg (build BtbN yang sama dengan aplikasi, versi Linux)
         run: |
-          curl -sSL -o ff.tar.xz https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz
+          curl -fsSL --retry 6 --retry-delay 20 --retry-all-errors -o ff.tar.xz https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz
           mkdir ff && tar -xf ff.tar.xz -C ff --strip-components=1
           ff/bin/ffmpeg -hide_banner -version | head -1
       - run: sudo apt-get install -y fonts-dejavu-core >/dev/null

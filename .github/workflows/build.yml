@@ -28,7 +28,7 @@ jobs:
         shell: pwsh
         run: |
           $url = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip"
-          Invoke-WebRequest $url -OutFile ffmpeg.zip
+          Invoke-WebRequest $url -OutFile ffmpeg.zip -MaximumRetryCount 6 -RetryIntervalSec 20
           Expand-Archive ffmpeg.zip -DestinationPath ffmpeg-tmp
           $bin = Get-ChildItem ffmpeg-tmp -Recurse -Filter ffmpeg.exe | Select-Object -First 1
           Copy-Item $bin.FullName src-tauri/binaries/ffmpeg-x86_64-pc-windows-msvc.exe
