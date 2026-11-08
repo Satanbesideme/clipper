@@ -35,13 +35,30 @@ jobs:
 
       - name: Unduh FFmpeg (build GPL dengan NVENC, QSV, AMF)
         shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           New-Item -ItemType Directory -Force deps-cache | Out-Null
-          $url = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip"
-          $ok = $false
-          for ($i = 1; $i -le 8 -and -not $ok; $i++) {
-            try { Invoke-WebRequest $url -OutFile ffmpeg-new.zip; $ok = $true } catch { Write-Host "Unduh gagal ($i): $($_.Exception.Message)"; Start-Sleep -Seconds (15 * $i) }
+          function Get-File($url, $tries) {
+            for ($i = 1; $i -le $tries; $i++) {
+              try { Invoke-WebRequest $url -OutFile ffmpeg-new.zip; return $true } catch { Write-Host "Unduh gagal ($i) $url : $($_.Exception.Message)"; Start-Sleep -Seconds (10 * $i) }
+            }
+            return $false
           }
+          # 1) BtbN "latest"  2) the newest dated BtbN build  3) gyan.dev  4) the copy from an earlier build
+          $urls = @("https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip")
+          try {
+            $headers = @{ Authorization = "Bearer $env:GH_TOKEN"; "User-Agent" = "galsurku-clipper-ci" }
+            $rels = Invoke-RestMethod "https://api.github.com/repos/BtbN/FFmpeg-Builds/releases?per_page=5" -Headers $headers
+            foreach ($r in $rels) {
+              if ($r.tag_name -eq 'latest') { continue }
+              $a = $r.assets | Where-Object { $_.name -match '^ffmpeg-N-.*-win64-gpl\.zip$' } | Select-Object -First 1
+              if ($a) { $urls += $a.browser_download_url; break }
+            }
+          } catch { Write-Host "Daftar rilis BtbN tidak bisa dibaca: $($_.Exception.Message)" }
+          $urls += "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
+          $ok = $false
+          foreach ($u in $urls) { if (Get-File $u 3) { Write-Host "FFmpeg dari $u"; $ok = $true; break } }
           if ($ok) { Move-Item -Force ffmpeg-new.zip deps-cache/ffmpeg.zip }
           elseif (Test-Path deps-cache/ffmpeg.zip) { Write-Host "::warning::Pakai FFmpeg dari build sebelumnya" }
           else { throw "FFmpeg tidak bisa diunduh" }
