@@ -1,3 +1,4 @@
+import { icon, drawIcon, type IconName } from './icons';
 import './styles.css';
 import { dialog, fileSrc, invoke, isTauri, onDrop, extName, join } from './tauri';
 import { qualityBitrate } from './ffmpeg';
@@ -253,8 +254,11 @@ async function renderHome() {
         ),
         h('div', { class: 'home-copy' },
           h('h1', { class: 'home-title' }, APP_NAME),
-          h('p', { class: 'home-lede' }, 'Potong rekaman vertikal dari OBS jadi shorts. Tarik file video ke mana saja di jendela ini, atau klik lingkaran untuk memilih.'),
-          h('div', { class: 'home-meta muted small' }, settings.encoder ? `Ekspor memakai ${ENCODER_LABEL[settings.encoder]}` : 'Mengecek kartu grafis…'),
+          h('p', { class: 'home-lede' }, 'Potong rekaman vertikal dari OBS jadi shorts. Tarik file video ke mana saja di jendela ini, atau klik Proyek baru.'),
+          h('div', { class: 'home-actions' },
+            h('button', { class: 'primary big-cta', onclick: () => void pick() }, icon('plus', 18), h('span', {}, 'Proyek baru')),
+            h('span', { class: 'home-meta muted small' }, settings.encoder ? `Ekspor memakai ${ENCODER_LABEL[settings.encoder]}` : 'Mengecek kartu grafis…'),
+          ),
         ),
       ),
       h('section', { class: 'home-projects' },
@@ -277,7 +281,7 @@ async function renderHome() {
                   await renderHome();
                 }
               },
-            }, '✕'),
+            }, icon('x', 15)),
           )),
         ) : h('p', { class: 'muted' }, 'Rekaman yang kamu buka akan muncul di sini, siap dilanjutkan kapan saja.'),
       ),
@@ -381,15 +385,15 @@ function renderEditor() {
       h('span', { id: 'busy', class: 'busy muted small' }),
       h('span', { id: 'saved', class: 'saved muted small', title: 'Proyek tersimpan otomatis setiap ada perubahan' }, 'Tersimpan otomatis'),
       h('div', { class: 'panel-toggles' },
-        h('button', { class: 'icon-btn', id: 'tog-left', title: 'Tampilkan / sembunyikan panel kiri', 'aria-label': 'Panel kiri', onclick: () => togglePanel('left') }, panelIcon('left')),
-        h('button', { class: 'icon-btn', id: 'tog-right', title: 'Tampilkan / sembunyikan panel kanan', 'aria-label': 'Panel kanan', onclick: () => togglePanel('right') }, panelIcon('right')),
+        h('button', { class: 'icon-btn', id: 'tog-left', title: 'Tampilkan / sembunyikan panel kiri', 'aria-label': 'Panel kiri', onclick: () => togglePanel('left') }, icon('panelLeft', 18)),
+        h('button', { class: 'icon-btn', id: 'tog-right', title: 'Tampilkan / sembunyikan panel kanan', 'aria-label': 'Panel kanan', onclick: () => togglePanel('right') }, icon('panelRight', 18)),
       ),
-      h('button', { class: 'icon-btn help-btn', title: 'Tombol keyboard', 'aria-label': 'Tombol keyboard', onclick: toggleHelp }, '?'),
-      h('button', { class: 'primary export-btn', id: 'export-btn', onclick: toggleExport }, 'Ekspor'),
+      h('button', { class: 'icon-btn help-btn', title: 'Tombol keyboard', 'aria-label': 'Tombol keyboard', onclick: toggleHelp }, icon('help', 18)),
+      h('button', { class: 'primary export-btn', id: 'export-btn', onclick: toggleExport }, icon('export', 16), h('span', {}, 'Ekspor')),
     ),
     h('div', { class: 'workspace' },
       h('nav', { class: 'rail', role: 'tablist', 'aria-label': 'Panel' },
-        ...RAIL.map(([k, icon, label]) => h('button', {
+        ...RAIL.map(([k, ic, label]) => h('button', {
           role: 'tab', class: tab === k ? 'on' : '', 'aria-selected': tab === k ? 'true' : 'false', 'data-tab': k, title: label,
           onclick: () => {
             libEdit = false;
@@ -397,7 +401,7 @@ function renderEditor() {
             if (settings.leftHidden) togglePanel('left');
             switchTab(k);
           },
-        }, h('span', { class: 'rail-icon', 'aria-hidden': 'true' }, icon), h('span', { class: 'rail-label' }, label))),
+        }, h('span', { class: 'rail-icon', 'aria-hidden': 'true' }, icon(ic, 20)), h('span', { class: 'rail-label' }, label))),
       ),
       h('aside', { class: 'left' },
         h('div', { class: 'left-head', id: 'left-head' }, RAIL.find((r) => r[0] === tab)![2]),
@@ -409,15 +413,15 @@ function renderEditor() {
         h('div', { class: 'transport' },
           h('span', { class: 'mono small', id: 'time' }),
           h('div', { class: 'transport-mid' },
-            h('button', { class: 'icon-btn', title: 'Mundur 1 detik (Shift+←)', 'aria-label': 'Mundur 1 detik', onclick: () => seek(t - 1000) }, '«'),
-            h('button', { class: 'play', id: 'play', 'aria-label': 'Putar', onclick: togglePlay }, '▶'),
-            h('button', { class: 'icon-btn', title: 'Maju 1 detik (Shift+→)', 'aria-label': 'Maju 1 detik', onclick: () => seek(t + 1000) }, '»'),
+            h('button', { class: 'icon-btn', title: 'Mundur 1 detik (Shift+←)', 'aria-label': 'Mundur 1 detik', onclick: () => seek(t - 1000) }, icon('back', 17)),
+            h('button', { class: 'play', id: 'play', 'aria-label': 'Putar', onclick: togglePlay }, icon('play', 18)),
+            h('button', { class: 'icon-btn', title: 'Maju 1 detik (Shift+→)', 'aria-label': 'Maju 1 detik', onclick: () => seek(t + 1000) }, icon('forward', 17)),
           ),
           h('div', { class: 'transport-right' },
             h('button', {
               class: `chip ${safeGuide ? 'on' : ''}`, id: 'safe-btn', title: 'Tandai area yang tertutup tombol dan teks TikTok/Shorts',
               onclick: (e) => { safeGuide = !safeGuide; (e.currentTarget as HTMLElement).classList.toggle('on', safeGuide); renderFrame(); },
-            }, 'Area aman'),
+            }, icon('safe', 14), h('span', { class: 'chip-label' }, 'Area aman')),
             h('span', { class: 'muted small', id: 'fmt' }, `${tl().width}×${tl().height} · ${tl().fps} fps`),
           ),
         ),
@@ -430,18 +434,18 @@ function renderEditor() {
     h('div', { class: 'tl-resize', id: 'tl-resize', title: 'Tarik untuk mengubah tinggi timeline', role: 'separator', 'aria-orientation': 'horizontal' }),
     h('section', { class: 'timeline' },
       h('div', { class: 'tl-tools' },
-        h('button', { class: 'tool icon', title: 'Urungkan (Ctrl+Z)', 'aria-label': 'Urungkan', onclick: undo }, '↶'),
-        h('button', { class: 'tool icon', title: 'Ulangi (Ctrl+Y)', 'aria-label': 'Ulangi', onclick: redo }, '↷'),
+        h('button', { class: 'tool icon', title: 'Urungkan (Ctrl+Z)', 'aria-label': 'Urungkan', onclick: undo }, icon('undo', 17)),
+        h('button', { class: 'tool icon', title: 'Ulangi (Ctrl+Y)', 'aria-label': 'Ulangi', onclick: redo }, icon('redo', 17)),
         h('span', { class: 'sep' }),
-        h('button', { class: 'tool', title: 'Potong di playhead (Ctrl+B)', onclick: splitHere }, h('span', { class: 'ti' }, '✂'), h('span', { class: 'tlabel' }, 'Split')),
-        h('button', { class: 'tool', title: 'Hapus yang dipilih (Delete)', onclick: deleteSelected }, h('span', { class: 'ti' }, '⌫'), h('span', { class: 'tlabel' }, 'Hapus')),
+        h('button', { class: 'tool', title: 'Potong di playhead (Ctrl+B)', onclick: splitHere }, icon('split', 16, 'ti'), h('span', { class: 'tlabel' }, 'Split')),
+        h('button', { class: 'tool', title: 'Hapus yang dipilih (Delete)', onclick: deleteSelected }, icon('trash', 16, 'ti'), h('span', { class: 'tlabel' }, 'Hapus')),
         h('span', { class: 'sep' }),
-        h('button', { class: 'tool', id: 'pause-btn', title: 'Potong semua bagian diam', onclick: togglePausePop }, h('span', { class: 'ti' }, '⏸'), h('span', { class: 'tlabel' }, 'Hapus jeda')),
+        h('button', { class: 'tool', id: 'pause-btn', title: 'Potong semua bagian diam', onclick: togglePausePop }, icon('silence', 16, 'ti'), h('span', { class: 'tlabel' }, 'Hapus jeda')),
         h('div', { class: 'spacer' }),
-        h('button', { class: 'tool', title: 'Perkecil', onclick: () => zoomBy(0.8) }, '−'),
+        h('button', { class: 'tool icon', title: 'Perkecil', 'aria-label': 'Perkecil', onclick: () => zoomBy(0.8) }, icon('minus', 16)),
         h('input', { type: 'range', id: 'zoom', min: 0, max: 100, 'aria-label': 'Zoom timeline', oninput: (e) => setZoomFromSlider(Number((e.target as HTMLInputElement).value)) }),
-        h('button', { class: 'tool', title: 'Perbesar', onclick: () => zoomBy(1.25) }, '+'),
-        h('button', { class: 'tool', title: 'Muat seluruh timeline', onclick: fitZoom }, 'Pas'),
+        h('button', { class: 'tool icon', title: 'Perbesar', 'aria-label': 'Perbesar', onclick: () => zoomBy(1.25) }, icon('plus', 16)),
+        h('button', { class: 'tool', title: 'Muat seluruh timeline', onclick: fitZoom }, icon('fit', 15, 'ti'), h('span', { class: 'tlabel' }, 'Pas')),
       ),
       h('div', { class: 'tl-body', id: 'tl-body' }, tlCanvas),
     ),
@@ -461,8 +465,8 @@ function renderEditor() {
   new ResizeObserver(() => { layoutPreview(); sizeTimeline(); }).observe($('#stage')!);
 }
 
-const RAIL: [LeftTab, string, string][] = [
-  ['media', '▦', 'Media'], ['layers', '◧', 'Layer'], ['sound', '♪', 'Suara'], ['meme', '☺', 'Meme'], ['vmeme', '▶', 'Video meme'], ['text', 'T', 'Teks'], ['captions', '≋', 'Subtitle'],
+const RAIL: [LeftTab, IconName, string][] = [
+  ['media', 'media', 'Media'], ['layers', 'layers', 'Layer'], ['sound', 'music', 'Suara'], ['meme', 'meme', 'Meme'], ['vmeme', 'vmeme', 'Video meme'], ['text', 'text', 'Teks'], ['captions', 'captions', 'Subtitle'],
 ];
 let safeGuide = false;
 
@@ -476,19 +480,21 @@ function setTlHeight(px: number, save = true) {
 }
 setTlHeight(readTlHeight());
 
+// ---------- range sliders show how far they are filled ----------
+function paintRange(el: HTMLInputElement) {
+  const min = Number(el.min || 0), max = Number(el.max || 100), v = Number(el.value);
+  el.style.setProperty('--fill', `${max > min ? ((v - min) / (max - min)) * 100 : 0}%`);
+}
+document.addEventListener('input', (e) => { const el = e.target; if (el instanceof HTMLInputElement && el.type === 'range') paintRange(el); }, true);
+new MutationObserver((muts) => {
+  for (const m of muts) for (const n of m.addedNodes) {
+    if (n instanceof HTMLInputElement && n.type === 'range') paintRange(n);
+    else if (n instanceof HTMLElement) n.querySelectorAll<HTMLInputElement>('input[type=range]').forEach(paintRange);
+  }
+}).observe(document.documentElement, { childList: true, subtree: true });
+
 // ---------- flexible side panels ----------
-const LEFT_DEF = 280, RIGHT_DEF = 300, RAIL_W = 68, MIN_VIEW = 300;
-function svgEl(tag: string, attrs: Record<string, string | number>) {
-  const el = document.createElementNS('http://www.w3.org/2000/svg', tag);
-  for (const [k, v] of Object.entries(attrs)) el.setAttribute(k, String(v));
-  return el;
-}
-function panelIcon(side: 'left' | 'right') {
-  const s = svgEl('svg', { width: 16, height: 16, viewBox: '0 0 16 16', 'aria-hidden': 'true' });
-  s.append(svgEl('rect', { x: 1.5, y: 2.5, width: 13, height: 11, rx: 1.5, fill: 'none', stroke: 'currentColor', 'stroke-width': 1.2 }));
-  s.append(svgEl('rect', { x: side === 'left' ? 2.5 : 9.5, y: 3.5, width: 4, height: 9, fill: 'currentColor', opacity: 0.8 }));
-  return s;
-}
+const LEFT_DEF = 290, RIGHT_DEF = 310, RAIL_W = 76, MIN_VIEW = 300, GAPS = 50;
 /**
  * Puts the saved panel widths on the grid, shrinking them (never the preview) when the window is narrow,
  * and folding the inspector away if there is still no room.
@@ -499,7 +505,7 @@ function applyCols() {
   const W = window.innerWidth;
   let L = settings.leftHidden ? 0 : clamp(settings.leftW ?? LEFT_DEF, 220, 520);
   let R = settings.rightHidden ? 0 : clamp(settings.rightW ?? RIGHT_DEF, 240, 520);
-  const room = W - RAIL_W - MIN_VIEW;
+  const room = W - RAIL_W - MIN_VIEW - GAPS;
   if (L + R > room) {
     const minL = L ? 200 : 0, minR = R ? 220 : 0;
     const shrinkable = (L - minL) + (R - minR);
@@ -509,7 +515,8 @@ function applyCols() {
   }
   const autoHideRight = !!R && L + R > room;
   if (autoHideRight) R = 0;
-  ws.style.gridTemplateColumns = `${RAIL_W}px ${L}px minmax(0,1fr) ${R}px`;
+  // hidden panels are display:none and take no grid cell, so they get no column (and no gap) either
+  ws.style.gridTemplateColumns = [`${RAIL_W}px`, L ? `${L}px` : '', 'minmax(0,1fr)', R ? `${R}px` : ''].filter(Boolean).join(' ');
   ws.classList.toggle('no-left', !L);
   ws.classList.toggle('no-right', !R);
   $('#tog-left')?.classList.toggle('on', !!L);
@@ -587,7 +594,7 @@ function toggleHelp() {
     ['Tarik di area kosong', 'Pilih banyak item'], ['Ctrl / Shift + klik', 'Tambah / kurangi pilihan'], ['Ctrl + A', 'Pilih semua item'],
   ];
   pop.replaceChildren(
-    h('div', { class: 'row-between' }, h('h3', {}, 'Tombol keyboard'), h('button', { class: 'icon-btn', 'aria-label': 'Tutup', onclick: toggleHelp }, '✕')),
+    h('div', { class: 'row-between' }, h('h3', {}, 'Tombol keyboard'), h('button', { class: 'icon-btn', 'aria-label': 'Tutup', onclick: toggleHelp }, icon('x', 15))),
     h('div', { class: 'keys' }, ...rows.flatMap(([k, d]) => [h('kbd', {}, k), h('span', {}, d)])),
   );
 }
@@ -629,7 +636,7 @@ function layoutPreview() {
 
 function updateTime() {
   const el = $('#time');
-  if (el && P) el.textContent = `${tc(t, true)} / ${tc(timelineDuration(tl()), true)}`;
+  if (el && P) el.replaceChildren(tc(t, true), h('span', { class: 't-total' }, ` / ${tc(timelineDuration(tl()), true)}`));
 }
 
 // ================= left panel =================
@@ -651,8 +658,8 @@ function renderLeftInner() {
 function mediaPanel(): Node[] {
   const p = P!;
   return [
-    h('button', { class: 'secondary wide', onclick: () => void pickAndImport() }, '+ Tambah video'),
-    h('button', { class: 'secondary wide', onclick: () => void addMusic() }, '♫ Tambah musik latar'),
+    h('button', { class: 'secondary wide with-ico', onclick: () => void pickAndImport() }, icon('video', 16), 'Tambah video'),
+    h('button', { class: 'secondary wide with-ico', onclick: () => void addMusic() }, icon('music', 16), 'Tambah musik latar'),
     p.media.length ? h('div', { class: 'media-grid' },
       ...p.media.map((m) => {
         const thumb = h('div', { class: 'media-thumb' });
@@ -671,7 +678,7 @@ function mediaPanel(): Node[] {
           h('button', {
             class: 'icon-btn add', title: 'Jadikan layer di posisi playhead', 'aria-label': `Jadikan ${m.name} layer`,
             onclick: () => addMediaLayer(m),
-          }, '◧'),
+          }, icon('layers', 16)),
           h('button', {
             class: 'icon-btn add', title: 'Tambahkan ke akhir timeline', 'aria-label': `Tambahkan ${m.name} ke timeline`,
             onclick: () => {
@@ -680,7 +687,7 @@ function mediaPanel(): Node[] {
               changed();
               fitZoom();
             },
-          }, '+'),
+          }, icon('plus', 16)),
         );
       }),
     ) : h('p', { class: 'muted small hint-p' }, 'Tarik rekaman dari OBS ke sini, atau klik tombol di atas.'),
@@ -1335,7 +1342,7 @@ function play() {
   syncVideo();
   void activeVideo?.play().catch(() => undefined);
   const btn = $('#play');
-  if (btn) { btn.textContent = '❚❚'; btn.setAttribute('aria-label', 'Jeda'); }
+  if (btn) { btn.replaceChildren(icon('pause', 18)); btn.setAttribute('aria-label', 'Jeda'); }
   requestAnimationFrame(tick);
 }
 
@@ -1347,7 +1354,7 @@ function pause() {
   layerVideos.forEach((v) => v.pause());
   vmPreview?.pause();
   const btn = $('#play');
-  if (btn) { btn.textContent = '▶'; btn.setAttribute('aria-label', 'Putar'); }
+  if (btn) { btn.replaceChildren(icon('play', 18)); btn.setAttribute('aria-label', 'Putar'); }
 }
 
 function tick() {
@@ -1819,7 +1826,7 @@ function zoomBy(f: number, anchorX?: number) {
   pxPerSec = clamp(pxPerSec * f, 2, 600);
   scrollX = Math.max(0, (at / 1000) * pxPerSec - (ax - HEAD_W));
   const z = $<HTMLInputElement>('#zoom');
-  if (z) z.value = String(Math.round((Math.log(pxPerSec / 2) / Math.log(300)) * 100));
+  if (z) { z.value = String(Math.round((Math.log(pxPerSec / 2) / Math.log(300)) * 100)); paintRange(z as HTMLInputElement); }
   if (body) drawTimeline();
 }
 function setZoomFromSlider(v: number) { zoomBy((2 * Math.pow(300, v / 100)) / pxPerSec); }
@@ -1830,7 +1837,7 @@ function fitZoom() {
   pxPerSec = clamp(((body.clientWidth - 60) / total) * 1000, 2, 600);
   scrollX = 0;
   const z = $<HTMLInputElement>('#zoom');
-  if (z) z.value = String(Math.round((Math.log(pxPerSec / 2) / Math.log(300)) * 100));
+  if (z) { z.value = String(Math.round((Math.log(pxPerSec / 2) / Math.log(300)) * 100)); paintRange(z as HTMLInputElement); }
   sizeTimeline();
 }
 
@@ -1862,6 +1869,48 @@ function reportOnce(e: unknown) {
 
 function drawTimeline() { try { drawTimelineInner(); } catch (e) { reportOnce(e); } }
 
+/** Timeline colours per item type: a soft tinted capsule, solid when selected. */
+const TL_HUE: Record<'line' | 'text' | 'layer' | 'image' | 'music' | 'sound', { hue: string; ink: string; icon: IconName }> = {
+  line: { hue: '#f2c14e', ink: '#f7dc98', icon: 'captions' },
+  text: { hue: '#ff8a73', ink: '#ffc2b5', icon: 'text' },
+  layer: { hue: '#5aa9ff', ink: '#bcdcff', icon: 'layers' },
+  image: { hue: '#3cc3b3', ink: '#a5ece3', icon: 'image' },
+  music: { hue: '#b98cff', ink: '#dcc6ff', icon: 'music' },
+  sound: { hue: '#59d38c', ink: '#b2efcb', icon: 'wave' },
+};
+const TL_FONT = '"Segoe UI Variable Text", "Segoe UI", sans-serif';
+
+function capsule(ctx: CanvasRenderingContext2D, kind: keyof typeof TL_HUE, x: number, y: number, w: number, hgt: number, isSel: boolean, label: string, dim = false, thumb?: (lx: number) => number) {
+  const c = TL_HUE[kind];
+  const r = Math.min(8, hgt / 2);
+  const ww = Math.max(6, w - 2);
+  roundRect(ctx, x + 1, y + 0.5, ww, hgt - 1, r);
+  ctx.globalAlpha = dim ? 0.5 : 1;
+  ctx.fillStyle = isSel ? c.hue : `${c.hue}2b`;
+  ctx.fill();
+  ctx.lineWidth = 1;
+  ctx.strokeStyle = isSel ? '#ffffff' : `${c.hue}6e`;
+  ctx.stroke();
+  ctx.globalAlpha = 1;
+  if (ww < 18) return;
+  ctx.save();
+  ctx.beginPath(); ctx.rect(x + 2, y, ww - 4, hgt); ctx.clip();
+  let lx = x + 8;
+  if (thumb) lx = thumb(lx);
+  else if (ww > 34) { drawIcon(ctx, c.icon, lx, y + hgt / 2 - 6, 12, isSel ? '#10201e' : c.hue); lx += 17; }
+  ctx.fillStyle = isSel ? '#111414' : c.ink;
+  ctx.font = `600 10.5px ${TL_FONT}`;
+  ctx.fillText(label, lx, y + hgt / 2 + 0.5);
+  ctx.restore();
+}
+
+function laneHint(ctx: CanvasRenderingContext2D, name: IconName, text: string, y: number, hgt: number) {
+  drawIcon(ctx, name, 10, y + hgt / 2 - 6, 12, '#4d5452');
+  ctx.fillStyle = '#5e6562';
+  ctx.font = `500 11px ${TL_FONT}`;
+  ctx.fillText(text, 27, y + hgt / 2 + 0.5);
+}
+
 function drawTimelineInner() {
   if (!tlCanvas || !P) return;
   const ctx = tlCanvas.getContext('2d');
@@ -1869,40 +1918,41 @@ function drawTimelineInner() {
   const dpr = window.devicePixelRatio || 1;
   const W = tlCanvas.width / dpr, H = tlCanvas.height / dpr;
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  ctx.fillStyle = '#161616';
+  ctx.fillStyle = '#141616';
   ctx.fillRect(0, 0, W, H);
   computeLanes();
 
   // lane backgrounds
   for (const l of lanes) {
-    ctx.fillStyle = l.kind === 'main' ? '#1c1c1c' : '#191919';
-    ctx.fillRect(0, l.y, W, l.h);
+    ctx.fillStyle = l.kind === 'main' ? '#191c1c' : '#171919';
+    roundRect(ctx, 4, l.y - 1, W - 8, l.h + 2, 8);
+    ctx.fill();
   }
-  ctx.fillStyle = '#6b6b6b';
-  ctx.font = '500 11px "Segoe UI Variable Text", "Segoe UI", sans-serif';
   ctx.textBaseline = 'middle';
   const lt = laneOf('text'), lc = laneOf('captions');
-  if (!tl().texts.length) ctx.fillText('Teks', 8, lt.y + lt.h / 2);
-  if (!tl().captions.lines.length) ctx.fillText('Subtitle', 8, lc.y + lc.h / 2);
+  if (!tl().texts.length) laneHint(ctx, 'text', 'Teks', lt.y, lt.h);
+  if (!tl().captions.lines.length) laneHint(ctx, 'captions', 'Subtitle', lc.y, lc.h);
   const li = laneOf('image'), ls = laneOf('sound');
-  if (!images().length) ctx.fillText('Meme', 8, li.y + li.h / 2);
-  if (!sounds().length) ctx.fillText('Suara: pause, lalu klik pad di panel Suara', 8, ls.y + ls.h / 2);
+  if (!images().length) laneHint(ctx, 'image', 'Meme', li.y, li.h);
+  if (!sounds().length) laneHint(ctx, 'wave', 'Suara: pause, lalu klik pad di panel Suara', ls.y, ls.h);
   const lmu = laneOf('music');
-  if (!music().length) ctx.fillText('Musik latar: panel Media', 8, lmu.y + lmu.h / 2);
+  if (!music().length) laneHint(ctx, 'music', 'Musik latar: panel Media', lmu.y, lmu.h);
 
   // ruler
-  ctx.fillStyle = '#121212';
+  ctx.fillStyle = '#121414';
   ctx.fillRect(0, 0, W, RULER);
+  ctx.fillStyle = 'rgba(255,255,255,.05)';
+  ctx.fillRect(0, RULER - 1, W, 1);
   const step = niceStep();
-  ctx.font = '10px "JetBrains Mono", Consolas, monospace';
+  ctx.font = '10px "Cascadia Mono", Consolas, monospace';
   for (let ms = Math.floor(xToMs(0) / step) * step; msToX(ms) < W; ms += step) {
     if (ms < 0) continue;
     const x = msToX(ms);
-    ctx.fillStyle = '#3a3a3a';
-    ctx.fillRect(x, RULER - 7, 1, 7);
-    ctx.fillStyle = '#a3a3a3';
-    ctx.fillText(step < 1000 ? tc(ms, true) : tc(ms), x + 3, 9);
-    for (let s = 1; s < 5; s++) { ctx.fillStyle = '#2a2a2a'; ctx.fillRect(x + (s * step * pxPerSec) / 5000, RULER - 3, 1, 3); }
+    ctx.fillStyle = '#3d4342';
+    ctx.fillRect(x, RULER - 8, 1, 7);
+    ctx.fillStyle = '#8d9390';
+    ctx.fillText(step < 1000 ? tc(ms, true) : tc(ms), x + 4, 9);
+    for (let s = 1; s < 5; s++) { ctx.fillStyle = '#2a2e2d'; ctx.fillRect(x + (s * step * pxPerSec) / 5000, RULER - 4, 1, 3); }
   }
 
   // main track: clips with filmstrip
@@ -1913,9 +1963,9 @@ function drawTimelineInner() {
     if (x + w < 0 || x > W) return;
     const isSel = sel?.kind === 'clip' && sel.id === c.id;
     ctx.save();
-    roundRect(ctx, x + 1, lm.y, w - 2, lm.h, 5);
+    roundRect(ctx, x + 1, lm.y, w - 2, lm.h, 9);
     ctx.clip();
-    ctx.fillStyle = '#2b2b2b';
+    ctx.fillStyle = '#262a29';
     ctx.fillRect(x, lm.y, w, lm.h);
     const m = mediaOf(c.mediaId);
     const imgs = m ? sheets.get(m.id) : undefined;
@@ -1930,21 +1980,23 @@ function drawTimelineInner() {
         ctx.drawImage(sheet, (kk % 10) * m.thumbs.tw, Math.floor(kk / 10) * m.thumbs.th, m.thumbs.tw, m.thumbs.th, fx, lm.y, fw, lm.h);
       }
     }
-    ctx.fillStyle = 'rgba(0,0,0,.45)';
-    ctx.fillRect(x, lm.y + lm.h - 16, w, 16);
-    ctx.fillStyle = '#ededed';
-    ctx.font = '500 10px "Segoe UI", sans-serif';
+    const grad = ctx.createLinearGradient(0, lm.y + lm.h - 22, 0, lm.y + lm.h);
+    grad.addColorStop(0, 'rgba(0,0,0,0)'); grad.addColorStop(1, 'rgba(0,0,0,.7)');
+    ctx.fillStyle = grad;
+    ctx.fillRect(x, lm.y + lm.h - 22, w, 22);
+    ctx.fillStyle = '#f2f4f1';
+    ctx.font = `600 10px ${TL_FONT}`;
     const label = `${c.speed !== 1 ? `${c.speed}× · ` : ''}${tc(clipDuration(c), true)}`;
     ctx.fillText(label, x + 6, lm.y + lm.h - 8);
     ctx.restore();
     ctx.lineWidth = isSel ? 2 : 1;
-    ctx.strokeStyle = isSel ? '#ffffff' : '#000';
-    roundRect(ctx, x + 1, lm.y, w - 2, lm.h, 5);
+    ctx.strokeStyle = isSel ? '#3cc3b3' : 'rgba(0,0,0,.6)';
+    roundRect(ctx, x + 1, lm.y, w - 2, lm.h, 9);
     ctx.stroke();
     if (isSel) {
-      ctx.fillStyle = '#ffffff';
-      ctx.fillRect(x + 1, lm.y + lm.h / 2 - 10, 4, 20);
-      ctx.fillRect(x + w - 5, lm.y + lm.h / 2 - 10, 4, 20);
+      ctx.fillStyle = '#3cc3b3';
+      roundRect(ctx, x + 2, lm.y + lm.h / 2 - 11, 5, 22, 2.5); ctx.fill();
+      roundRect(ctx, x + w - 7, lm.y + lm.h / 2 - 11, 5, 22, 2.5); ctx.fill();
     }
   });
 
@@ -1956,10 +2008,10 @@ function drawTimelineInner() {
     const tr = tl().clips[i].trans ?? 'none';
     const box = { x: x - 8, y: lm.y + 3, w: 16, h: 16, index: i };
     cutMarkers.push(box);
-    roundRect(ctx, box.x, box.y, box.w, box.h, 3);
-    ctx.fillStyle = tr === 'none' ? 'rgba(26,27,27,.88)' : '#37b8ac';
+    roundRect(ctx, box.x, box.y, box.w, box.h, 8);
+    ctx.fillStyle = tr === 'none' ? 'rgba(20,22,22,.9)' : '#3cc3b3';
     ctx.fill();
-    ctx.strokeStyle = tr === 'none' ? '#6b6b6b' : '#121212';
+    ctx.strokeStyle = tr === 'none' ? '#58605d' : '#0f1414';
     ctx.lineWidth = 1;
     ctx.stroke();
     ctx.fillStyle = tr === 'none' ? '#a3a3a3' : '#121212';
@@ -1973,17 +2025,8 @@ function drawTimelineInner() {
   for (const l of tl().captions.lines) {
     const x = msToX(l.startMs), w = ((l.endMs - l.startMs) / 1000) * pxPerSec;
     if (x + w < 0 || x > W) continue;
-    const isSel = isSelected('line', l.id);
-    roundRect(ctx, x + 0.5, lc.y, w - 1, lc.h, 4);
-    ctx.fillStyle = isSel ? '#ffd400' : '#3d3520';
-    ctx.fill();
-    if (w > 24) {
-      ctx.save(); ctx.beginPath(); ctx.rect(x, lc.y, w - 4, lc.h); ctx.clip();
-      ctx.fillStyle = isSel ? '#121212' : '#f2d98c';
-      ctx.font = '500 10px "Segoe UI", sans-serif';
-      ctx.fillText(l.words.map((q) => q.text).join(' '), x + 5, lc.y + lc.h / 2);
-      ctx.restore();
-    }
+    const own = !!l.anim || l.words.some((q) => q.fx || q.color);
+    capsule(ctx, 'line', x, lc.y, w, lc.h, isSelected('line', l.id), `${own ? '✦ ' : ''}${l.words.map((q) => q.text).join(' ')}`, false, (lx) => lx - 2);
   }
 
   // texts
@@ -1991,20 +2034,7 @@ function drawTimelineInner() {
     const ln = laneOf('text', textRows.get(x.id) ?? 0);
     const xx = msToX(x.startMs), w = ((x.endMs - x.startMs) / 1000) * pxPerSec;
     if (xx + w < 0 || xx > W) continue;
-    const isSel = isSelected('text', x.id);
-    roundRect(ctx, xx + 0.5, ln.y, w - 1, ln.h, 4);
-    ctx.fillStyle = isSel ? '#e8836f' : '#4a2a24';
-    ctx.fill();
-    ctx.save(); ctx.beginPath(); ctx.rect(xx, ln.y, w - 4, ln.h); ctx.clip();
-    ctx.fillStyle = isSel ? '#1a1b1b' : '#f5c2b8';
-    ctx.font = '600 10px "Segoe UI", sans-serif';
-    ctx.fillText(`T  ${x.text.replace(/\n/g, ' ')}`, xx + 6, ln.y + ln.h / 2);
-    ctx.restore();
-    if (isSel) {
-      ctx.fillStyle = '#121212';
-      ctx.fillRect(xx + 2, ln.y + 6, 2, ln.h - 12);
-      ctx.fillRect(xx + w - 4, ln.y + 6, 2, ln.h - 12);
-    }
+    capsule(ctx, 'text', xx, ln.y, w, ln.h, isSelected('text', x.id), x.text.replace(/\n/g, ' '));
   }
 
   // video layers
@@ -2013,15 +2043,7 @@ function drawTimelineInner() {
     if (!ln) continue;
     const xx = msToX(ly.startMs), w = ((Math.min(ly.endMs, timelineDuration(tl())) - ly.startMs) / 1000) * pxPerSec;
     if (xx + w < 0 || xx > W) continue;
-    const isSel = isSelected('layer', ly.id);
-    roundRect(ctx, xx + 0.5, ln.y, w - 1, ln.h, 4);
-    ctx.fillStyle = isSel ? '#4ea1ff' : ly.hidden ? '#1d2430' : '#1b3150';
-    ctx.fill();
-    ctx.save(); ctx.beginPath(); ctx.rect(xx, ln.y, Math.max(1, w - 4), ln.h); ctx.clip();
-    ctx.fillStyle = isSel ? '#121212' : '#bcd9ff';
-    ctx.font = '600 10px "Segoe UI", sans-serif';
-    ctx.fillText(`◧ ${ly.name}${ly.source === 'main' ? ' · video utama' : ''}${ly.hidden ? ' · disembunyikan' : ''}`, xx + 6, ln.y + ln.h / 2);
-    ctx.restore();
+    capsule(ctx, 'layer', xx, ln.y, w, ln.h, isSelected('layer', ly.id), `${ly.name}${ly.source === 'main' ? ' · video utama' : ''}${ly.hidden ? ' · disembunyikan' : ''}`, !!ly.hidden);
   }
 
   // meme pictures
@@ -2029,17 +2051,12 @@ function drawTimelineInner() {
     const ln = laneOf('image', textRows.get(im.id) ?? 0);
     const xx = msToX(im.startMs), w = ((im.endMs - im.startMs) / 1000) * pxPerSec;
     if (xx + w < 0 || xx > W) continue;
-    const isSel = isSelected('image', im.id);
-    roundRect(ctx, xx + 0.5, ln.y, w - 1, ln.h, 4);
-    ctx.fillStyle = isSel ? '#2ec4b6' : '#173d3a';
-    ctx.fill();
-    ctx.save(); ctx.beginPath(); ctx.rect(xx, ln.y, w - 4, ln.h); ctx.clip();
-    const el = imageEl(im.file);
-    if (el.complete && el.naturalWidth) ctx.drawImage(el, xx + 3, ln.y + 3, (ln.h - 6) * im.aspect, ln.h - 6);
-    ctx.fillStyle = isSel ? '#121212' : '#9ee6df';
-    ctx.font = '600 10px "Segoe UI", sans-serif';
-    ctx.fillText(im.name, xx + 8 + (ln.h - 6) * im.aspect, ln.y + ln.h / 2);
-    ctx.restore();
+    capsule(ctx, 'image', xx, ln.y, w, ln.h, isSelected('image', im.id), im.name, false, (lx) => {
+      const el = imageEl(im.file);
+      const th = ln.h - 8, tw = th * im.aspect;
+      if (el.complete && el.naturalWidth) { ctx.save(); roundRect(ctx, lx - 3, ln.y + 4, tw, th, 3); ctx.clip(); ctx.drawImage(el, lx - 3, ln.y + 4, tw, th); ctx.restore(); }
+      return lx + tw + 3;
+    });
   }
 
   // background music
@@ -2047,15 +2064,7 @@ function drawTimelineInner() {
     const ln = laneOf('music', textRows.get(mu.id) ?? 0);
     const xx = msToX(mu.startMs), w = (mu.lengthMs / 1000) * pxPerSec;
     if (xx + w < 0 || xx > W) continue;
-    const isSel = isSelected('music', mu.id);
-    roundRect(ctx, xx + 0.5, ln.y, Math.max(6, w - 1), ln.h, 4);
-    ctx.fillStyle = isSel ? '#c77dff' : '#2e2140';
-    ctx.fill();
-    ctx.save(); ctx.beginPath(); ctx.rect(xx, ln.y, Math.max(6, w - 4), ln.h); ctx.clip();
-    ctx.fillStyle = isSel ? '#121212' : '#dcbcff';
-    ctx.font = '600 10px "Segoe UI", sans-serif';
-    ctx.fillText(`♫ ${mu.name}${mu.duck !== 'off' ? '  · ducking' : ''}`, xx + 5, ln.y + ln.h / 2);
-    ctx.restore();
+    capsule(ctx, 'music', xx, ln.y, w, ln.h, isSelected('music', mu.id), `${mu.name}${mu.duck !== 'off' ? '  · ducking' : ''}`);
   }
 
   // sound effects
@@ -2063,15 +2072,7 @@ function drawTimelineInner() {
     const ln = laneOf('sound', textRows.get(sn.id) ?? 0);
     const xx = msToX(sn.startMs), w = (sn.lengthMs / 1000) * pxPerSec;
     if (xx + w < 0 || xx > W) continue;
-    const isSel = isSelected('sound', sn.id);
-    roundRect(ctx, xx + 0.5, ln.y, Math.max(6, w - 1), ln.h, 4);
-    ctx.fillStyle = isSel ? '#4cc38a' : '#1d3a2b';
-    ctx.fill();
-    ctx.save(); ctx.beginPath(); ctx.rect(xx, ln.y, Math.max(6, w - 4), ln.h); ctx.clip();
-    ctx.fillStyle = isSel ? '#121212' : '#a6e8c6';
-    ctx.font = '600 10px "Segoe UI", sans-serif';
-    ctx.fillText(`♪ ${sn.name}`, xx + 5, ln.y + ln.h / 2);
-    ctx.restore();
+    capsule(ctx, 'sound', xx, ln.y, w, ln.h, isSelected('sound', sn.id), sn.name);
   }
 
   // drop marker while dragging a clip
@@ -2083,18 +2084,21 @@ function drawTimelineInner() {
   // selection box
   if (marquee) {
     const mx = Math.min(marquee.x0, marquee.x1), my = Math.min(marquee.y0, marquee.y1);
-    ctx.fillStyle = 'rgba(55,184,172,.12)';
+    ctx.fillStyle = 'rgba(60,195,179,.1)';
     ctx.fillRect(mx, my, Math.abs(marquee.x1 - marquee.x0), Math.abs(marquee.y1 - marquee.y0));
-    ctx.strokeStyle = '#37b8ac'; ctx.lineWidth = 1; ctx.setLineDash([4, 3]);
+    ctx.strokeStyle = '#3cc3b3'; ctx.lineWidth = 1; ctx.setLineDash([4, 3]);
     ctx.strokeRect(mx + 0.5, my + 0.5, Math.abs(marquee.x1 - marquee.x0), Math.abs(marquee.y1 - marquee.y0));
     ctx.setLineDash([]);
   }
 
   // playhead
   const px = msToX(t);
-  ctx.fillStyle = '#37b8ac';
-  ctx.fillRect(px - 0.75, 6, 1.5, H);
+  ctx.save();
+  ctx.shadowColor = 'rgba(60,195,179,.55)'; ctx.shadowBlur = 8;
+  ctx.fillStyle = '#3cc3b3';
+  ctx.fillRect(px - 1, 8, 2, H);
   ctx.beginPath(); ctx.moveTo(px, 1); ctx.lineTo(px + 7, 8); ctx.lineTo(px, 15); ctx.lineTo(px - 7, 8); ctx.closePath(); ctx.fill();
+  ctx.restore();
 }
 
 let dropX: number | null = null;
@@ -2639,8 +2643,8 @@ function libHead(kind: 'sound' | 'meme') {
 
 function orderButtons<T>(list: T[], i: number) {
   return [
-    h('button', { class: 'icon-btn', 'aria-label': 'Naik', disabled: i === 0, onclick: () => { move(list, i, i - 1); renderLeft(); } }, '↑'),
-    h('button', { class: 'icon-btn', 'aria-label': 'Turun', disabled: i === list.length - 1, onclick: () => { move(list, i, i + 1); renderLeft(); } }, '↓'),
+    h('button', { class: 'icon-btn', 'aria-label': 'Naik', disabled: i === 0, onclick: () => { move(list, i, i - 1); renderLeft(); } }, icon('up', 15)),
+    h('button', { class: 'icon-btn', 'aria-label': 'Turun', disabled: i === list.length - 1, onclick: () => { move(list, i, i + 1); renderLeft(); } }, icon('down', 15)),
   ];
 }
 
@@ -2659,7 +2663,7 @@ function soundPanel(): Node[] {
             h('span', { class: 'pad-meta' }, tc(soundOf(pad)?.durationMs ?? 0, true)),
             i < 9 ? h('span', { class: 'pad-key' }, String(i + 1)) : null,
           ),
-          h('button', { class: 'pad-play', title: 'Dengarkan', 'aria-label': `Dengarkan ${pad.name}`, onclick: (e) => { e.stopPropagation(); const s = soundOf(pad); if (s) audition(s.file, insertVol()); } }, '▶'),
+          h('button', { class: 'pad-play', title: 'Dengarkan', 'aria-label': `Dengarkan ${pad.name}`, onclick: (e) => { e.stopPropagation(); const s = soundOf(pad); if (s) audition(s.file, insertVol()); } }, icon('play', 11)),
           favButton(pad, 'pad-fav'),
         )),
       ) : h('p', { class: 'muted small' }, 'Belum ada suara. Tarik file MP3/WAV/OGG ke jendela, atau impor satu folder.'),
@@ -2683,7 +2687,7 @@ function soundPanel(): Node[] {
               if (!(await dialog().ask(`Hapus "${pad.name}" dari library?\nYang sudah ada di timeline tetap aman.`, { title: 'Hapus suara', kind: 'warning' }))) return;
               await deletePad(pad.id); library = await loadLibrary(); renderLeft();
             },
-          }, '✕'),
+          }, icon('x', 15)),
         ),
       ),
     )),
@@ -2742,7 +2746,7 @@ function memePanel(): Node[] {
               if (!(await dialog().ask(`Hapus "${m.name}" dari library?\nYang sudah ada di timeline tetap aman.`, { title: 'Hapus meme', kind: 'warning' }))) return;
               await deleteMeme(m.id); library = await loadLibrary(); renderLeft();
             },
-          }, '✕'),
+          }, icon('x', 15)),
         ),
       ),
     )),
@@ -2964,7 +2968,7 @@ function renderPausePop() {
   const pop = $('#pause-pop');
   if (!pop || pop.hidden || !P) return;
   pop.replaceChildren(
-    h('div', { class: 'row-between' }, h('h3', {}, 'Hapus jeda'), h('button', { class: 'icon-btn', 'aria-label': 'Tutup', onclick: togglePausePop }, '✕')),
+    h('div', { class: 'row-between' }, h('h3', {}, 'Hapus jeda'), h('button', { class: 'icon-btn', 'aria-label': 'Tutup', onclick: togglePausePop }, icon('x', 15))),
     h('div', { class: 'muted small' }, 'Memotong bagian diam dari semua potongan. Subtitle, teks, meme, dan suara ikut bergeser. Bisa dibatalkan dengan Ctrl+Z.'),
     h('div', { class: 'label' }, 'Yang dianggap diam'),
     h('div', { class: 'seg' }, ...(['light', 'normal', 'strong'] as const).map((k) =>
@@ -3105,7 +3109,7 @@ function videoMemePanel(): Node[] {
                 if (!(await dialog().ask(`Hapus "${c.name}" dari library?\nYang sudah ada di timeline tetap aman.`, { title: 'Hapus video meme', kind: 'warning' }))) return;
                 await deleteVideoMeme(c.id); library = await loadLibrary(); renderLeft();
               },
-            }, '✕'),
+            }, icon('x', 15)),
           ),
         ),
       )),
@@ -3115,15 +3119,15 @@ function videoMemePanel(): Node[] {
   vmPreview?.pause();
   vmPreview = h('video', { class: 'vm-player', src: fileSrc(cur.file), preload: 'auto', playsinline: true });
   const player = vmPreview;
-  const playBtn = h('button', { class: 'vm-play', 'aria-label': 'Putar preview' }, '▶');
+  const playBtn = h('button', { class: 'vm-play', 'aria-label': 'Putar preview' }, icon('play', 14));
   const bar = h('div', { class: 'vm-bar' }, h('div', { class: 'vm-fill' }));
   const time = h('span', { class: 'muted small mono' }, `0:00 / ${tc(cur.durationMs)}`);
   player.volume = clamp(insertVol(), 0, 1);
   playBtn.addEventListener('click', () => { if (player.paused) { pause(); player.volume = clamp(insertVol(), 0, 1); void player.play(); } else player.pause(); });
   player.addEventListener('click', () => playBtn.click());
-  player.addEventListener('play', () => { playBtn.textContent = '❚❚'; });
-  player.addEventListener('pause', () => { playBtn.textContent = '▶'; });
-  player.addEventListener('ended', () => { playBtn.textContent = '▶'; });
+  player.addEventListener('play', () => { playBtn.replaceChildren(icon('pause', 14)); });
+  player.addEventListener('pause', () => { playBtn.replaceChildren(icon('play', 14)); });
+  player.addEventListener('ended', () => { playBtn.replaceChildren(icon('play', 14)); });
   player.addEventListener('timeupdate', () => {
     (bar.firstChild as HTMLElement).style.width = `${(player.currentTime * 1000 / cur.durationMs) * 100}%`;
     time.textContent = `${tc(player.currentTime * 1000)} / ${tc(cur.durationMs)}`;
@@ -3493,8 +3497,8 @@ function layerPanel(): Node[] {
         }, ly.hidden ? '◌' : '●'),
         h('button', { class: 'layer-name', onclick: () => { sel = { kind: 'layer', id: ly.id }; if (t < ly.startMs || t >= ly.endMs) seek(ly.startMs); renderInspector(); renderLeft(); drawTimeline(); renderFrame(); } },
           h('span', {}, ly.name), h('span', { class: 'muted small' }, ly.source === 'main' ? 'video utama' : 'video lain')),
-        h('button', { class: 'icon-btn', 'aria-label': 'Naikkan', title: 'Ke depan', disabled: i === layers().length - 1, onclick: () => { snapshot(); const a = layers(); [a[i], a[i + 1]] = [a[i + 1], a[i]]; changed({ left: true }); } }, '↑'),
-        h('button', { class: 'icon-btn', 'aria-label': 'Turunkan', title: 'Ke belakang', disabled: i === 0, onclick: () => { snapshot(); const a = layers(); [a[i], a[i - 1]] = [a[i - 1], a[i]]; changed({ left: true }); } }, '↓'),
+        h('button', { class: 'icon-btn', 'aria-label': 'Naikkan', title: 'Ke depan', disabled: i === layers().length - 1, onclick: () => { snapshot(); const a = layers(); [a[i], a[i + 1]] = [a[i + 1], a[i]]; changed({ left: true }); } }, icon('up', 15)),
+        h('button', { class: 'icon-btn', 'aria-label': 'Turunkan', title: 'Ke belakang', disabled: i === 0, onclick: () => { snapshot(); const a = layers(); [a[i], a[i - 1]] = [a[i - 1], a[i]]; changed({ left: true }); } }, icon('down', 15)),
       );
     })) : h('p', { class: 'muted small' }, 'Belum ada layer.'),
   ];
@@ -3585,7 +3589,7 @@ function renderExport() {
   if (!pop || pop.hidden || !P) return;
   const d = timelineDuration(tl());
   pop.replaceChildren(
-    h('div', { class: 'row-between' }, h('h3', {}, 'Ekspor'), h('button', { class: 'icon-btn', 'aria-label': 'Tutup', onclick: toggleExport }, '✕')),
+    h('div', { class: 'row-between' }, h('h3', {}, 'Ekspor'), h('button', { class: 'icon-btn', 'aria-label': 'Tutup', onclick: toggleExport }, icon('x', 15))),
     h('div', { class: 'muted small' }, `${tl().width}×${tl().height} · ${tl().fps} fps · MP4 H.264 · ${tc(d, true)}`),
     d > 180000 ? h('div', { class: 'warn small' }, 'Lebih dari 3 menit: YouTube Shorts membatasi 3 menit. TikTok masih bisa.') : h('span'),
     qualityBlock(d),
@@ -3671,7 +3675,13 @@ function renderQueue() {
   const el = $('#queue');
   const btn = $('#export-btn');
   const run = queue.find((j) => j.status === 'running');
-  if (btn) btn.textContent = run ? `Ekspor ${Math.round(run.progress * 100)}%` : 'Ekspor';
+  if (btn) {
+    const label = run ? `Ekspor ${Math.round(run.progress * 100)}%` : 'Ekspor';
+    const span = btn.querySelector('span');
+    if (span) span.textContent = label; else btn.replaceChildren(icon('export', 16), h('span', {}, label));
+    btn.style.setProperty('--prog', run ? `${Math.round(run.progress * 100)}%` : '0%');
+    btn.classList.toggle('running', !!run);
+  }
   if (!el) return;
   const jobs = queue.filter((j) => j.status !== 'cancelled').slice(-6).reverse();
   el.replaceChildren(...jobs.map((j) => h('div', { class: `job ${j.status}` },
