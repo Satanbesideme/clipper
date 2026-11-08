@@ -1,6 +1,6 @@
 import { icon, drawIcon, type IconName } from './icons';
 import './styles.css';
-import { dialog, fileSrc, invoke, isTauri, onDrop, extName, join } from './tauri';
+import { dialog, fileSrc, invoke, isTauri, onDrop, extName, join, baseName } from './tauri';
 import { qualityBitrate } from './ffmpeg';
 import {
   DEFAULT_CAPTION, DEFAULT_TEXT, clipDuration, clipStarts, locate, splitAt, timelineDuration,
@@ -102,7 +102,7 @@ const FONTS = ['Segoe UI', 'Bahnschrift', 'Impact', 'Arial', 'Verdana', 'Trebuch
 
 type SelKind = 'clip' | 'text' | 'line' | 'sound' | 'image' | 'music' | 'layer';
 type Sel = { kind: SelKind; id: string } | null;
-type LeftTab = 'media' | 'layers' | 'sound' | 'meme' | 'vmeme' | 'text' | 'captions';
+type LeftTab = 'media' | 'layers' | 'music' | 'sound' | 'meme' | 'vmeme' | 'text' | 'captions';
 
 let settings: Settings = { outDir: '', encoder: '', model: 'small' };
 let P: Project | null = null;
@@ -466,7 +466,7 @@ function renderEditor() {
 }
 
 const RAIL: [LeftTab, IconName, string][] = [
-  ['media', 'media', 'Media'], ['layers', 'layers', 'Layer'], ['sound', 'music', 'Suara'], ['meme', 'meme', 'Meme'], ['vmeme', 'vmeme', 'Video meme'], ['text', 'text', 'Teks'], ['captions', 'captions', 'Subtitle'],
+  ['media', 'media', 'Media'], ['layers', 'layers', 'Layer'], ['music', 'music', 'Musik'], ['sound', 'wave', 'Suara'], ['meme', 'meme', 'Meme'], ['vmeme', 'vmeme', 'Video meme'], ['text', 'text', 'Teks'], ['captions', 'captions', 'Subtitle'],
 ];
 let safeGuide = false;
 
@@ -648,18 +648,19 @@ function renderLeftInner() {
   if (!el || !P) return;
   if (tab === 'media') el.replaceChildren(...mediaPanel());
   else if (tab === 'layers') el.replaceChildren(...layerPanel());
+  else if (tab === 'music') el.replaceChildren(...musicPanel());
   else if (tab === 'sound') el.replaceChildren(...soundPanel());
   else if (tab === 'vmeme') el.replaceChildren(...videoMemePanel());
   else if (tab === 'meme') el.replaceChildren(...memePanel());
   else if (tab === 'text') el.replaceChildren(...textPanel());
   else el.replaceChildren(...captionPanel());
+  markAuditionButtons();
 }
 
 function mediaPanel(): Node[] {
   const p = P!;
   return [
     h('button', { class: 'secondary wide with-ico', onclick: () => void pickAndImport() }, icon('video', 16), 'Tambah video'),
-    h('button', { class: 'secondary wide with-ico', onclick: () => void addMusic() }, icon('music', 16), 'Tambah musik latar'),
     p.media.length ? h('div', { class: 'media-grid' },
       ...p.media.map((m) => {
         const thumb = h('div', { class: 'media-thumb' });
@@ -998,7 +999,7 @@ function styleControls(st: TextStyle, set: (p: Partial<TextStyle>) => void, show
   ];
 }
 
-function renderInspector() { try { renderInspectorInner(); } catch (e) { reportOnce(e); } }
+function renderInspector() { try { renderInspectorInner(); markAuditionButtons(); } catch (e) { reportOnce(e); } }
 
 function groupInspector(): Node[] {
   const kinds: Record<string, number> = {};
@@ -1119,7 +1120,7 @@ function renderInspectorInner() {
           oninput: (e) => { ((e.target as HTMLElement).previousElementSibling as HTMLElement).textContent = `Volume ${(e.target as HTMLInputElement).value}%`; },
           onchange: (e) => { snapshot(); snd.volume = Number((e.target as HTMLInputElement).value) / 100; changed(); },
         })),
-        h('button', { class: 'secondary wide', onclick: () => audition(snd.file, snd.volume) }, '▶ Dengarkan'),
+        h('button', { class: 'secondary wide with-ico', 'data-aud': snd.file, 'data-aud-label': 'Dengarkan', 'data-aud-size': 15, onclick: () => toggleAudition(snd.file, snd.volume, snd.name) }, icon('play', 15), h('span', {}, 'Dengarkan')),
         h('div', { class: 'muted small' }, 'Geser di timeline untuk memindah. Tarik ujung kanannya untuk memotong.'),
         h('button', { class: 'danger-ghost wide', onclick: deleteSelected }, 'Hapus suara'),
       ),
@@ -1337,6 +1338,7 @@ function togglePlay() { if (playing) pause(); else play(); }
 
 function play() {
   if (!P || !tl().clips.length) return;
+  stopAudition();
   if (t >= timelineDuration(tl()) - 50) t = 0;
   playing = true;
   syncVideo();
@@ -1936,7 +1938,7 @@ function drawTimelineInner() {
   if (!images().length) laneHint(ctx, 'image', 'Meme', li.y, li.h);
   if (!sounds().length) laneHint(ctx, 'wave', 'Suara: pause, lalu klik pad di panel Suara', ls.y, ls.h);
   const lmu = laneOf('music');
-  if (!music().length) laneHint(ctx, 'music', 'Musik latar: panel Media', lmu.y, lmu.h);
+  if (!music().length) laneHint(ctx, 'music', 'Musik latar: panel Musik', lmu.y, lmu.h);
 
   // ruler
   ctx.fillStyle = '#121414';
@@ -2468,11 +2470,66 @@ function insertVolumeControl(): HTMLElement {
 }
 
 let auditionEl: HTMLAudioElement | null = null;
-function audition(file: string, volume = 1) {
-  auditionEl?.pause();
-  auditionEl = new Audio(fileSrc(file));
-  auditionEl.volume = clamp(volume, 0, 1);
-  void auditionEl.play().catch(() => undefined);
+let auditionFile = '';
+/**
+ * Plays a sound on its own (soundboard, music, review). A small bar at the bottom of the left panel
+ * shows what is playing with a Stop button; Esc, starting the timeline or a second click stop it too.
+ */
+function audition(file: string, volume = 1, name?: string, fromMs = 0) {
+  stopAudition();
+  const a = new Audio(fileSrc(file));
+  a.volume = clamp(volume, 0, 1);
+  if (fromMs) a.currentTime = fromMs / 1000;
+  auditionEl = a; auditionFile = file;
+  a.addEventListener('ended', () => { if (auditionEl === a) stopAudition(); });
+  a.addEventListener('timeupdate', () => { if (auditionEl === a) paintAudition(); });
+  void a.play().catch(() => { if (auditionEl === a) stopAudition(); });
+  showAudition(name ?? baseName(file).replace(/^[0-9a-f]{8}-/, '').replace(/\.[^.]+$/, ''));
+}
+/** Starts or stops a preview from the same button. */
+function toggleAudition(file: string, volume = 1, name?: string, fromMs = 0) {
+  if (auditionEl && auditionFile === file) stopAudition();
+  else audition(file, volume, name, fromMs);
+}
+function stopAudition() {
+  if (auditionEl) { auditionEl.pause(); auditionEl.src = ''; }
+  auditionEl = null; auditionFile = '';
+  document.querySelector('.audition-bar')?.remove();
+  markAuditionButtons();
+}
+function showAudition(name: string) {
+  document.querySelector('.audition-bar')?.remove();
+  const host = $('.left') ?? document.body;
+  host.append(h('div', { class: 'audition-bar', role: 'status' },
+    h('span', { class: 'aud-eq', 'aria-hidden': 'true' }, h('i'), h('i'), h('i')),
+    h('div', { class: 'aud-meta' },
+      h('div', { class: 'aud-name' }, name),
+      h('div', { class: 'aud-track' }, h('div', { class: 'aud-fill' })),
+    ),
+    h('span', { class: 'aud-time mono small' }, ''),
+    h('button', { class: 'aud-stop', title: 'Stop (Esc)', 'aria-label': 'Stop preview suara', onclick: stopAudition }, icon('stop', 14), h('span', {}, 'Stop')),
+  ));
+  markAuditionButtons();
+}
+function paintAudition() {
+  const a = auditionEl, bar = document.querySelector('.audition-bar');
+  if (!a || !bar) return;
+  const d = Number.isFinite(a.duration) ? a.duration : 0;
+  (bar.querySelector('.aud-fill') as HTMLElement).style.width = d ? `${(a.currentTime / d) * 100}%` : '0%';
+  bar.querySelector('.aud-time')!.textContent = d ? `${tc(a.currentTime * 1000)} / ${tc(d * 1000)}` : tc(a.currentTime * 1000);
+}
+/** Buttons that preview a file show Stop while that file plays. */
+function markAuditionButtons() {
+  document.querySelectorAll<HTMLElement>('[data-aud]').forEach((b) => {
+    const on = !!auditionEl && b.dataset.aud === auditionFile;
+    if (b.classList.contains('aud-on') === on && b.dataset.audInit) return;
+    b.dataset.audInit = '1';
+    b.classList.toggle('aud-on', on);
+    const size = Number(b.dataset.audSize || 14);
+    const label = b.dataset.audLabel;
+    b.replaceChildren(icon(on ? 'stop' : 'play', size), ...(label ? [h('span', {}, on ? 'Stop' : label)] : []));
+    b.title = on ? 'Stop' : (label || 'Dengarkan');
+  });
 }
 
 const sfxEls = new Map<string, HTMLAudioElement>();
@@ -2522,7 +2579,7 @@ function insertSound(pad: Pad) {
   if (!snd) { toast('File suara pad ini hilang dari library.'); return; }
   snapshot();
   sounds().push({ id: uid(), file: snd.file, name: pad.name, startMs: Math.floor(t), lengthMs: snd.durationMs, sourceMs: snd.durationMs, volume: insertVol() });
-  if (!playing) audition(snd.file, insertVol());
+  if (!playing) audition(snd.file, insertVol(), snd.name);
   changed({ inspector: false });
   flash(pad.id);
 }
@@ -2663,7 +2720,7 @@ function soundPanel(): Node[] {
             h('span', { class: 'pad-meta' }, tc(soundOf(pad)?.durationMs ?? 0, true)),
             i < 9 ? h('span', { class: 'pad-key' }, String(i + 1)) : null,
           ),
-          h('button', { class: 'pad-play', title: 'Dengarkan', 'aria-label': `Dengarkan ${pad.name}`, onclick: (e) => { e.stopPropagation(); const s = soundOf(pad); if (s) audition(s.file, insertVol()); } }, icon('play', 11)),
+          h('button', { class: 'pad-play', title: 'Dengarkan', 'aria-label': `Dengarkan ${pad.name}`, 'data-aud': soundOf(pad)?.file ?? '', 'data-aud-size': 11, onclick: (e) => { e.stopPropagation(); const s = soundOf(pad); if (s) toggleAudition(s.file, insertVol(), pad.name); } }, icon('play', 11)),
           favButton(pad, 'pad-fav'),
         )),
       ) : h('p', { class: 'muted small' }, 'Belum ada suara. Tarik file MP3/WAV/OGG ke jendela, atau impor satu folder.'),
@@ -2883,28 +2940,112 @@ function transBlock(clip: VideoClip): HTMLElement {
 const musicEls = new Map<string, HTMLAudioElement>();
 const musicLevel = new Map<string, number>();
 
-async function addMusic() {
+async function musicDir() { return join(await dataDir(), 'library', 'music'); }
+const musicName = (file: string) => baseName(file).replace(/^[0-9a-f]{8}-/, '').replace(/\.[^.]+$/, '');
+
+/** Adds background music: a new file from the PC, or one from the music library (`fromLibrary`). */
+async function addMusic(fromLibrary?: string, atMs = 0) {
   if (!P) return;
-  const f = await dialog().open({ title: 'Pilih musik latar', filters: [{ name: 'Audio', extensions: SOUND_EXT }] });
-  if (typeof f !== 'string') return;
+  let f = fromLibrary;
+  if (!f) {
+    const picked = await dialog().open({ title: 'Pilih musik latar', filters: [{ name: 'Audio', extensions: SOUND_EXT }] });
+    if (typeof picked !== 'string') return;
+    f = picked;
+  }
   setBusy('Menambahkan musik…');
   try {
     const info = await probeAudio(f);
-    const dest = join(await dataDir(), 'library', 'music', `${uid().slice(0, 8)}-${f.split(/[\\/]/).pop()}`);
-    await invoke('copy_file', { src: f, dest });
+    let dest = f;
+    if (!fromLibrary) {
+      dest = join(await musicDir(), `${uid().slice(0, 8)}-${f.split(/[\\/]/).pop()}`);
+      await invoke('copy_file', { src: f, dest });
+    }
     snapshot();
     const total = Math.max(1000, timelineDuration(tl()));
-    const item: MusicItem = { id: uid(), file: dest, name: (f.split(/[\\/]/).pop() ?? 'Musik').replace(/\.[^.]+$/, ''), startMs: 0, inMs: 0, lengthMs: Math.min(info.durationMs, total), sourceMs: info.durationMs, volume: 0.35, duck: 'medium' };
+    const start = clamp(atMs, 0, Math.max(0, total - 500));
+    const item: MusicItem = { id: uid(), file: dest, name: musicName(dest), startMs: start, inMs: 0, lengthMs: Math.min(info.durationMs, total - start), sourceMs: info.durationMs, volume: 0.35, duck: 'medium' };
     music().push(item);
     sel = { kind: 'music', id: item.id };
-    changed();
-    toast('Musik ditambahkan dengan auto-ducking sedang. Atur di panel kanan.');
+    musicLib = null;
+    if (tab !== 'music') switchTab('music');
+    changed({ left: true });
+    toast('Musik ditambahkan dengan auto-ducking sedang. Atur volumenya di panel Musik.');
     void ensureSpeech();
   } catch (e) {
     toast((e as Error).message, 'error');
   } finally {
     setBusy('');
   }
+}
+
+// ---------- music panel ----------
+let musicLib: string[] | null = null;
+async function loadMusicLib() {
+  try {
+    const dir = await musicDir();
+    const files = await invoke<string[]>('list_dir', { path: dir }).catch(() => [] as string[]);
+    musicLib = files.filter((f) => SOUND_EXT.includes(extName(f))).map((f) => join(dir, f)).sort((a, b) => musicName(a).localeCompare(musicName(b)));
+  } catch { musicLib = []; }
+  if (tab === 'music') renderLeft();
+}
+
+const DUCK_NAME: Record<Duck, string> = { off: 'Mati', light: 'Ringan', medium: 'Sedang', strong: 'Kuat' };
+
+function musicPanel(): Node[] {
+  if (musicLib === null) void loadMusicLib();
+  const items = music();
+  const used = new Set(items.map((m) => m.file));
+  const lib = (musicLib ?? []).filter((f) => !used.has(f));
+  return [
+    h('button', { class: 'primary wide with-ico', onclick: () => void addMusic() }, icon('plus', 16), 'Tambah musik latar'),
+    h('div', { class: 'muted small' }, 'Musik dipasang dari awal video dengan volume 35% dan auto-ducking: mengecil sendiri saat kamu bicara.'),
+    h('div', { class: 'block' },
+      h('div', { class: 'row-between' }, h('div', { class: 'label' }, 'Di timeline'), h('span', { class: 'muted small' }, items.length ? `${items.length} lagu` : '')),
+      items.length ? h('div', { class: 'music-list' }, ...items.map((m) => {
+        const isSel = sel?.kind === 'music' && sel.id === m.id;
+        const set = (patch: Partial<MusicItem>, left = false) => { snapshot(); Object.assign(m, patch); changed({ left }); };
+        return h('div', { class: `music-card${isSel ? ' sel' : ''}` },
+          h('div', { class: 'music-head' },
+            h('button', {
+              class: 'music-play', 'data-aud': m.file, 'data-aud-size': 14, title: 'Dengarkan',
+              onclick: () => toggleAudition(m.file, Math.min(1, m.volume * 1.6), m.name, m.inMs),
+            }, icon('play', 14)),
+            h('button', {
+              class: 'music-title', title: 'Pilih dan lompat ke lagu ini',
+              onclick: () => { sel = { kind: 'music', id: m.id }; multi.clear(); seek(m.startMs); renderInspector(); renderLeft(); drawTimeline(); },
+            },
+              h('span', { class: 'music-name' }, m.name),
+              h('span', { class: 'muted small mono' }, `${tc(m.startMs)} → ${tc(m.startMs + m.lengthMs)}`),
+            ),
+            h('button', { class: 'icon-btn', title: 'Hapus dari timeline', 'aria-label': `Hapus ${m.name}`, onclick: () => { snapshot(); tl().music = music().filter((x) => x.id !== m.id); if (sel?.id === m.id) sel = null; changed({ left: true }); } }, icon('trash', 15)),
+          ),
+          h('div', { class: 'music-row' },
+            icon('music', 14, 'muted'),
+            h('input', {
+              type: 'range', min: 0, max: 150, step: 5, value: Math.round(m.volume * 100), 'aria-label': `Volume ${m.name}`,
+              oninput: (e) => { (e.target as HTMLElement).nextElementSibling!.textContent = `${(e.target as HTMLInputElement).value}%`; },
+              onchange: (e) => set({ volume: Number((e.target as HTMLInputElement).value) / 100 }),
+            }),
+            h('span', { class: 'mono small music-vol' }, `${Math.round(m.volume * 100)}%`),
+          ),
+          h('div', { class: 'seg' }, ...(['off', 'light', 'medium', 'strong'] as Duck[]).map((d) =>
+            h('button', { class: m.duck === d ? 'on' : '', title: 'Auto-ducking: musik mengecil saat kamu bicara', onclick: () => { set({ duck: d }, true); void ensureSpeech(); } }, DUCK_NAME[d]))),
+          h('div', { class: 'music-actions' },
+            h('button', { class: 'chip', title: 'Pindahkan awal lagu ke posisi playhead', onclick: () => set({ startMs: Math.round(t), lengthMs: Math.min(m.sourceMs - m.inMs, Math.max(500, timelineDuration(tl()) - Math.round(t))) }, true) }, 'Mulai di playhead'),
+            h('button', { class: 'chip', title: 'Panjangkan sampai akhir video', onclick: () => set({ lengthMs: Math.min(m.sourceMs - m.inMs, Math.max(500, timelineDuration(tl()) - m.startMs)) }, true) }, 'Sampai akhir'),
+          ),
+        );
+      })) : h('div', { class: 'empty-drop' }, h('div', { class: 'empty-title' }, 'Belum ada musik'), h('div', { class: 'muted small' }, 'Klik Tambah musik latar, atau pasang dari daftar di bawah.')),
+    ),
+    h('div', { class: 'block' },
+      h('div', { class: 'row-between' }, h('div', { class: 'label' }, 'Pernah dipakai'), h('span', { class: 'muted small' }, musicLib === null ? 'memuat…' : `${lib.length}`)),
+      lib.length ? h('div', { class: 'music-lib' }, ...lib.map((f) => h('div', { class: 'music-lib-item' },
+        h('button', { class: 'music-play small', 'data-aud': f, 'data-aud-size': 12, title: 'Dengarkan', onclick: () => toggleAudition(f, 0.6, musicName(f)) }, icon('play', 12)),
+        h('span', { class: 'music-lib-name', title: musicName(f) }, musicName(f)),
+        h('button', { class: 'chip', title: 'Pasang dari awal video', onclick: () => void addMusic(f, 0) }, '+ Pasang'),
+      ))) : h('div', { class: 'muted small' }, musicLib === null ? '' : 'Musik yang pernah kamu tambahkan akan tersimpan di sini, siap dipakai lagi di proyek lain.'),
+    ),
+  ];
 }
 
 const SPEECH_DB = -38;
@@ -3744,7 +3885,7 @@ function onKey(e: KeyboardEvent) {
     case 'ArrowRight': e.preventDefault(); pause(); seek(t + (e.shiftKey ? 1000 : frame)); break;
     case 'Home': seek(0); break;
     case 'End': seek(timelineDuration(tl())); break;
-    case 'Escape': if (cropMode) { cropMode = false; } else { sel = null; multi.clear(); } renderInspector(); drawTimeline(); renderFrame(); break;
+    case 'Escape': if (auditionEl) { stopAudition(); break; } if (cropMode) { cropMode = false; } else { sel = null; multi.clear(); } renderInspector(); drawTimeline(); renderFrame(); break;
     case '=': case '+': zoomBy(1.25); break;
     case '-': zoomBy(0.8); break;
   }

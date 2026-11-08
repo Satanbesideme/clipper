@@ -13,7 +13,7 @@ Buka tab **Releases** di repo ini, unduh `Gals Clip Studio_..._x64-setup.exe`, l
 5. **Meme**: tab **Meme**. Klik gambar atau **Shift+1–9** untuk memasang meme di playhead, lengkap dengan animasi masuk/keluar (Pop, Fade, Geser). Klik **Atur** untuk mengubah default tiap meme.
 6. **Zoom (punch-in)**: pilih potongan video, atur **Zoom** di panel kanan, geser preview untuk mengarahkan.
 7. **Transisi**: klik penanda kotak di sambungan antar potongan (atau pilih potongan), lalu pilih Punch, Guncang, Kilat, Blur cepat, atau Gelap. Zoom sebuah potongan otomatis memasang Punch.
-8. **Musik latar**: tab **Media → Tambah musik latar**. Auto-ducking menurunkan musik saat kamu bicara (Ringan/Sedang/Kuat).
+8. **Musik latar**: tab **Musik → Tambah musik latar**. Semua lagu di timeline tampil di panel itu: dengarkan, atur volume, auto-ducking (Ringan/Sedang/Kuat), mulai di playhead. Lagu yang pernah dipakai tersimpan di **Pernah dipakai** untuk dipasang lagi.
 9. **Hapus jeda**: tombol **Hapus jeda** di atas timeline memotong semua bagian diam sekaligus. Ctrl+Z untuk membatalkan.
 10. **Teks**: tab **Teks**, pilih gaya, ketik, lalu geser posisinya di preview.
 11. **Ekspor**: tombol **Ekspor** di kanan atas. Hasil 1080×1920 MP4 di `Videos\Gals Clip Studio`.
@@ -36,6 +36,9 @@ Di timeline, tarik kotak dari area kosong untuk memilih semua yang kena kotak (s
 
 ## Tata letak
 Panel kiri dan kanan bisa dilebarkan dengan menarik tepinya (klik dua kali untuk ukuran bawaan), dan disembunyikan dengan tombol di kanan atas. Klik ikon tab yang sedang aktif di rail kiri juga melipat panel kiri. Saat jendela dikecilkan, panel ikut menyesuaikan supaya preview tetap terlihat.
+
+## Stop preview suara
+Saat mendengarkan suara soundboard atau musik, bar kecil muncul di bawah panel kiri dengan tombol **Stop**. Klik tombol putar yang sama sekali lagi, tekan **Esc**, atau putar timeline juga menghentikannya.
 
 ## Volume suara
 Suara soundboard dan video meme dipasang dengan volume 25% supaya tidak menutupi suaramu. Ubah bawaannya lewat **Volume saat ditempel** di panel Suara / Video meme; tiap suara yang sudah dipasang tetap bisa dibesarkan di panel kanan.

@@ -20,6 +20,7 @@ const P: Record<string, string[]> = {
   fit: ['M15 3h6v6', 'M9 21H3v-6', 'M21 3l-7 7', 'M3 21l7-7'],
   play: ['M7 4.6v14.8a1 1 0 0 0 1.5.86l12.2-7.4a1 1 0 0 0 0-1.72L8.5 3.74A1 1 0 0 0 7 4.6z'],
   pause: ['M6.5 4h3.5v16H6.5z', 'M14 4h3.5v16H14z'],
+  stop: ['M7 5h10a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2z'],
   back: ['M11 17l-5-5 5-5', 'M18 17l-5-5 5-5'],
   forward: ['M13 17l5-5-5-5', 'M6 17l5-5-5-5'],
   help: ['M12 2.5a9.5 9.5 0 1 0 0 19 9.5 9.5 0 1 0 0-19z', 'M9.1 9a3 3 0 0 1 5.8 1c0 2-3 3-3 3', 'M12 17h.01'],
@@ -35,7 +36,7 @@ const P: Record<string, string[]> = {
   sparkle: ['M12 3l1.9 5.6L19.5 10.5l-5.6 1.9L12 18l-1.9-5.6L4.5 10.5l5.6-1.9z'],
   video: ['M15 10l5-3v10l-5-3', 'M4 6h9a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2z'],
 };
-const FILLED = new Set(['play', 'pause']);
+const FILLED = new Set(['play', 'pause', 'stop']);
 
 export type IconName = keyof typeof P;
 
