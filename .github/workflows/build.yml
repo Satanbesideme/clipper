@@ -40,7 +40,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $headers = @{ Authorization = "Bearer $env:GH_TOKEN"; "User-Agent" = "galsurku-clipper-ci" }
-          $releases = Invoke-RestMethod "https://api.github.com/repos/ggml-org/whisper.cpp/releases?per_page=15" -Headers $headers
+          $releases = Invoke-RestMethod "https://api.github.com/repos/ggml-org/whisper.cpp/releases?per_page=15" -Headers $headers -MaximumRetryCount 6 -RetryIntervalSec 20
           $asset = $null
           foreach ($r in $releases) {
             $asset = $r.assets | Where-Object { $_.name -match '^whisper-bin-x64.*\.zip$' } | Select-Object -First 1
@@ -51,7 +51,7 @@ jobs:
             $releases | ForEach-Object { Write-Host $_.tag_name; $_.assets | ForEach-Object { Write-Host "  $($_.name)" } }
             throw "Build Windows whisper.cpp tidak ditemukan"
           }
-          Invoke-WebRequest $asset.browser_download_url -OutFile whisper.zip
+          Invoke-WebRequest $asset.browser_download_url -OutFile whisper.zip -MaximumRetryCount 6 -RetryIntervalSec 20
           Expand-Archive whisper.zip -DestinationPath whisper-tmp
           $cli = Get-ChildItem whisper-tmp -Recurse -Filter whisper-cli.exe | Select-Object -First 1
           if (-not $cli) { Get-ChildItem whisper-tmp -Recurse | ForEach-Object { Write-Host $_.FullName }; throw "whisper-cli.exe tidak ada di zip" }
@@ -64,7 +64,17 @@ jobs:
 
       - run: npx tauri icon app-icon.png
 
-      - run: npx tauri build
+      # the bundler downloads NSIS from GitHub; try again when GitHub answers 504
+      - name: npx tauri build
+        shell: pwsh
+        run: |
+          for ($i = 1; $i -le 3; $i++) {
+            npx tauri build
+            if ($LASTEXITCODE -eq 0) { exit 0 }
+            Write-Host "Build gagal (percobaan $i), coba lagi..."
+            Start-Sleep -Seconds 30
+          }
+          exit 1
 
       - uses: actions/upload-artifact@v4
         with:
