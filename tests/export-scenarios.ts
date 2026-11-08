@@ -66,6 +66,14 @@ const scenarios: [string, (tl: Timeline) => void][] = [
       { id: 'l2', startMs: 1800, endMs: 2600, words: [{ text: 'oke', startMs: 1800, endMs: 2600 }] },
     ];
   }])),
+  ...(['pop', 'rise', 'word', 'bounce'] as const).map((a): [string, (tl: Timeline) => void] => [`subtitle gaya per kata + baris ${a}`, (tl) => {
+    tl.captions.mode = 'word';
+    tl.captions.anim = 'fade';
+    tl.captions.lines = [
+      { id: 'l1', startMs: 300, endMs: 1800, anim: a, words: [{ text: 'halo', startMs: 300, endMs: 700, fx: 'big' }, { text: 'WOI', startMs: 700, endMs: 1200, fx: 'shout' }, { text: 'gas', startMs: 1200, endMs: 1800, fx: 'pop', color: '#38e07b' }] },
+      { id: 'l2', startMs: 1800, endMs: 2600, words: [{ text: 'oke', startMs: 1800, endMs: 2200 }, { text: 'sip', startMs: 2200, endMs: 2600, color: '#ffd400' }] },
+    ];
+  }]),
   ...(['pop', 'fade', 'rise', 'type', 'shake'] as const).map((a): [string, (tl: Timeline) => void] => [`teks animasi ${a}`, (tl) => {
     tl.texts = [{ id: 't', startMs: 200, endMs: 2600, text: 'MOMEN\nGILA', x: 0.5, y: 0.3, style: { ...DEFAULT_TEXT, font }, anim: a }];
   }]),

@@ -28,6 +28,17 @@ Buka tab **Releases** di repo ini, unduh `Gals Clip Studio_..._x64-setup.exe`, l
 | 1–9 | pasang suara di playhead |
 | Shift + 1–9 | pasang meme di playhead |
 | Ctrl + scroll | zoom timeline (di atas gambar di preview: ubah ukuran) |
+| Ctrl/Shift + klik | pilih beberapa item di timeline |
+| Ctrl+A | pilih semua item (kecuali potongan video) |
+
+## Pilih banyak sekaligus
+Di timeline, tarik kotak dari area kosong untuk memilih semua yang kena kotak (subtitle, meme, suara, teks, layer, musik), atau Ctrl/Shift+klik satu per satu. Tarik salah satu yang terpilih untuk menggeser semuanya maju-mundur bersamaan, atau pakai tombol geser di panel kanan. Delete menghapus semuanya. Esc membatalkan pilihan.
+
+## Tata letak
+Panel kiri dan kanan bisa dilebarkan dengan menarik tepinya (klik dua kali untuk ukuran bawaan), dan disembunyikan dengan tombol di kanan atas. Klik ikon tab yang sedang aktif di rail kiri juga melipat panel kiri. Saat jendela dikecilkan, panel ikut menyesuaikan supaya preview tetap terlihat.
+
+## Volume suara
+Suara soundboard dan video meme dipasang dengan volume 25% supaya tidak menutupi suaramu. Ubah bawaannya lewat **Volume saat ditempel** di panel Suara / Video meme; tiap suara yang sudah dipasang tetap bisa dibesarkan di panel kanan.
 
 ## Layer video
 Panel **Layer** (rail kiri). Setiap layer bisa digeser, di-resize (tarik pojok, Shift untuk bebas), diregang (tarik sisi), dan di-crop (tombol **C** atau tab Crop, Enter untuk selesai).
@@ -42,7 +53,12 @@ Panel **Video meme**: tambah klip reaksi (MP4/MOV/WebM/MKV) atau impor satu fold
 ## Animasi teks
 Pilih teks, lalu di panel kanan pilih **Pop**, **Fade**, **Naik**, **Ketik**, atau **Goyang**. Teks baru otomatis memakai Pop.
 
-Subtitle punya animasinya sendiri di panel **Subtitle → Animasi**: Pop, Fade, Naik, Goyang (per baris), **Per kata** (kata muncul satu per satu), dan **Memantul** (kata yang diucapkan membesar sebentar).
+Subtitle punya animasinya sendiri di panel **Subtitle → Animasi**: Pop, Fade, Naik, Goyang (per baris), **Per kata** (kata muncul satu per satu), dan **Memantul** (kata yang diucapkan membesar sebentar). Ini berlaku untuk semua baris.
+
+Untuk bagian tertentu, klik baris subtitle-nya, lalu di panel kanan:
+- **Animasi baris ini**: animasi khusus baris itu saja. **Umum** = ikut animasi semua.
+- **Gaya per kata**: klik kata (Ctrl/Shift+klik untuk beberapa), lalu pilih **Pop**, **Besar**, atau **Teriak** (besar, menghentak, merah), dan warna sendiri. Cocok untuk kata yang diteriakkan.
+Baris yang punya gaya sendiri ditandai ✦ di daftar subtitle.
 
 ## Autosave & riwayat versi
 Proyek tersimpan otomatis setiap ada perubahan (lihat "Tersimpan" di kanan atas). Salinan versi dibuat tiap 3 menit, saat proyek dibuka, dan sebelum hapus jeda atau buat subtitle. Pulihkan dari panel kanan (klik area kosong di timeline) → **Riwayat versi**.

@@ -134,8 +134,38 @@ export function textAnimState(anim: TextAnim | undefined, lt: number, durMs: num
   return { scale, alpha, dy, rot, chars: shown };
 }
 
-export interface Word { text: string; startMs: number; endMs: number }
-export interface CaptionLine { id: string; startMs: number; endMs: number; words: Word[] }
+/** fx/color: a style for just this word (e.g. when shouting), on top of the line's animation. */
+export interface Word { text: string; startMs: number; endMs: number; fx?: WordFx; color?: string }
+/** anim: this line's own animation; empty = the general one from the Subtitle panel. */
+export interface CaptionLine { id: string; startMs: number; endMs: number; words: Word[]; anim?: CapAnim }
+
+/** Per-word emphasis. pop: grows for a moment when said; big: stays larger; shout: larger, pulses and turns red. */
+export type WordFx = 'pop' | 'big' | 'shout';
+export const SHOUT_COLOR = '#ff4d4d';
+
+/** Size of a word: `base` all the time, starting at `peak` when it is said and settling back over `ms`. */
+export function wordPulse(fx: WordFx | undefined, lineAnim: CapAnim): { base: number; peak: number; ms: number } {
+  const base = fx === 'big' || fx === 'shout' ? 1.35 : 1;
+  if (fx === 'shout') return { base, peak: 1.75, ms: 200 };
+  if (fx === 'pop') return { base, peak: 1.5, ms: 180 };
+  if (lineAnim === 'bounce') return { base, peak: base * 1.25, ms: 120 };
+  return { base, peak: base, ms: 0 };
+}
+/** Scale of a word `since` ms after it was said (negative = not yet said). */
+export function wordScale(fx: WordFx | undefined, lineAnim: CapAnim, isActive: boolean, since: number): number {
+  const p = wordPulse(fx, lineAnim);
+  // pop/shout pulse once when the word is said; bounce pulses only while the word is the one being said
+  const pulsing = fx ? since >= 0 : isActive;
+  if (!pulsing || p.peak === p.base || !p.ms) return p.base;
+  return p.base + (p.peak - p.base) * (1 - Math.min(1, Math.max(0, since) / p.ms));
+}
+/** Colour of a word: its own colour, then shout red, then the highlight while said (word mode). */
+export function wordColor(w: Word, isActive: boolean, cap: Captions): string {
+  if (w.color) return w.color;
+  if (w.fx === 'shout') return SHOUT_COLOR;
+  return cap.mode === 'word' && isActive ? cap.style.highlight : cap.style.color;
+}
+export const lineAnimOf = (line: CaptionLine, cap: Captions): CapAnim => line.anim ?? cap.anim ?? 'none';
 
 export interface Captions {
   mode: 'line' | 'word';
@@ -357,12 +387,13 @@ export function buildAss(tl: Timeline, fontScale: (font: string, bold: boolean) 
   };
 
   const cap = tl.captions;
-  const anim: CapAnim = cap.anim ?? 'none';
-  const hi = `\\c${assColor(cap.style.highlight)}&`, base = `\\c${assColor(cap.style.color)}&`;
+  const base = `\\c${assColor(cap.style.color)}&`;
+  const sc = (v: number) => Math.round(v * 100);
   for (const line of cap.lines) {
+    const anim: CapAnim = lineAnimOf(line, cap);
     const pre0 = overrides(cap.style, 0.5, cap.y, W, H, fontScale(cap.style.font, cap.style.bold));
     const ws = line.words;
-    const perWord = ws.length > 0 && (cap.mode === 'word' || anim === 'word' || anim === 'bounce');
+    const perWord = ws.length > 0 && (cap.mode === 'word' || anim === 'word' || anim === 'bounce' || ws.some((w) => w.fx === 'pop' || w.fx === 'shout'));
     // the events that make up this line: one per word window when words matter, else one for the line
     const evs: { a: number; b: number; active: number }[] = [];
     if (!perWord) evs.push({ a: line.startMs, b: line.endMs, active: -1 });
@@ -376,10 +407,19 @@ export function buildAss(tl: Timeline, fontScale: (font: string, bold: boolean) 
     const px = 540 * (W / 1080), py = Math.round(cap.y * H);
     evs.filter((e) => e.b > e.a).forEach((e, k, all) => {
       const first = k === 0, last = k === all.length - 1;
+      // a word's own size; while a line pops in, every size has to carry the pop too, else that word would not pop
+      const size = (v: number) => first && anim === 'pop'
+        ? `\\fscx${sc(0.3 * v)}\\fscy${sc(0.3 * v)}\\t(0,140,\\fscx${sc(1.12 * v)}\\fscy${sc(1.12 * v)})\\t(140,240,\\fscx${sc(v)}\\fscy${sc(v)})`
+        : `\\fscx${sc(v)}\\fscy${sc(v)}`;
       const text = ws.length ? ws.map((x, j) => {
         let t = assEscape(x.text);
-        if (cap.mode === 'word' && j === e.active) t = `{${hi}}${t}{${base}}`;
-        if (anim === 'bounce' && j === e.active) t = `{\\fscx125\\fscy125\\t(0,120,\\fscx100\\fscy100)}${t}{\\fscx100\\fscy100}`;
+        const isActive = j === e.active;
+        const col = wordColor(x, isActive, cap);
+        if (col !== cap.style.color) t = `{\\c${assColor(col)}&}${t}{${base}}`;
+        const p = wordPulse(x.fx, anim);
+        // pulse at the start of the event where the word is said; pop/shout stay at their size afterwards
+        if (isActive && p.peak !== p.base && p.ms) t = `{\\fscx${sc(p.peak)}\\fscy${sc(p.peak)}\\t(0,${p.ms},\\fscx${sc(p.base)}\\fscy${sc(p.base)})}${t}{${size(1)}}`;
+        else if (p.base !== 1) t = `{${size(p.base)}}${t}{${size(1)}}`;
         // not yet said: kept in place but invisible, so the line does not shift as words appear
         if (anim === 'word' && j > e.active) t = `{\\alpha&HFF&}${t}{\\alpha&H00&}`;
         return t;
