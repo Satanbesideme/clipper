@@ -42,6 +42,8 @@ Panel **Video meme**: tambah klip reaksi (MP4/MOV/WebM/MKV) atau impor satu fold
 ## Animasi teks
 Pilih teks, lalu di panel kanan pilih **Pop**, **Fade**, **Naik**, **Ketik**, atau **Goyang**. Teks baru otomatis memakai Pop.
 
+Subtitle punya animasinya sendiri di panel **Subtitle → Animasi**: Pop, Fade, Naik, Goyang (per baris), **Per kata** (kata muncul satu per satu), dan **Memantul** (kata yang diucapkan membesar sebentar).
+
 ## Autosave & riwayat versi
 Proyek tersimpan otomatis setiap ada perubahan (lihat "Tersimpan" di kanan atas). Salinan versi dibuat tiap 3 menit, saat proyek dibuka, dan sebelum hapus jeda atau buat subtitle. Pulihkan dari panel kanan (klik area kosong di timeline) → **Riwayat versi**.
 

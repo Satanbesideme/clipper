@@ -142,7 +142,14 @@ export interface Captions {
   y: number;           // 0..1, vertical centre
   style: TextStyle;
   lines: CaptionLine[];
+  anim?: CapAnim;
 }
+
+/** Caption animation: how each line enters (pop/fade/rise/shake), or word by word (word/bounce). */
+export type CapAnim = 'none' | 'pop' | 'fade' | 'rise' | 'shake' | 'word' | 'bounce';
+
+/** Scale of the word being said in the "bounce" style, `since` ms after it starts. */
+export const bounceScale = (since: number) => 1 + 0.25 * (1 - Math.min(1, Math.max(0, since) / 120));
 
 /** A sound effect placed on the timeline (soundboard). */
 export interface SoundItem {
@@ -350,23 +357,51 @@ export function buildAss(tl: Timeline, fontScale: (font: string, bold: boolean) 
   };
 
   const cap = tl.captions;
+  const anim: CapAnim = cap.anim ?? 'none';
+  const hi = `\\c${assColor(cap.style.highlight)}&`, base = `\\c${assColor(cap.style.color)}&`;
   for (const line of cap.lines) {
-    const pre = overrides(cap.style, 0.5, cap.y, W, H, fontScale(cap.style.font, cap.style.bold));
-    const plain = assEscape(line.words.map((w) => w.text).join(' '));
-    if (cap.mode === 'line' || !line.words.length) {
-      ev(1, line.startMs, line.endMs, cap.style, pre + plain);
-      continue;
-    }
-    // one event per word window; the current word gets the highlight colour
+    const pre0 = overrides(cap.style, 0.5, cap.y, W, H, fontScale(cap.style.font, cap.style.bold));
     const ws = line.words;
-    if (ws[0].startMs > line.startMs) ev(1, line.startMs, ws[0].startMs, cap.style, pre + plain);
-    ws.forEach((w, i) => {
-      const a = Math.max(line.startMs, w.startMs);
-      const b = i + 1 < ws.length ? Math.max(a, ws[i + 1].startMs) : line.endMs;
-      const text = ws.map((x, j) => (j === i
-        ? `{\\c${assColor(cap.style.highlight)}&}${assEscape(x.text)}{\\c${assColor(cap.style.color)}&}`
-        : assEscape(x.text))).join(' ');
-      ev(1, a, b, cap.style, pre + text);
+    const perWord = ws.length > 0 && (cap.mode === 'word' || anim === 'word' || anim === 'bounce');
+    // the events that make up this line: one per word window when words matter, else one for the line
+    const evs: { a: number; b: number; active: number }[] = [];
+    if (!perWord) evs.push({ a: line.startMs, b: line.endMs, active: -1 });
+    else {
+      if (ws[0].startMs > line.startMs && anim !== 'word') evs.push({ a: line.startMs, b: ws[0].startMs, active: -1 });
+      ws.forEach((w, i) => {
+        const a = Math.max(line.startMs, w.startMs);
+        evs.push({ a, b: i + 1 < ws.length ? Math.max(a, ws[i + 1].startMs) : line.endMs, active: i });
+      });
+    }
+    const px = 540 * (W / 1080), py = Math.round(cap.y * H);
+    evs.filter((e) => e.b > e.a).forEach((e, k, all) => {
+      const first = k === 0, last = k === all.length - 1;
+      const text = ws.length ? ws.map((x, j) => {
+        let t = assEscape(x.text);
+        if (cap.mode === 'word' && j === e.active) t = `{${hi}}${t}{${base}}`;
+        if (anim === 'bounce' && j === e.active) t = `{\\fscx125\\fscy125\\t(0,120,\\fscx100\\fscy100)}${t}{\\fscx100\\fscy100}`;
+        // not yet said: kept in place but invisible, so the line does not shift as words appear
+        if (anim === 'word' && j > e.active) t = `{\\alpha&HFF&}${t}{\\alpha&H00&}`;
+        return t;
+      }).join(' ') : '';
+      let pre = pre0;
+      const extra: string[] = [];
+      if (first) {
+        if (anim === 'pop') extra.push('\\fscx30\\fscy30\\t(0,140,\\fscx112\\fscy112)\\t(140,240,\\fscx100\\fscy100)');
+        if (anim === 'fade') extra.push('\\fad(250,0)');
+        if (anim === 'rise') { pre = pre.replace(`\\pos(${Math.round(px)},${py})`, `\\move(${Math.round(px)},${py + 60},${Math.round(px)},${py},0,220)`); extra.push('\\fad(120,0)'); }
+        if (anim === 'shake') extra.push('\\t(0,70,\\frz7)\\t(70,140,\\frz-6)\\t(140,210,\\frz4)\\t(210,280,\\frz0)');
+      }
+      if (last && (anim === 'pop' || anim === 'rise')) extra.push('\\fad(0,150)');
+      if (last && anim === 'fade') extra.push('\\fad(0,200)');
+      // two \fad in one event would conflict: a single-event line gets both fades in one tag
+      if (first && last && (anim === 'fade' || anim === 'rise')) {
+        const inMs = anim === 'fade' ? 250 : 120, outMs = anim === 'fade' ? 200 : 150;
+        for (let i = extra.length - 1; i >= 0; i--) if (extra[i].startsWith('\\fad')) extra.splice(i, 1);
+        extra.push(`\\fad(${inMs},${outMs})`);
+      }
+      if (extra.length) pre = pre.replace(/}$/, `${extra.join('')}}`);
+      ev(1, e.a, e.b, cap.style, pre + text);
     });
   }
   for (const t of tl.texts) {

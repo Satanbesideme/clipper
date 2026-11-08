@@ -4,7 +4,7 @@ import { qualityBitrate } from './ffmpeg';
 import {
   DEFAULT_CAPTION, DEFAULT_TEXT, clipDuration, clipStarts, locate, splitAt, timelineDuration,
   type CaptionLine, type ImageItem, type Watermark, type SoundItem, type TextItem, type TextStyle, type Trans, type VideoClip, type Word,
-  transState, TRANS_IN_MS, textAnimState, type TextAnim, clipFx, removePauses, remapItems, invertRanges, DUCK_LEVEL,
+  transState, TRANS_IN_MS, textAnimState, bounceScale, type TextAnim, type CapAnim, clipFx, removePauses, remapItems, invertRanges, DUCK_LEVEL,
   type ClipTrans, type Duck, type MusicItem, type Range, type VideoLayer, type Crop, NO_CROP, cropSize,
 } from './render';
 import {
@@ -598,6 +598,17 @@ function textPanel(): Node[] {
   ];
 }
 
+const CAP_ANIM_NAME: Record<CapAnim, string> = { none: 'Tanpa', pop: 'Pop', fade: 'Fade', rise: 'Naik', shake: 'Goyang', word: 'Per kata', bounce: 'Memantul' };
+const CAP_ANIM_HINT: Record<CapAnim, string> = {
+  none: 'Baris muncul dan hilang langsung.',
+  pop: 'Tiap baris baru muncul membesar lalu pas.',
+  fade: 'Tiap baris muncul dan hilang perlahan.',
+  rise: 'Tiap baris naik sedikit saat muncul.',
+  shake: 'Tiap baris bergoyang sebentar saat muncul.',
+  word: 'Kata muncul satu per satu mengikuti ucapan.',
+  bounce: 'Kata yang sedang diucapkan membesar sebentar. Cocok dengan gaya Kata menyala.',
+};
+
 const ANIM_NAME: Record<TextAnim, string> = { none: 'Tanpa', pop: 'Pop', fade: 'Fade', rise: 'Naik', type: 'Ketik', shake: 'Goyang' };
 
 function addText(style: TextStyle) {
@@ -673,6 +684,16 @@ function captionPanel(): Node[] {
         h('button', { class: cap.mode === 'word' ? 'on' : '', onclick: () => { snapshot(); cap.mode = 'word'; changed({ left: true, inspector: false }); } }, 'Kata menyala'),
         h('button', { class: cap.mode === 'line' ? 'on' : '', onclick: () => { snapshot(); cap.mode = 'line'; changed({ left: true, inspector: false }); } }, 'Per kalimat'),
       ),
+      h('div', { class: 'label' }, 'Animasi'),
+      h('div', { class: 'anim-grid' }, ...(['none', 'pop', 'fade', 'rise', 'shake', 'word', 'bounce'] as CapAnim[]).map((a) => h('button', {
+        class: (cap.anim ?? 'none') === a ? 'on' : '', title: CAP_ANIM_HINT[a],
+        onclick: () => {
+          snapshot(); cap.anim = a; changed({ left: true, inspector: false });
+          const l = cap.lines.find((x) => x.endMs > t) ?? cap.lines[0];
+          if (l && a !== 'none') { seek(l.startMs); play(); setTimeout(() => pause(), Math.min(2500, l.endMs - l.startMs + 300)); }
+        },
+      }, CAP_ANIM_NAME[a]))),
+      h('div', { class: 'muted small' }, CAP_ANIM_HINT[cap.anim ?? 'none']),
       ...styleControls(st, styleSet, cap.mode === 'word'),
       field('Posisi tinggi', h('input', { type: 'range', min: 8, max: 92, value: Math.round(cap.y * 100), oninput: (e) => { cap.y = Number((e.target as HTMLInputElement).value) / 100; void saveProject(p); renderFrame(); }, onchange: () => undefined })),
     ),
@@ -1220,10 +1241,33 @@ function renderFrameInner() {
   const cap = tl().captions;
   const line = cap.lines.find((l) => t >= l.startMs && t < l.endMs);
   if (line) {
+    const anim: CapAnim = cap.anim ?? 'none';
     let active = -1;
-    if (cap.mode === 'word') line.words.forEach((w, i) => { if (t >= w.startMs) active = i; });
-    const segs = line.words.map((w, i) => ({ text: w.text, color: i === active ? cap.style.highlight : cap.style.color }));
-    const b = drawText(ctx, wrapSegs(ctx, segs, cap.style, k, W - 120 * k), W / 2, cap.y * H, cap.style, k);
+    line.words.forEach((w, i) => { if (t >= w.startMs) active = i; });
+    const segs: Seg[] = line.words.map((w, i) => ({
+      text: w.text,
+      color: cap.mode === 'word' && i === active ? cap.style.highlight : cap.style.color,
+      scale: anim === 'bounce' && i === active ? bounceScale(t - w.startMs) : 1,
+      hidden: anim === 'word' && i > active,
+    }));
+    const lines = wrapSegs(ctx, segs, cap.style, k, W - 120 * k);
+    // line entrance/exit like the export: pop, fade, rise and shake reuse the text animation curves
+    const entrance = anim === 'pop' || anim === 'fade' || anim === 'rise' || anim === 'shake' ? anim : 'none';
+    const an = textAnimState(entrance, t - line.startMs, line.endMs - line.startMs, 0);
+    const cx = W / 2, cy = cap.y * H;
+    ctx.save(); ctx.globalAlpha = 0;
+    const b = drawText(ctx, lines, cx, cy, cap.style, k);
+    ctx.restore();
+    if (an.alpha > 0.01) {
+      ctx.save();
+      ctx.globalAlpha = an.alpha;
+      ctx.translate(cx, cy + an.dy * (60 / 90) * k);
+      if (an.rot) ctx.rotate((-an.rot * Math.PI) / 180);
+      ctx.scale(an.scale, an.scale);
+      ctx.translate(-cx, -cy);
+      drawText(ctx, lines, cx, cy, cap.style, k);
+      ctx.restore();
+    }
     boxes.push({ kind: 'captions', id: line.id, ...b });
   }
   drawSafeGuide(ctx, W, H);
@@ -1297,7 +1341,7 @@ function drawSafeGuide(ctx: CanvasRenderingContext2D, W: number, H: number) {
   ctx.restore();
 }
 
-type Seg = { text: string; color: string };
+type Seg = { text: string; color: string; scale?: number; hidden?: boolean };
 const fontOf = (st: TextStyle, k: number) => `${st.bold ? 700 : 400} ${st.size * k}px "${st.font}", "Segoe UI", sans-serif`;
 
 function wrapSegs(ctx: CanvasRenderingContext2D, segs: Seg[], st: TextStyle, k: number, maxW: number): Seg[][] {
@@ -1346,7 +1390,9 @@ function drawText(ctx: CanvasRenderingContext2D, lines: Seg[][], cx: number, cy:
   ctx.textAlign = 'left';
   const space = ctx.measureText(' ').width;
   const lh = st.size * k * 1.18;
-  const widths = lines.map((l) => l.reduce((s, x, i) => s + ctx.measureText(x.text).width + (i ? space : 0), 0));
+  // a scaled word (bounce) takes its scaled width, so the words beside it make room, as in the export
+  const segW = (x: Seg) => ctx.measureText(x.text).width * (x.hidden ? 1 : (x.scale ?? 1));
+  const widths = lines.map((l) => l.reduce((s, x, i) => s + segW(x) + (i ? space : 0), 0));
   const totalH = lh * lines.length;
   const top = cy - totalH / 2;
   const maxW = Math.max(0, ...widths);
@@ -1359,15 +1405,21 @@ function drawText(ctx: CanvasRenderingContext2D, lines: Seg[][], cx: number, cy:
       ctx.fillRect(x - pad, y - lh / 2 - pad / 3, widths[li] + pad * 2, lh + (pad * 2) / 3);
     }
     for (const s of l) {
-      if (!st.box && st.outline > 0) {
-        ctx.lineJoin = 'round';
-        ctx.lineWidth = st.outline * 2 * k;
-        ctx.strokeStyle = '#000';
-        ctx.strokeText(s.text, x, y);
+      const sw = segW(s);
+      if (!s.hidden) {
+        const sc = s.scale ?? 1;
+        if (sc !== 1) { ctx.save(); ctx.translate(x, y); ctx.scale(sc, sc); ctx.translate(-x, -y); }
+        if (!st.box && st.outline > 0) {
+          ctx.lineJoin = 'round';
+          ctx.lineWidth = st.outline * 2 * k;
+          ctx.strokeStyle = '#000';
+          ctx.strokeText(s.text, x, y);
+        }
+        ctx.fillStyle = s.color;
+        ctx.fillText(s.text, x, y);
+        if (sc !== 1) ctx.restore();
       }
-      ctx.fillStyle = s.color;
-      ctx.fillText(s.text, x, y);
-      x += ctx.measureText(s.text).width + space;
+      x += sw + space;
     }
   });
   return { x: cx - maxW / 2, y: top, w: maxW, h: totalH };

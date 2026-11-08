@@ -58,6 +58,14 @@ const scenarios: [string, (tl: Timeline) => void][] = [
     tl.layers = [{ id: 'o', name: 'Lain', source: 'media', mediaId: 'm', inMs: 6000, startMs: 2000, endMs: 5000, crop: { l: 0.1, t: 0.1, r: 0.1, b: 0.5 }, box: { x: 0.5, y: 0.5, w: 0.6, h: 0.3 }, opacity: 1, volume: 0.8 }];
   }],
   ['kualitas 40%', () => undefined],
+  ...(['pop', 'fade', 'rise', 'shake', 'word', 'bounce'] as const).flatMap((a) => (['word', 'line'] as const).map((mode): [string, (tl: Timeline) => void] => [`subtitle animasi ${a} (${mode})`, (tl) => {
+    tl.captions.mode = mode;
+    tl.captions.anim = a;
+    tl.captions.lines = [
+      { id: 'l1', startMs: 300, endMs: 1800, words: [{ text: 'halo', startMs: 300, endMs: 700 }, { text: 'semua', startMs: 700, endMs: 1200 }, { text: 'gas', startMs: 1200, endMs: 1800 }] },
+      { id: 'l2', startMs: 1800, endMs: 2600, words: [{ text: 'oke', startMs: 1800, endMs: 2600 }] },
+    ];
+  }])),
   ...(['pop', 'fade', 'rise', 'type', 'shake'] as const).map((a): [string, (tl: Timeline) => void] => [`teks animasi ${a}`, (tl) => {
     tl.texts = [{ id: 't', startMs: 200, endMs: 2600, text: 'MOMEN\nGILA', x: 0.5, y: 0.3, style: { ...DEFAULT_TEXT, font }, anim: a }];
   }]),
