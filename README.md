@@ -6,7 +6,7 @@ Editor video ringan untuk Windows, untuk mengedit rekaman vertikal dari OBS jadi
 Buka tab **Releases** di repo ini, unduh `Gals Clip Studio_..._x64-setup.exe`, lalu jalankan. Kalau muncul "Windows protected your PC", klik **More info → Run anyway**.
 
 ## Cara pakai
-1. **Proyek baru**: pilih rekaman, atau tarik file dari folder OBS ke jendela.
+1. **Proyek baru**: klik **+** di halaman awal, lalu pilih **Dari video** (rekaman OBS / video yang sudah ada) atau **Kanvas kosong** (pilih bentuk 9:16/16:9/1:1/4:5, resolusi FHD/2K/4K, fps, durasi, dan warna latar). Bisa juga tarik file video ke jendela.
 2. **Potong**: geser playhead, tekan **Ctrl+B** untuk split, pilih bagian yang tidak dipakai, tekan **Delete**. Potongan otomatis merapat.
 3. **Subtitle**: buka tab **Subtitle**, unduh model sekali (148 MB atau 488 MB), lalu klik **Buat subtitle otomatis**. Pilih gaya **Kata menyala** atau **Per kalimat**. Klik baris untuk mengoreksi.
 4. **Suara (soundboard)**: tab **Suara**. Pause di momennya, pencet pad atau angka **1–9**, lalu lanjut putar. Tarik file MP3/WAV/OGG ke jendela untuk menambah.

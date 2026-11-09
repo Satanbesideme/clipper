@@ -14,7 +14,7 @@ import {
   type Library, type Meme, type Pad, type VideoMeme,
 } from './library';
 import {
-  dataDir, deleteProject, flush, listProjects, listVersions, loadVersion, onSaved, snapshotProject, loadProject, loadSettings, newProject, saveProject, saveSettings, uid,
+  dataDir, projectDir, deleteProject, flush, listProjects, listVersions, loadVersion, onSaved, snapshotProject, loadProject, loadSettings, newProject, saveProject, saveSettings, uid,
   type MediaEntry, type Project, type Settings,
 } from './store';
 import {
@@ -272,6 +272,98 @@ async function dropped(paths: string[]) {
   }
 }
 
+// ================= new project: from a video, or a blank canvas =================
+const BG_COLORS: { name: string; hex: string }[] = [
+  { name: 'Hitam', hex: '#000000' }, { name: 'Charcoal GALSURKU', hex: '#1a1b1b' }, { name: 'Putih', hex: '#ffffff' },
+  { name: 'Teal', hex: '#37b8ac' }, { name: 'Hijau (green screen)', hex: '#00b140' },
+];
+function closeNewProject() { document.querySelector('.np-overlay')?.remove(); }
+function openNewProject(pickVideo: () => Promise<void>) {
+  closeNewProject();
+  const st = { aspect: '9:16' as Aspect, short: 1080, fps: 30 as 30 | 60, dur: 15, bg: '#1a1b1b', name: 'Proyek baru' };
+  const form = h('div', { class: 'np-form', hidden: true });
+  const paint = () => {
+    form.replaceChildren(
+      h('label', { class: 'field' }, h('span', { class: 'label' }, 'Nama proyek'), h('input', { value: st.name, oninput: (e) => { st.name = (e.target as HTMLInputElement).value; } })),
+      h('div', { class: 'label' }, 'Bentuk'),
+      h('div', { class: 'canvas-aspects' }, ...ASPECTS.map((a) => h('button', {
+        class: `canvas-aspect${st.aspect === a.id ? ' on' : ''}`, title: a.hint, onclick: () => { st.aspect = a.id; paint(); },
+      }, h('span', { class: 'ca-box', style: a.wh[0] >= a.wh[1] ? `width:36px;height:${Math.round((36 * a.wh[1]) / a.wh[0])}px` : `height:32px;width:${Math.round((32 * a.wh[0]) / a.wh[1])}px` }), h('span', { class: 'ca-name' }, a.name), h('span', { class: 'ca-hint' }, a.hint)))),
+      h('div', { class: 'np-row' },
+        h('div', { class: 'np-col' }, h('div', { class: 'label' }, 'Resolusi'),
+          h('div', { class: 'seg' }, ...RESOLUTIONS.map((r) => h('button', { class: st.short === r.short ? 'on' : '', onclick: () => { st.short = r.short; paint(); } }, r.name)))),
+        h('div', { class: 'np-col' }, h('div', { class: 'label' }, 'Frame rate'),
+          h('div', { class: 'seg' }, ...([30, 60] as const).map((f) => h('button', { class: st.fps === f ? 'on' : '', onclick: () => { st.fps = f; paint(); } }, `${f} fps`)))),
+      ),
+      h('div', { class: 'label' }, 'Durasi'),
+      h('div', { class: 'seg' }, ...[10, 15, 30, 60, 180].map((d) => h('button', { class: st.dur === d ? 'on' : '', onclick: () => { st.dur = d; paint(); } }, d < 60 ? `${d} dtk` : `${d / 60} mnt`))),
+      h('div', { class: 'label' }, 'Latar'),
+      h('div', { class: 'swatches' }, ...BG_COLORS.map((c) => h('button', { class: `swatch${st.bg === c.hex ? ' on' : ''}`, style: `background:${c.hex}`, title: c.name, onclick: () => { st.bg = c.hex; paint(); } })),
+        h('input', { type: 'color', class: 'swatch-pick', value: st.bg, title: 'Warna lain', onchange: (e) => { st.bg = (e.target as HTMLInputElement).value; paint(); } })),
+      h('div', { class: 'muted small mono' }, (() => { const d = canvasDims(st.aspect, st.short); return `${d.w} × ${d.h} px · ${st.fps} fps · ${st.dur} dtk`; })()),
+      h('button', { class: 'primary wide with-ico', onclick: () => void createBlankProject(st) }, icon('plus', 16), 'Buat kanvas'),
+    );
+  };
+  paint();
+  const overlay = h('div', { class: 'np-overlay', onclick: (e) => { if (e.target === overlay) closeNewProject(); } },
+    h('div', { class: 'np-card', role: 'dialog', 'aria-label': 'Proyek baru' },
+      h('div', { class: 'row-between' }, h('h2', { class: 'np-title' }, 'Proyek baru'), h('button', { class: 'icon-btn', 'aria-label': 'Tutup', onclick: closeNewProject }, icon('x', 16))),
+      h('div', { class: 'np-options' },
+        h('button', { class: 'np-option', onclick: () => { closeNewProject(); void pickVideo(); } },
+          h('span', { class: 'np-ico' }, icon('video', 26)),
+          h('span', { class: 'np-name' }, 'Dari video'),
+          h('span', { class: 'np-hint' }, 'Pilih rekaman OBS atau video yang sudah ada. Kanvas mengikuti videonya.'),
+        ),
+        h('button', { class: 'np-option', onclick: (e) => { (e.currentTarget as HTMLElement).classList.add('on'); form.hidden = false; overlay.classList.add('expanded'); } },
+          h('span', { class: 'np-ico' }, icon('template', 26)),
+          h('span', { class: 'np-name' }, 'Kanvas kosong'),
+          h('span', { class: 'np-hint' }, 'Mulai dari latar polos: atur bentuk, resolusi, dan durasi, lalu isi dengan layer, teks, meme, dan musik.'),
+        ),
+      ),
+      form,
+    ),
+  );
+  document.body.append(overlay);
+  const esc = (e: KeyboardEvent) => { if (e.key === 'Escape') { closeNewProject(); window.removeEventListener('keydown', esc); } };
+  window.addEventListener('keydown', esc);
+}
+function canvasDims(aspect: Aspect, short: number) {
+  const [aw, ah] = ASPECTS.find((x) => x.id === aspect)!.wh;
+  return aw <= ah ? { w: short, h: even((short * ah) / aw) } : { w: even((short * aw) / ah), h: short };
+}
+/** A blank canvas is a project whose main track is one solid-colour clip (so play, cut and export all work). */
+async function createBlankProject(st: { aspect: Aspect; short: number; fps: 30 | 60; dur: number; bg: string; name: string }) {
+  const { w, h: hh } = canvasDims(st.aspect, st.short);
+  const p = newProject(st.name.trim() || 'Kanvas kosong');
+  p.timeline.width = w; p.timeline.height = hh; p.timeline.fps = st.fps;
+  if (settings.watermark) p.timeline.watermark = { ...settings.watermark };
+  closeNewProject();
+  setBusy('Membuat kanvas…');
+  try {
+    await saveProject(p, true);
+    const dir = await projectDir(p.id);
+    await invoke('ensure_dir', { path: dir });
+    const file = join(dir, `kanvas-${st.bg.slice(1)}-${w}x${hh}-${st.fps}-${st.dur}s.mp4`);
+    await runTool('ffmpeg', ['-hide_banner', '-y', '-nostats', '-progress', 'pipe:1',
+      '-f', 'lavfi', '-i', `color=c=0x${st.bg.slice(1)}:s=${w}x${hh}:r=${st.fps}:d=${st.dur}`,
+      '-f', 'lavfi', '-i', 'anullsrc=r=48000:cl=stereo', '-t', String(st.dur),
+      '-c:v', 'libx264', '-preset', 'ultrafast', '-tune', 'stillimage', '-crf', '30', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '64k', '-shortest', file]);
+    await openProject(p.id, [file]);
+    const m = P?.media[0];
+    if (!m) return;   // importFiles already said what went wrong
+    m.name = 'Kanvas kosong';
+    tl().fps = st.fps;
+    await saveProject(P!);
+    switchTab('media');
+    renderLeft();
+    toast('Kanvas kosong siap. Tambahkan video sebagai layer, teks, meme, atau musik.');
+  } catch (e) {
+    toast((e as Error).message, 'error');
+  } finally {
+    setBusy('');
+  }
+}
+
 async function renderHome() {
   pause();
   await flush();
@@ -347,7 +439,7 @@ async function renderHome() {
         h('aside', { class: 'hp-side' },
           h('div', { class: 'hp-search' },
             h('input', { class: 'hp-q', placeholder: 'Cari proyek', 'aria-label': 'Cari proyek', oninput: (e) => fillList((e.target as HTMLInputElement).value) }),
-            h('button', { class: 'hp-new', title: 'Proyek baru: pilih rekaman', 'aria-label': 'Proyek baru', onclick: () => void pick() }, icon('plus', 22)),
+            h('button', { class: 'hp-new', title: 'Proyek baru', 'aria-label': 'Proyek baru', onclick: () => openNewProject(pick) }, icon('plus', 22)),
           ),
           h('div', { class: 'hp-head' }, h('span', {}, 'Proyek'), h('span', { class: 'muted' }, String(list.length))),
           projList,
