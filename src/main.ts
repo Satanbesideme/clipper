@@ -202,6 +202,8 @@ async function boot() {
   if (!settings.encoder) {
     settings.encoder = await detectEncoder();
     await saveSettings(settings);
+    const enc = document.getElementById('hp-enc');
+    if (enc && settings.encoder) enc.textContent = ENCODER_LABEL[settings.encoder];
   }
 }
 
@@ -245,45 +247,75 @@ async function renderHome() {
     const time = d.toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' });
     return days === 0 ? `Hari ini, ${time}` : days === 1 ? `Kemarin, ${time}` : d.toLocaleDateString('id-ID', { day: 'numeric', month: 'short', year: 'numeric' });
   };
+  const last = list[0];
+  const totalMs = list.reduce((n, p) => n + (p.durationMs || 0), 0);
+  const exported = await invoke<string[]>('list_dir', { path: settings.outDir }).then((f) => f.filter((x) => /\.mp4$/i.test(x)).length).catch(() => 0);
+  const projList = h('ul', { class: 'hp-list' });
+  const fillList = (q: string) => {
+    const k = q.trim().toLowerCase();
+    const shown = list.filter((p) => !k || p.name.toLowerCase().includes(k));
+    projList.replaceChildren(...shown.map((p) => h('li', {},
+      h('button', { class: 'hp-item', onclick: () => void openProject(p.id), title: `${when(p.updatedAt)} · ${p.clips} potongan` },
+        h('span', { class: 'hp-item-name' }, p.name),
+        h('span', { class: 'hp-item-dur mono' }, tc(p.durationMs)),
+      ),
+      h('button', {
+        class: 'icon-btn hp-del', title: 'Hapus proyek', 'aria-label': `Hapus proyek ${p.name}`,
+        onclick: async () => {
+          if (await dialog().ask(`Hapus proyek "${p.name}"?\nFile rekaman asli tidak ikut terhapus.`, { title: 'Hapus proyek', kind: 'warning' })) {
+            await deleteProject(p.id);
+            await renderHome();
+          }
+        },
+      }, icon('x', 14)),
+    )));
+    if (!shown.length) projList.append(h('li', { class: 'hp-empty muted' }, list.length ? 'Tidak ada proyek dengan nama itu.' : 'Belum ada proyek. Rekaman yang kamu buka akan muncul di sini.'));
+  };
+  fillList('');
+  const durParts = (ms: number) => { const s = Math.round(ms / 1000); return [String(Math.floor(s / 60)), String(s % 60).padStart(2, '0')]; };
+  const [mm, ss] = durParts(last?.durationMs ?? 0);
+  const stat = (k: string, v: string, id?: string) => h('div', { class: 'hp-stat' }, h('span', {}, k), h('span', { class: 'mono', id }, v));
   app.replaceChildren(
-    h('main', { class: 'home' },
-      h('section', { class: 'home-hero' },
-        h('button', { class: 'ring-drop', onclick: () => void pick(), 'aria-label': 'Proyek baru: pilih rekaman' },
-          logoMark(420, 'ring-mark'),
-          h('span', { class: 'ring-cta' }, h('span', { class: 'ring-plus' }, '+'), 'Proyek baru'),
-        ),
-        h('div', { class: 'home-copy' },
-          h('h1', { class: 'home-title' }, APP_NAME),
-          h('p', { class: 'home-lede' }, 'Potong rekaman vertikal dari OBS jadi shorts. Tarik file video ke mana saja di jendela ini, atau klik Proyek baru.'),
-          h('div', { class: 'home-actions' },
-            h('button', { class: 'primary big-cta', onclick: () => void pick() }, icon('plus', 18), h('span', {}, 'Proyek baru')),
-            h('span', { class: 'home-meta muted small' }, settings.encoder ? `Ekspor memakai ${ENCODER_LABEL[settings.encoder]}` : 'Mengecek kartu grafis…'),
+    h('main', { class: 'home2' },
+      h('div', { class: 'hp-card' },
+        h('section', {
+          class: `hp-hero${last ? ' has-last' : ''}`,
+          onclick: (e) => { if ((e.target as HTMLElement).closest('button')) return; if (last) void openProject(last.id); else void pick(); },
+          title: last ? `Lanjutkan "${last.name}"` : 'Pilih rekaman',
+        },
+          h('div', { class: 'hp-brand' }, logoMark(22), h('span', {}, 'gals.clip.studio')),
+          h('div', { class: 'hp-drop-hint' }, icon('plus', 18), 'Lepas rekaman di sini untuk membuat proyek'),
+          last ? h('div', { class: 'hp-big' },
+            h('div', { class: 'hp-num' }, mm, h('span', { class: 'hp-colon' }, ':'), ss),
+            h('div', { class: 'hp-what' },
+              h('div', { class: 'hp-name' }, last.name),
+              h('div', { class: 'hp-sub' }, `${when(last.updatedAt)} · ${last.clips} potongan`),
+            ),
+            h('button', { class: 'hp-continue', onclick: () => void openProject(last.id) }, 'Lanjutkan', icon('forward', 15)),
+          ) : h('div', { class: 'hp-big' },
+            h('div', { class: 'hp-what' },
+              h('div', { class: 'hp-name hp-name-xl' }, APP_NAME),
+              h('div', { class: 'hp-sub' }, 'Potong rekaman vertikal dari OBS jadi shorts. Tarik file video ke jendela ini, atau klik tombol + di kanan atas.'),
+            ),
           ),
         ),
-      ),
-      h('section', { class: 'home-projects' },
-        h('div', { class: 'row-between' },
-          h('h2', { class: 'home-h2' }, list.length ? 'Lanjutkan proyek' : 'Belum ada proyek'),
-          list.length ? h('span', { class: 'muted small' }, `${list.length} proyek`) : h('span'),
+        h('aside', { class: 'hp-side' },
+          h('div', { class: 'hp-search' },
+            h('input', { class: 'hp-q', placeholder: 'Cari proyek', 'aria-label': 'Cari proyek', oninput: (e) => fillList((e.target as HTMLInputElement).value) }),
+            h('button', { class: 'hp-new', title: 'Proyek baru: pilih rekaman', 'aria-label': 'Proyek baru', onclick: () => void pick() }, icon('plus', 22)),
+          ),
+          h('div', { class: 'hp-head' }, h('span', {}, 'Proyek'), h('span', { class: 'muted' }, String(list.length))),
+          projList,
+          h('div', { class: 'hp-rule' }),
+          h('div', { class: 'hp-head' }, h('span', {}, 'Ringkasan')),
+          h('div', { class: 'hp-stats' },
+            stat('Proyek', String(list.length)),
+            stat('Total durasi', tc(totalMs)),
+            stat('Video diekspor', String(exported)),
+            stat('Encoder', settings.encoder ? ENCODER_LABEL[settings.encoder] : 'Mengecek…', 'hp-enc'),
+          ),
+          h('div', { class: 'hp-rule' }),
         ),
-        list.length ? h('ul', { class: 'projects' },
-          ...list.map((p) => h('li', {},
-            h('button', { class: 'proj', onclick: () => void openProject(p.id) },
-              h('span', { class: 'proj-name' }, p.name),
-              h('span', { class: 'proj-dur mono' }, tc(p.durationMs)),
-              h('span', { class: 'proj-when muted small' }, `${when(p.updatedAt)} · ${p.clips} potongan`),
-            ),
-            h('button', {
-              class: 'icon-btn proj-del', title: 'Hapus proyek', 'aria-label': `Hapus proyek ${p.name}`,
-              onclick: async () => {
-                if (await dialog().ask(`Hapus proyek "${p.name}"?\nFile rekaman asli tidak ikut terhapus.`, { title: 'Hapus proyek', kind: 'warning' })) {
-                  await deleteProject(p.id);
-                  await renderHome();
-                }
-              },
-            }, icon('x', 15)),
-          )),
-        ) : h('p', { class: 'muted' }, 'Rekaman yang kamu buka akan muncul di sini, siap dilanjutkan kapan saja.'),
       ),
     ),
   );
