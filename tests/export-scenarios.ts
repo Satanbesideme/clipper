@@ -1,8 +1,9 @@
 // Runs every export feature through the real ffmpeg build the app ships, one scenario at a time,
 // so a failure points at the feature. Usage: node build-test/tests/export-scenarios.js <ffmpeg> <workdir> <fontsdir> <font>
 import { spawnSync } from 'node:child_process';
-import { writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { DEFAULT_CAPTION, DEFAULT_TEXT, buildAss, renderArgs, type Timeline, type Media, type ImageItem } from '../src/render';
+import { bakeCube, gradeOf, hasColour, parseCube, type Grade } from '../src/grade';
 
 const [ffmpeg, dir, fontsDir, font] = process.argv.slice(2);
 const run = (args: string[]) => spawnSync(ffmpeg, args, { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
@@ -12,6 +13,8 @@ make(['-f', 'lavfi', '-i', 'testsrc2=s=1080x1920:r=30:d=12', '-f', 'lavfi', '-i'
 make(['-f', 'lavfi', '-i', 'color=c=black@0:s=400x300,format=rgba', '-vf', "geq=r='255':g='106':b='26':a='if(lt(hypot(X-200\\,Y-150)\\,140)\\,255\\,0)'", '-frames:v', '1', `${dir}/meme.png`]);
 make(['-f', 'lavfi', '-i', 'color=c=white:s=200x200:r=10:d=1', '-vf', "geq=r='255*(1-mod(N\\,10)/10)':g='212':b='0'", `${dir}/anim.gif`]);
 make(['-f', 'lavfi', '-i', 'aevalsrc=0.6*sin(2*PI*1320*t)*exp(-4.5*t):s=48000:d=1.2', '-c:a', 'libvorbis', `${dir}/sfx.ogg`]);
+// a "user" LUT: warm and contrasty, 17^3, made with the app's own baker
+writeFileSync(`${dir}/test.cube`, bakeCube(gradeOf({ temperature: 0.6, contrast: 0.3, saturation: 0.2 }), null, 17));
 make(['-f', 'lavfi', '-i', 'aevalsrc=0.15*(sin(2*PI*261.6*t)+sin(2*PI*329.6*t)):s=48000:d=30', '-c:a', 'libvorbis', `${dir}/music.ogg`]);
 
 const media: Record<string, Media> = { m: { id: 'm', path: '', playable: `${dir}/vod.mp4`, name: 'vod', durationMs: 12000, width: 1080, height: 1920, fps: 30, hasAudio: true } };
@@ -58,6 +61,20 @@ const scenarios: [string, (tl: Timeline) => void][] = [
     tl.layers = [{ id: 'o', name: 'Lain', source: 'media', mediaId: 'm', inMs: 6000, startMs: 2000, endMs: 5000, crop: { l: 0.1, t: 0.1, r: 0.1, b: 0.5 }, box: { x: 0.5, y: 0.5, w: 0.6, h: 0.3 }, opacity: 1, volume: 0.8 }];
   }],
   ['kualitas 40%', () => undefined],
+  ['kanvas 16:9 FHD (landscape) dengan subtitle, teks, watermark', (tl) => {
+    tl.width = 1920; tl.height = 1080;
+    tl.clips[0].fit = 'fit';
+    tl.texts = [{ id: 't', startMs: 0, endMs: 3000, text: 'LANDSCAPE', x: 0.5, y: 0.2, style: { ...DEFAULT_TEXT, font } }];
+    tl.captions.lines = [{ id: 'l', startMs: 300, endMs: 2000, words: [{ text: 'halo', startMs: 300, endMs: 800 }, { text: 'semua', startMs: 800, endMs: 2000 }] }];
+    tl.watermark = { file: `${dir}/meme.png`, aspect: 400 / 300, corner: 'br', scale: 0.2, opacity: 0.8 };
+  }],
+  ['kanvas 9:16 2K (1440x2560)', (tl) => { tl.width = 1440; tl.height = 2560; tl.texts = [{ id: 't', startMs: 0, endMs: 2000, text: '2K', x: 0.5, y: 0.3, style: { ...DEFAULT_TEXT, font } }]; }],
+  ['kanvas 1:1 dan 4:5', (tl) => { tl.width = 1080; tl.height = 1350; tl.layers = [{ id: 'g', name: 'G', source: 'main', inMs: 0, startMs: 0, endMs: 99999, crop: { l: 0, t: 0, r: 0, b: 0.5 }, box: { x: 0.5, y: 0.5, w: 1, h: 0.4 }, opacity: 1, volume: 0 }]; }],
+  ['warna: look Cinematic + sharpness + vignette', (tl) => { tl.clips[0].grade = { ...gradeOf({ contrast: 0.2, saturation: -0.12, fade: 0.15, temperature: 0.08, highlights: -0.15, vignette: 0.35, sharpen: 0.4 }) }; }],
+  ['warna: B&W di layer video lain', (tl) => {
+    tl.layers = [{ id: 'o', name: 'O', source: 'media', mediaId: 'm', inMs: 2000, startMs: 1000, endMs: 4000, crop: { l: 0, t: 0.5, r: 0, b: 0 }, box: { x: 0.5, y: 0.75, w: 1, h: 0.5 }, opacity: 1, volume: 0, grade: gradeOf({ saturation: -1, contrast: 0.25, vignette: 0.3 }) }];
+  }],
+  ['warna: LUT .cube 60% + exposure', (tl) => { tl.clips[1].grade = gradeOf({ exposure: 0.4, lut: `${dir}/test.cube`, lutAmount: 0.6 }); }],
   ['fade suara di potongan, efek, musik, layer', (tl) => {
     tl.clips[0].fadeInMs = 500; tl.clips[1].fadeOutMs = 900;
     tl.sounds = [{ id: 's', file: `${dir}/sfx.ogg`, name: 's', startMs: 1000, lengthMs: 1200, sourceMs: 1200, volume: 1, fadeInMs: 300, fadeOutMs: 600 }];
@@ -101,7 +118,16 @@ for (const [name, setup] of scenarios) {
   let assFile: string | undefined;
   if (tl.texts.length || tl.captions.lines.length) { assFile = `${dir}/subs.ass`; writeFileSync(assFile, buildAss(tl)); }
   const q = name.startsWith('kualitas') ? 0.4 : 1;
-  const args = renderArgs({ tl, media, encoder: 'libx264', bitrateK: Math.round(8000 * q), quality: q, assFile, fontsDir, outPath: `${dir}/out.mp4` });
+  // like the app: one baked LUT per graded clip/layer
+  const gradeLuts: Record<string, string> = {};
+  for (const it of [...tl.clips, ...(tl.layers ?? [])] as { id: string; grade?: Grade }[]) {
+    if (!it.grade || !hasColour(gradeOf(it.grade))) continue;
+    const g = gradeOf(it.grade);
+    const user = g.lut ? parseCube(readFileSync(g.lut, 'utf8')) : null;
+    gradeLuts[it.id] = `${dir}/grade-${it.id}.cube`;
+    writeFileSync(gradeLuts[it.id], bakeCube(g, user));
+  }
+  const args = renderArgs({ tl, media, encoder: 'libx264', bitrateK: Math.round(8000 * q), quality: q, assFile, fontsDir, outPath: `${dir}/out.mp4`, gradeLuts });
   const r = run(args);
   if (r.status === 0) { console.log(`OK    ${name}`); continue; }
   failed++;

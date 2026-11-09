@@ -9,6 +9,7 @@ import {
   type CaptionLine, type Range, type Timeline, type Word,
 } from './render';
 import { dataDir, projectDir, uid, type MediaEntry, type ModelSize, type Project } from './store';
+import { bakeCube, gradeOf, hasColour, parseCube, type Cube, type Grade } from './grade';
 
 type ProgressCb = (outMs: number, pct: number) => void;
 const progressCbs = new Map<string, ProgressCb>();
@@ -396,6 +397,32 @@ export interface ExportJob {
   encoder: Encoder;
   build: (enc: Encoder) => string[];
   assFile?: string;
+  extraFiles?: string[];
+}
+
+const cubeCache = new Map<string, Cube>();
+/** Reads (once) a user's .cube file. */
+export async function loadCube(path: string): Promise<Cube> {
+  let c = cubeCache.get(path);
+  if (!c) { c = parseCube(await invoke<string>('read_text', { path })); cubeCache.set(path, c); }
+  return c;
+}
+
+/** Writes one baked LUT per graded clip/layer for the export. */
+async function bakeGrades(tl: Timeline, dir: string, jobId: string): Promise<Record<string, string>> {
+  const out: Record<string, string> = {};
+  const items: { id: string; grade?: Grade }[] = [...tl.clips, ...(tl.layers ?? [])];
+  for (const it of items) {
+    if (!it.grade) continue;
+    const g = gradeOf(it.grade);
+    if (!hasColour(g)) continue;
+    let user: Cube | null = null;
+    if (g.lut) user = await loadCube(g.lut).catch(() => null);
+    const file = join(dir, `export-${jobId}-${it.id.slice(0, 8)}.cube`);
+    await invoke('write_text', { path: file, content: bakeCube(g, user) });
+    out[it.id] = file;
+  }
+  return out;
 }
 
 export const queue: ExportJob[] = [];
@@ -428,10 +455,11 @@ export async function enqueueExport(p: Project, opts: { outDir: string; encoder:
   const outPath = await uniquePath(opts.outDir, safeName(p.name));
   const media = Object.fromEntries(p.media.map((m) => [m.id, m]));
   const quality = opts.quality ?? 0.75;
-  const build = (encoder: Encoder) => renderArgs({ tl, media, encoder, bitrateK: qualityBitrate(tl.fps, quality), quality, assFile, fontsDir: FONTS_DIR, outPath });
+  const gradeLuts = await bakeGrades(tl, await projectDir(p.id), id);
+  const build = (encoder: Encoder) => renderArgs({ tl, media, encoder, bitrateK: qualityBitrate(tl.fps, quality, tl.width * tl.height), quality, assFile, fontsDir: FONTS_DIR, outPath, gradeLuts });
   const job: ExportJob = {
     id, projectId: p.id, label: p.name, outPath, totalMs: timelineDuration(tl), progress: 0, status: 'queued', error: '',
-    args: build(opts.encoder), encoder: opts.encoder, build, assFile,
+    args: build(opts.encoder), encoder: opts.encoder, build, assFile, extraFiles: Object.values(gradeLuts),
   };
   queue.push(job);
   onChange();
@@ -465,6 +493,7 @@ async function pump() {
     }
   }
   if (job.status !== 'queued' && job.assFile) await invoke('remove_path', { path: job.assFile }).catch(() => undefined);
+  if (job.status !== 'queued') for (const f of job.extraFiles ?? []) await invoke('remove_path', { path: f }).catch(() => undefined);
   running = false;
   onChange();
   void pump();

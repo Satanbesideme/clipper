@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
   push:
     branches: [main]
-    paths: ['src/render.ts', 'src/ffmpeg.ts', 'tests/**', '.github/workflows/test-export.yml']
+    paths: ['src/render.ts', 'src/ffmpeg.ts', 'src/grade.ts', 'tests/**', '.github/workflows/test-export.yml']
 
 jobs:
   export:

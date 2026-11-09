@@ -43,13 +43,38 @@ Saat mendengarkan suara soundboard atau musik, bar kecil muncul di bawah panel k
 ## Volume suara
 Suara soundboard dan video meme dipasang dengan volume 25% supaya tidak menutupi suaramu. Ubah bawaannya lewat **Volume saat ditempel** di panel Suara / Video meme; tiap suara yang sudah dipasang tetap bisa dibesarkan di panel kanan.
 
+## Kanvas
+Tombol format di bawah preview (mis. `9:16 · FHD · 30`) atau **Ctrl+Alt+C**: pilih bentuk **9:16** (Shorts/TikTok), **16:9** (YouTube), **1:1**, **4:5**, resolusi **FHD / 2K / 4K**, dan 30/60 fps. Teks, subtitle, meme, dan layer ikut menyesuaikan.
+
+## Warna (color grading)
+Tab **Warna** (atau **Ctrl+U**). Klik satu potongan/layer untuk mengatur sendiri; kalau tidak ada yang dipilih, semua potongan video utama ikut berubah.
+- **Look**: Natural, Vivid, Cinematic, Gaming Pop, Warm, Cool, Moody, Film, B&W, dengan pratinjau dari frame yang sedang tampil.
+- **Cahaya**: Exposure, Kontras, Highlight, Shadow, Fade. **Warna**: Suhu, Tint, Saturasi, Vibrance. **Detail**: Sharpness, Vignette.
+- **LUT .cube** (dari Premiere, Resolve, paket LUT apa pun) dengan slider kekuatan. LUT yang pernah dipakai tersimpan.
+- **Bandingkan**: tahan tombolnya (atau tahan **\\**) untuk melihat tanpa warna. Klik kanan video → **Salin warna / Tempel warna**.
+
+## Shortcut ala Photoshop
+| Tombol | Fungsi |
+| --- | --- |
+| Ctrl+T | Transform (Enter selesai, Esc batal) |
+| C | Crop |
+| Ctrl+U | Warna |
+| Ctrl+J | Duplikat |
+| Ctrl+[ / Ctrl+] | Layer ke belakang / depan (Shift: paling) |
+| Ctrl+S | Simpan + salinan versi |
+| Ctrl+E | Ekspor |
+| Ctrl+Alt+C | Ukuran kanvas |
+| Ctrl+0 | Muat seluruh timeline |
+
+Klik kanan di timeline **atau langsung di preview** membuka menu: Transform, Crop, Warna, Salin, Tempel, Duplikat, fade suara, urutan layer, split, hapus.
+
 ## Salin & tempel
 Pilih item di timeline lalu **Ctrl+C**, **Ctrl+V** (tempel di playhead), **Ctrl+Shift+V** (tempel di waktu aslinya), **Ctrl+X** (potong), atau **Ctrl+D** (duplikat). Klik kanan di timeline membuka menu yang sama, plus Transform, Crop, fade suara, split, dan hapus.
 
 Potongan video utama yang disalin ditempel sebagai **layer baru di waktu yang sama**, jadi video yang sama bisa tampil di dua tempat (misalnya gameplay di atas, facecam di bawah). Atur lewat tab **Transform** dan **Crop**.
 
 ## Transform & Crop
-Klik video, layer, meme, atau teks di timeline, lalu buka tab **Transform** (posisi, ukuran, opacity, posisi cepat) atau **Crop** (bentuk 9:16/1:1/16:9, ambil bagian atas/bawah/kiri/kanan, potong per sisi, atau tarik kotak kuning di preview). Video utama selalu mengisi layar; untuk meng-crop-nya, salin dulu jadi layer.
+Klik video, layer, meme, atau teks, lalu **Ctrl+T** atau tab **Transform** (posisi, ukuran, opacity, posisi cepat). Mode **Crop** (tombol **C**) ada di tab yang sama: (bentuk 9:16/1:1/16:9, ambil bagian atas/bawah/kiri/kanan, potong per sisi, atau tarik kotak kuning di preview). Video utama selalu mengisi layar; untuk meng-crop-nya, salin dulu jadi layer.
 
 ## Fade suara
 Pilih potongan video, suara, musik, atau layer video, lalu tarik **titik putih** di pojok atas kotaknya di timeline, atau atur slider **Fade suara** di panel kanan. Klik kanan juga punya Fade in/out 0,5 detik.

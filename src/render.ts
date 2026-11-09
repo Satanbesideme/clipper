@@ -1,5 +1,6 @@
 // Timeline model + FFmpeg export builder. Pure functions, tested with real ffmpeg.
 import { encoderArgs, type Encoder } from './ffmpeg';
+import { gradeOf, hasColour, isNeutral, spatialFilters, type Grade } from './grade';
 
 export interface Media {
   id: string;
@@ -31,6 +32,7 @@ export interface VideoClip {
   trans?: ClipTrans;  // transition from the previous clip into this one
   fadeInMs?: number;  // audio fade at the start / end of this piece
   fadeOutMs?: number;
+  grade?: Grade;      // colour grading
 }
 
 export type ClipTrans = 'none' | 'punch' | 'shake' | 'flash' | 'blur' | 'fade';
@@ -251,8 +253,8 @@ export function transState(im: Pick<ImageItem, 'transIn' | 'transOut' | 'startMs
 const easeOutBack = (x: number) => 1 + 2.70158 * Math.pow(x - 1, 3) + 1.70158 * Math.pow(x - 1, 2);
 
 export interface Timeline {
-  width: number;   // 1080
-  height: number;  // 1920
+  width: number;   // canvas size: 1080x1920 for shorts, also 16:9, 1:1, 4:5 up to 4K
+  height: number;
   fps: 30 | 60;
   clips: VideoClip[];
   texts: TextItem[];
@@ -290,7 +292,14 @@ export interface VideoLayer {
   hidden?: boolean;
   fadeInMs?: number;  // media layers: audio fade
   fadeOutMs?: number;
+  grade?: Grade;
 }
+
+/**
+ * Pixel unit of a canvas: sizes written for 1080 px (font sizes, outlines, margins) are multiplied by this,
+ * so a 4K or landscape canvas keeps the same proportions as 1080x1920.
+ */
+export const unitOf = (tl: Pick<Timeline, 'width' | 'height'>) => Math.min(tl.width, tl.height) / 1080;
 
 export const MUSIC_FADE_IN = 600, MUSIC_FADE_OUT = 1200;
 /** Audio fade lengths of an item, never longer than half of it together. */
@@ -391,12 +400,13 @@ export function assEscape(s: string): string {
 }
 
 function overrides(st: TextStyle, x: number, y: number, W: number, H: number, scale = 1): string {
+  const u = Math.min(W, H) / 1080;
   const tags = [
     `\\an5`, `\\pos(${Math.round(x * W)},${Math.round(y * H)})`,
-    `\\fn${st.font.replace(/[\\{}]/g, '')}`, `\\fs${Math.round(st.size * scale)}`, `\\b${st.bold ? 1 : 0}`,
+    `\\fn${st.font.replace(/[\\{}]/g, '')}`, `\\fs${Math.round(st.size * scale * u)}`, `\\b${st.bold ? 1 : 0}`,
     `\\c${assColor(st.color)}&`, `\\3c&H000000&`, `\\shad0`,
     // with the Boxed style (BorderStyle 3) the border becomes a padded box
-    st.box ? `\\3a&H60&\\bord18` : `\\3a&H00&\\bord${st.outline}`,
+    st.box ? `\\3a&H60&\\bord${Math.round(18 * u)}` : `\\3a&H00&\\bord${Math.round(st.outline * u * 10) / 10}`,
   ];
   return `{${tags.join('')}}`;
 }
@@ -437,7 +447,7 @@ export function buildAss(tl: Timeline, fontScale: (font: string, bold: boolean) 
         evs.push({ a, b: i + 1 < ws.length ? Math.max(a, ws[i + 1].startMs) : line.endMs, active: i });
       });
     }
-    const px = 540 * (W / 1080), py = Math.round(cap.y * H);
+    const px = W / 2, py = Math.round(cap.y * H), U = Math.min(W, H) / 1080;
     evs.filter((e) => e.b > e.a).forEach((e, k, all) => {
       const first = k === 0, last = k === all.length - 1;
       // a word's own size; while a line pops in, every size has to carry the pop too, else that word would not pop
@@ -462,7 +472,7 @@ export function buildAss(tl: Timeline, fontScale: (font: string, bold: boolean) 
       if (first) {
         if (anim === 'pop') extra.push('\\fscx30\\fscy30\\t(0,140,\\fscx112\\fscy112)\\t(140,240,\\fscx100\\fscy100)');
         if (anim === 'fade') extra.push('\\fad(250,0)');
-        if (anim === 'rise') { pre = pre.replace(`\\pos(${Math.round(px)},${py})`, `\\move(${Math.round(px)},${py + 60},${Math.round(px)},${py},0,220)`); extra.push('\\fad(120,0)'); }
+        if (anim === 'rise') { pre = pre.replace(`\\pos(${Math.round(px)},${py})`, `\\move(${Math.round(px)},${py + Math.round(60 * U)},${Math.round(px)},${py},0,220)`); extra.push('\\fad(120,0)'); }
         if (anim === 'shake') extra.push('\\t(0,70,\\frz7)\\t(70,140,\\frz-6)\\t(140,210,\\frz4)\\t(210,280,\\frz0)');
       }
       if (last && (anim === 'pop' || anim === 'rise')) extra.push('\\fad(0,150)');
@@ -486,7 +496,7 @@ export function buildAss(tl: Timeline, fontScale: (font: string, bold: boolean) 
       case 'pop': extra.push('\\fscx30\\fscy30\\t(0,140,\\fscx112\\fscy112)\\t(140,240,\\fscx100\\fscy100)\\fad(0,150)'); break;
       case 'fade': extra.push('\\fad(250,200)'); break;
       case 'rise':
-        pre = pre.replace(`\\pos(${px},${py})`, `\\move(${px},${py + 90},${px},${py},0,280)`);
+        pre = pre.replace(`\\pos(${px},${py})`, `\\move(${px},${py + Math.round(90 * Math.min(W, H) / 1080)},${px},${py},0,280)`);
         extra.push('\\fad(120,150)');
         break;
       case 'shake': extra.push('\\t(0,70,\\frz7)\\t(70,140,\\frz-6)\\t(140,210,\\frz4)\\t(210,280,\\frz0)'); break;
@@ -517,6 +527,14 @@ export interface RenderSpec {
   assFile?: string;   // written by the caller from buildAss()
   fontsDir?: string;  // e.g. C:/Windows/Fonts
   outPath: string;
+  gradeLuts?: Record<string, string>;  // clip/layer id -> baked .cube file (written by the caller from bakeCube)
+}
+
+/** Colour (baked LUT) for a clip or layer, run on its own pixels. */
+function lutFilter(spec: RenderSpec, id: string, g?: Grade): string {
+  const file = spec.gradeLuts?.[id];
+  if (!file || !g || !hasColour(gradeOf(g))) return '';
+  return `format=gbrp,lut3d=file='${filterPath(file)}':interp=tetrahedral`;
 }
 
 /** Escape for a filter option value inside single quotes. Only app-controlled paths go here. */
@@ -582,7 +600,9 @@ export function renderArgs(spec: RenderSpec): string[] {
     if (tr === 'flash') chain += `,fade=t=in:st=0:d=0.18:color=white`;
     if (tr === 'fade') chain += `,fade=t=in:st=0:d=0.25`;
     if (next === 'fade' && durS > 0.3) chain += `,fade=t=out:st=${(durS - 0.25).toFixed(3)}:d=0.25`;
-    f.push(`[${i}:v]setpts=PTS-STARTPTS${sp},${chain},format=yuv420p[v${i}]`);
+    const lut = lutFilter(spec, c.id, c.grade);
+    const sp2 = isNeutral(c.grade) ? [] : spatialFilters(gradeOf(c.grade));
+    f.push(`[${i}:v]setpts=PTS-STARTPTS${sp}${lut ? `,${lut}` : ''},${chain}${sp2.length ? `,${sp2.join(',')}` : ''},format=yuv420p[v${i}]`);
     const dur = (clipDuration(c) / 1000).toFixed(3);
     if (m.hasAudio) {
       const cf = fadesOf(c, clipDuration(c));
@@ -625,7 +645,9 @@ export function renderArgs(spec: RenderSpec): string[] {
     const x = Math.round(l.box.x * W - bw / 2), y = Math.round(l.box.y * H - bh / 2);
     const fw = num(1 - l.crop.l - l.crop.r), fh = num(1 - l.crop.t - l.crop.b);
     const crop = `crop=w=trunc(iw*${fw}/2)*2:h=trunc(ih*${fh}/2)*2:x=trunc(iw*${num(l.crop.l)}):y=trunc(ih*${num(l.crop.t)})`;
-    const look = `${crop},scale=${bw}:${bh}:flags=lanczos,setsar=1,format=rgba${l.opacity < 0.999 ? `,colorchannelmixer=aa=${num(l.opacity)}` : ''}`;
+    const llut = lutFilter(spec, l.id, l.grade);
+    const lsp = isNeutral(l.grade) ? [] : spatialFilters(gradeOf(l.grade));
+    const look = `${crop}${llut ? `,${llut}` : ''},scale=${bw}:${bh}:flags=lanczos,setsar=1${lsp.length ? `,${lsp.join(',')}` : ''},format=rgba${l.opacity < 0.999 ? `,colorchannelmixer=aa=${num(l.opacity)}` : ''}`;
     let src: string;
     if (l.source === 'main') {
       src = `[mc${copy++}]`;
@@ -685,10 +707,10 @@ export function renderArgs(spec: RenderSpec): string[] {
   const wm = tl.watermark;
   if (wm) {
     args.push('-loop', '1', '-t', (total / 1000).toFixed(3), '-framerate', String(F), '-i', wm.file);
-    const w = Math.max(2, Math.round((W * wm.scale) / 2) * 2);
-    const m = 40;
+    const w = Math.max(2, Math.round((Math.min(W, H) * wm.scale) / 2) * 2);
+    const u = Math.min(W, H) / 1080, m = Math.round(40 * u);
     const x = wm.corner.endsWith('l') ? `${m}` : `W-w-${m}`;
-    const y = wm.corner.startsWith('t') ? `${m + 60}` : `H-h-${m + 220}`;
+    const y = wm.corner.startsWith('t') ? `${m + Math.round(60 * u)}` : `H-h-${m + Math.round((H > W ? 220 : 40) * u)}`;
     f.push(`[${input}:v]scale=${w}:-2:flags=lanczos,format=rgba,colorchannelmixer=aa=${Number(wm.opacity.toFixed(3))}[wm]`);
     f.push(`[${v}][wm]overlay=x=${x}:y=${y}:eof_action=pass:format=auto[wmo]`);
     v = 'wmo';

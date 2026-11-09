@@ -7,10 +7,12 @@ export const ENCODER_ORDER: Encoder[] = ['h264_nvenc', 'h264_qsv', 'h264_amf', '
  * Quality 0.4..1 (40-100 %). Lower = smaller file: the bitrate cap and the constant-quality target
  * both move. For shorts ~70 % looks clean on a phone at a fraction of the size.
  */
-export function qualityBitrate(fps: number, quality: number): number {
+export function qualityBitrate(fps: number, quality: number, pixels = 1080 * 1920): number {
   const base = fps >= 50 ? 16000 : 12000;
   const q = Math.min(1, Math.max(0.4, quality));
-  return Math.round(base * Math.pow(q, 1.6));
+  // bigger canvases need more bits, but less than in proportion (4K ~ 2.8x the bits of 1080p)
+  const size = Math.pow(Math.max(0.3, pixels / (1080 * 1920)), 0.75);
+  return Math.round(base * size * Math.pow(q, 1.6));
 }
 
 export function encoderArgs(enc: Encoder, bitrateK: number, quality = 1): string[] {
