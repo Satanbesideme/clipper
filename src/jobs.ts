@@ -441,7 +441,7 @@ async function uniquePath(dir: string, base: string): Promise<string> {
 
 export async function enqueueExport(p: Project, opts: { outDir: string; encoder: Encoder; fontScale?: Record<string, number>; quality?: number }) {
   const tl: Timeline = structuredClone(p.timeline);
-  if (!tl.clips.length) throw new Error('Timeline masih kosong. Tambahkan video dulu.');
+  if (!timelineDuration(tl)) throw new Error('Timeline masih kosong. Tambahkan video, layer, teks, atau musik dulu.');
   tl.texts = tl.texts.map((t) => ({ ...t, text: stripEmoji(t.text) })).filter((t) => t.text);
   tl.captions.lines = tl.captions.lines.map((l) => ({ ...l, words: l.words.map((w) => ({ ...w, text: stripEmoji(w.text) })).filter((w) => w.text) })).filter((l) => l.words.length);
   await invoke('ensure_dir', { path: opts.outDir });

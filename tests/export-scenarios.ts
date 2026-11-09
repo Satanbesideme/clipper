@@ -74,6 +74,12 @@ const scenarios: [string, (tl: Timeline) => void][] = [
     tl.captions.lines = [{ id: 'l', startMs: 300, endMs: 2000, words: [{ text: 'halo', startMs: 300, endMs: 800 }, { text: 'semua', startMs: 800, endMs: 2000 }] }];
     tl.watermark = { file: `${dir}/meme.png`, aspect: 400 / 300, corner: 'br', scale: 0.2, opacity: 0.8 };
   }],
+  ['kanvas kosong tanpa video utama (layer, teks, musik)', (tl) => {
+    tl.clips = []; tl.background = '#1a1b1b'; tl.width = 1920; tl.height = 1080;
+    tl.layers = [{ id: 'o', name: 'VOD', source: 'media', mediaId: 'm', inMs: 1000, startMs: 500, endMs: 5500, crop: { l: 0, t: 0, r: 0, b: 0 }, box: { x: 0.5, y: 0.5, w: 0.3, h: 0.95 }, opacity: 1, volume: 0.8 }];
+    tl.texts = [{ id: 't', startMs: 0, endMs: 6500, text: 'KANVAS KOSONG', x: 0.5, y: 0.15, style: { ...DEFAULT_TEXT, font } }];
+    tl.music = [{ id: 'mu', file: `${dir}/music.ogg`, name: 'm', startMs: 0, inMs: 0, lengthMs: 6000, sourceMs: 30000, volume: 0.4, duck: 'off' }];
+  }],
   ['kanvas 9:16 2K (1440x2560)', (tl) => { tl.width = 1440; tl.height = 2560; tl.texts = [{ id: 't', startMs: 0, endMs: 2000, text: '2K', x: 0.5, y: 0.3, style: { ...DEFAULT_TEXT, font } }]; }],
   ['kanvas 1:1 dan 4:5', (tl) => { tl.width = 1080; tl.height = 1350; tl.layers = [{ id: 'g', name: 'G', source: 'main', inMs: 0, startMs: 0, endMs: 99999, crop: { l: 0, t: 0, r: 0, b: 0.5 }, box: { x: 0.5, y: 0.5, w: 1, h: 0.4 }, opacity: 1, volume: 0 }]; }],
   ['warna: look Cinematic + sharpness + vignette', (tl) => { tl.clips[0].grade = { ...gradeOf({ contrast: 0.2, saturation: -0.12, fade: 0.15, temperature: 0.08, highlights: -0.15, vignette: 0.35, sharpen: 0.4 }) }; }],

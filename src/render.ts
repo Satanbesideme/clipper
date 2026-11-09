@@ -266,6 +266,7 @@ export interface Timeline {
   music?: MusicItem[];
   layers?: VideoLayer[];   // bottom to top, above the main track
   hideMain?: boolean;      // show only the layers (black behind them)
+  background?: string;     // blank canvas: colour behind everything (#rrggbb); also fills 'fit' bars
 }
 
 /** Part of a frame kept by a crop, as shares cut from each side (0..1). */
@@ -351,7 +352,26 @@ export function clipStarts(clips: VideoClip[]): number[] {
   return out;
 }
 
-export const timelineDuration = (tl: Pick<Timeline, 'clips'>) => tl.clips.reduce((s, c) => s + clipDuration(c), 0);
+/**
+ * Length of the video. With a main track it is the main track; a blank canvas (no main clips) is as long as
+ * whatever has been put on it (layers, text, memes, captions, sounds, music).
+ */
+export function timelineDuration(tl: Pick<Timeline, 'clips'> & Partial<Timeline>): number {
+  if (tl.clips.length) return tl.clips.reduce((s, c) => s + clipDuration(c), 0);
+  return contentEnd(tl);
+}
+const FAR = 1e8;   // "until the end" markers (main-track layers) do not count as content
+export function contentEnd(tl: Partial<Timeline>): number {
+  let end = 0;
+  const take = (a: number, b: number) => { if (b < FAR && b > end && b > a) end = b; };
+  for (const x of tl.texts ?? []) take(x.startMs, x.endMs);
+  for (const x of tl.images ?? []) take(x.startMs, x.endMs);
+  for (const x of tl.layers ?? []) if (x.source === 'media') take(x.startMs, x.endMs);
+  for (const x of tl.sounds ?? []) take(x.startMs, x.startMs + x.lengthMs);
+  for (const x of tl.music ?? []) take(x.startMs, x.startMs + x.lengthMs);
+  for (const x of tl.captions?.lines ?? []) take(x.startMs, x.endMs);
+  return Math.round(end);
+}
 
 /** Which clip plays at timeline time t, and the matching source time. */
 export function locate(clips: VideoClip[], t: number): { index: number; sourceMs: number; startMs: number } | null {
@@ -556,7 +576,8 @@ export function atempoChain(speed: number): string[] {
 export function renderArgs(spec: RenderSpec): string[] {
   const { tl } = spec;
   const W = tl.width, H = tl.height, F = tl.fps;
-  if (!tl.clips.length) throw new Error('Timeline masih kosong.');
+  if (!timelineDuration(tl)) throw new Error('Timeline masih kosong.');
+  const bg = /^#[0-9a-f]{6}$/i.test(tl.background ?? '') ? `0x${tl.background!.slice(1)}` : 'black';
   const args = ['-hide_banner', '-y', '-nostats', '-progress', 'pipe:1'];
   const f: string[] = [];
   tl.clips.forEach((c, i) => {
@@ -567,14 +588,14 @@ export function renderArgs(spec: RenderSpec): string[] {
     let fit: string;
     if (z <= 1.001) {
       fit = c.fit === 'fit'
-        ? `scale=${W}:${H}:force_original_aspect_ratio=decrease:flags=lanczos,pad=${W}:${H}:(ow-iw)/2:(oh-ih)/2:black`
+        ? `scale=${W}:${H}:force_original_aspect_ratio=decrease:flags=lanczos,pad=${W}:${H}:(ow-iw)/2:(oh-ih)/2:${bg}`
         : `scale=${W}:${H}:force_original_aspect_ratio=increase:flags=lanczos,crop=${W}:${H}`;
     } else {
       // punch-in: scale up, pad if the picture is still smaller than the canvas, then crop around the chosen point
       const zw = Math.round((W * z) / 2) * 2, zh = Math.round((H * z) / 2) * 2;
       const zx = Number((c.zx ?? 0.5).toFixed(4)), zy = Number((c.zy ?? 0.5).toFixed(4));
       fit = `scale=${zw}:${zh}:force_original_aspect_ratio=${c.fit === 'fit' ? 'decrease' : 'increase'}:flags=lanczos,` +
-        `pad=w='max(iw,${W})':h='max(ih,${H})':x='(ow-iw)/2':y='(oh-ih)/2':color=black,` +
+        `pad=w='max(iw,${W})':h='max(ih,${H})':x='(ow-iw)/2':y='(oh-ih)/2':color=${bg},` +
         `crop=${W}:${H}:x='(iw-${W})*${zx}':y='(ih-${H})*${zy}'`;
     }
     const sp = c.speed === 1 ? '' : `,setpts=PTS/${Number(c.speed.toFixed(4))}`;
@@ -586,7 +607,7 @@ export function renderArgs(spec: RenderSpec): string[] {
     if (tr === 'punch' || tr === 'shake' || tr === 'blur') {
       // animated zoom on the fitted canvas (zoompan evaluates per frame; it = time since the clip started)
       const base = c.fit === 'fit'
-        ? `scale=${W}:${H}:force_original_aspect_ratio=decrease:flags=lanczos,pad=${W}:${H}:(ow-iw)/2:(oh-ih)/2:black`
+        ? `scale=${W}:${H}:force_original_aspect_ratio=decrease:flags=lanczos,pad=${W}:${H}:(ow-iw)/2:(oh-ih)/2:${bg}`
         : `scale=${W}:${H}:force_original_aspect_ratio=increase:flags=lanczos,crop=${W}:${H}`;
       let zExpr = `${z}`, sx = '0', sy = '0';
       if (tr === 'punch') zExpr = `${z}*(1+0.25*pow(1-min(1,it/0.28),3))`;
@@ -616,10 +637,16 @@ export function renderArgs(spec: RenderSpec): string[] {
       f.push(`anullsrc=r=48000:cl=stereo,atrim=0:${dur},aformat=sample_fmts=fltp:channel_layouts=stereo[a${i}]`);
     }
   });
-  f.push(`${tl.clips.map((_, i) => `[v${i}][a${i}]`).join('')}concat=n=${tl.clips.length}:v=1:a=1[cv][ca]`);
+  const total = timelineDuration(tl);
+  if (tl.clips.length) f.push(`${tl.clips.map((_, i) => `[v${i}][a${i}]`).join('')}concat=n=${tl.clips.length}:v=1:a=1[cv][ca]`);
+  else {
+    // blank canvas: a plain picture and silence as long as the content
+    const d = (total / 1000).toFixed(3);
+    f.push(`color=c=${bg}:s=${W}x${H}:r=${F}:d=${d},format=yuv420p[cv]`);
+    f.push(`anullsrc=r=48000:cl=stereo,atrim=0:${d},aformat=sample_fmts=fltp:channel_layouts=stereo[ca]`);
+  }
   let v = 'cv';
   let input = tl.clips.length;
-  const total = timelineDuration(tl);
   const even = (n: number) => Math.max(2, Math.round(n / 2) * 2);
   const num = (n: number) => Number(n.toFixed(5));
 
@@ -632,7 +659,7 @@ export function renderArgs(spec: RenderSpec): string[] {
     if (need === 0) f.push(`[cv]nullsink`);
     else f.push(`[cv]split=${need}${Array.from({ length: need }, (_, i) => `[mc${i}]`).join('')}`);
     if (tl.hideMain) {
-      f.push(`color=c=black:s=${W}x${H}:r=${F}:d=${(total / 1000).toFixed(3)},format=yuv420p[mbase]`);
+      f.push(`color=c=${bg}:s=${W}x${H}:r=${F}:d=${(total / 1000).toFixed(3)},format=yuv420p[mbase]`);
       v = 'mbase';
     } else {
       v = 'mc0';

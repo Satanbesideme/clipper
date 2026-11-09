@@ -192,7 +192,7 @@ function snapshot() {
 /** Call after changing the timeline. */
 function changed(opts: { inspector?: boolean; left?: boolean } = {}) {
   void saveProject(P!);
-  t = clamp(t, 0, Math.max(0, timelineDuration(tl()) - 1));
+  t = clamp(t, 0, playheadMax());
   drawTimeline();
   renderFrame();
   if (opts.inspector !== false) renderInspector();
@@ -272,6 +272,13 @@ async function dropped(paths: string[]) {
   }
 }
 
+/** A blank canvas has no main video; it is as long as what is placed on it. */
+const isBlank = () => !!P && !tl().clips.length && tl().background !== undefined;
+/** Can things be placed? (a main video, or a blank canvas) */
+const canPlace = () => !!P && (tl().clips.length > 0 || tl().background !== undefined);
+/** How far the playhead may go: the video's end, or on a blank canvas a minute past the content. */
+const playheadMax = () => (isBlank() ? timelineDuration(tl()) + 60_000 : Math.max(0, timelineDuration(tl()) - 1));
+
 // ================= new project: from a video, or a blank canvas =================
 const BG_COLORS: { name: string; hex: string }[] = [
   { name: 'Hitam', hex: '#000000' }, { name: 'Charcoal GALSURKU', hex: '#1a1b1b' }, { name: 'Putih', hex: '#ffffff' },
@@ -280,7 +287,7 @@ const BG_COLORS: { name: string; hex: string }[] = [
 function closeNewProject() { document.querySelector('.np-overlay')?.remove(); }
 function openNewProject(pickVideo: () => Promise<void>) {
   closeNewProject();
-  const st = { aspect: '9:16' as Aspect, short: 1080, fps: 30 as 30 | 60, dur: 15, bg: '#1a1b1b', name: 'Proyek baru' };
+  const st = { aspect: '9:16' as Aspect, short: 1080, fps: 30 as 30 | 60, bg: '#1a1b1b', name: 'Proyek baru' };
   const form = h('div', { class: 'np-form', hidden: true });
   const paint = () => {
     form.replaceChildren(
@@ -295,12 +302,10 @@ function openNewProject(pickVideo: () => Promise<void>) {
         h('div', { class: 'np-col' }, h('div', { class: 'label' }, 'Frame rate'),
           h('div', { class: 'seg' }, ...([30, 60] as const).map((f) => h('button', { class: st.fps === f ? 'on' : '', onclick: () => { st.fps = f; paint(); } }, `${f} fps`)))),
       ),
-      h('div', { class: 'label' }, 'Durasi'),
-      h('div', { class: 'seg' }, ...[10, 15, 30, 60, 180].map((d) => h('button', { class: st.dur === d ? 'on' : '', onclick: () => { st.dur = d; paint(); } }, d < 60 ? `${d} dtk` : `${d / 60} mnt`))),
       h('div', { class: 'label' }, 'Latar'),
       h('div', { class: 'swatches' }, ...BG_COLORS.map((c) => h('button', { class: `swatch${st.bg === c.hex ? ' on' : ''}`, style: `background:${c.hex}`, title: c.name, onclick: () => { st.bg = c.hex; paint(); } })),
         h('input', { type: 'color', class: 'swatch-pick', value: st.bg, title: 'Warna lain', onchange: (e) => { st.bg = (e.target as HTMLInputElement).value; paint(); } })),
-      h('div', { class: 'muted small mono' }, (() => { const d = canvasDims(st.aspect, st.short); return `${d.w} × ${d.h} px · ${st.fps} fps · ${st.dur} dtk`; })()),
+      h('div', { class: 'muted small mono' }, (() => { const d = canvasDims(st.aspect, st.short); return `${d.w} × ${d.h} px · ${st.fps} fps · durasi mengikuti isi`; })()),
       h('button', { class: 'primary wide with-ico', onclick: () => void createBlankProject(st) }, icon('plus', 16), 'Buat kanvas'),
     );
   };
@@ -317,7 +322,7 @@ function openNewProject(pickVideo: () => Promise<void>) {
         h('button', { class: 'np-option', onclick: (e) => { (e.currentTarget as HTMLElement).classList.add('on'); form.hidden = false; overlay.classList.add('expanded'); } },
           h('span', { class: 'np-ico' }, icon('template', 26)),
           h('span', { class: 'np-name' }, 'Kanvas kosong'),
-          h('span', { class: 'np-hint' }, 'Mulai dari latar polos: atur bentuk, resolusi, dan durasi, lalu isi dengan layer, teks, meme, dan musik.'),
+          h('span', { class: 'np-hint' }, 'Mulai dari latar polos: atur bentuk dan resolusi, lalu isi dengan video, layer, teks, meme, dan musik. Panjangnya mengikuti isinya, tanpa batas.'),
         ),
       ),
       form,
@@ -331,37 +336,17 @@ function canvasDims(aspect: Aspect, short: number) {
   const [aw, ah] = ASPECTS.find((x) => x.id === aspect)!.wh;
   return aw <= ah ? { w: short, h: even((short * ah) / aw) } : { w: even((short * aw) / ah), h: short };
 }
-/** A blank canvas is a project whose main track is one solid-colour clip (so play, cut and export all work). */
-async function createBlankProject(st: { aspect: Aspect; short: number; fps: 30 | 60; dur: number; bg: string; name: string }) {
+/** A blank canvas: chosen size and background, no main video. Its length follows what is put on it. */
+async function createBlankProject(st: { aspect: Aspect; short: number; fps: 30 | 60; bg: string; name: string }) {
   const { w, h: hh } = canvasDims(st.aspect, st.short);
   const p = newProject(st.name.trim() || 'Kanvas kosong');
-  p.timeline.width = w; p.timeline.height = hh; p.timeline.fps = st.fps;
+  p.timeline.width = w; p.timeline.height = hh; p.timeline.fps = st.fps; p.timeline.background = st.bg;
   if (settings.watermark) p.timeline.watermark = { ...settings.watermark };
   closeNewProject();
-  setBusy('Membuat kanvas…');
-  try {
-    await saveProject(p, true);
-    const dir = await projectDir(p.id);
-    await invoke('ensure_dir', { path: dir });
-    const file = join(dir, `kanvas-${st.bg.slice(1)}-${w}x${hh}-${st.fps}-${st.dur}s.mp4`);
-    await runTool('ffmpeg', ['-hide_banner', '-y', '-nostats', '-progress', 'pipe:1',
-      '-f', 'lavfi', '-i', `color=c=0x${st.bg.slice(1)}:s=${w}x${hh}:r=${st.fps}:d=${st.dur}`,
-      '-f', 'lavfi', '-i', 'anullsrc=r=48000:cl=stereo', '-t', String(st.dur),
-      '-c:v', 'libx264', '-preset', 'ultrafast', '-tune', 'stillimage', '-crf', '30', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '64k', '-shortest', file]);
-    await openProject(p.id, [file]);
-    const m = P?.media[0];
-    if (!m) return;   // importFiles already said what went wrong
-    m.name = 'Kanvas kosong';
-    tl().fps = st.fps;
-    await saveProject(P!);
-    switchTab('media');
-    renderLeft();
-    toast('Kanvas kosong siap. Tambahkan video sebagai layer, teks, meme, atau musik.');
-  } catch (e) {
-    toast((e as Error).message, 'error');
-  } finally {
-    setBusy('');
-  }
+  await saveProject(p, true);
+  await openProject(p.id);
+  switchTab('media');
+  toast('Kanvas kosong siap. Tambah video (jadi video utama) atau layer, teks, meme, musik. Panjang video mengikuti isinya.');
 }
 
 async function renderHome() {
@@ -498,7 +483,7 @@ async function importFiles(paths: string[], addToTimeline: boolean) {
       if (addToTimeline) {
         snapshot();
         tl().clips.push({ id: uid(), mediaId: m.id, inMs: 0, outMs: m.durationMs, speed: 1, volume: 1, fit: Math.abs(Math.log((m.width / m.height) / (tl().width / tl().height))) < 0.35 ? 'fill' : 'fit' });
-        if (tl().clips.length === 1) tl().fps = m.fps >= 50 ? 60 : 30;
+        if (tl().clips.length === 1 && tl().background === undefined) tl().fps = m.fps >= 50 ? 60 : 30;
       }
       await saveProject(p);
       renderLeft();
@@ -1067,8 +1052,8 @@ function addText(style: TextStyle) {
   if (!P) return;
   snapshot();
   const total = Math.max(3000, timelineDuration(tl()));
-  const start = Math.round(clamp(t, 0, total - 500));
-  const item: TextItem = { id: uid(), startMs: start, endMs: Math.min(total, start + 3000), text: 'Ketik teks', x: 0.5, y: 0.2, style: { ...style }, anim: 'pop' };
+  const start = isBlank() ? Math.round(t) : Math.round(clamp(t, 0, total - 500));
+  const item: TextItem = { id: uid(), startMs: start, endMs: isBlank() ? start + 3000 : Math.min(total, start + 3000), text: 'Ketik teks', x: 0.5, y: 0.2, style: { ...style }, anim: 'pop' };
   tl().texts.push(item);
   sel = { kind: 'text', id: item.id };
   changed();
@@ -1815,7 +1800,8 @@ function syncVideo() {
 
 function seek(ms: number) {
   if (!P) return;
-  t = clamp(ms, 0, Math.max(0, timelineDuration(tl()) - 1));
+  t = clamp(ms, 0, playheadMax());
+  if (playing) clock = { at: performance.now(), t };
   setTimeout(markActiveLine, 0);
   syncVideo();
   syncLayers();
@@ -1827,11 +1813,13 @@ function seek(ms: number) {
 
 function togglePlay() { if (playing) pause(); else play(); }
 
+let clock: { at: number; t: number } | null = null;   // playback clock when no main video drives time
 function play() {
-  if (!P || !tl().clips.length) return;
+  if (!P || !timelineDuration(tl())) return;
   stopAudition();
   if (t >= timelineDuration(tl()) - 50) t = 0;
   playing = true;
+  clock = { at: performance.now(), t };
   syncVideo();
   void activeVideo?.play().catch(() => undefined);
   const btn = $('#play');
@@ -1874,6 +1862,10 @@ function tickInner() {
         pause();
       }
     }
+  } else if (clock) {
+    // blank canvas (no main video): time runs on the clock
+    t = clock.t + (performance.now() - clock.at);
+    if (t >= timelineDuration(tl())) { t = timelineDuration(tl()); pause(); }
   }
   // keep the playhead in view
   const tb = $('#tl-body');
@@ -2020,7 +2012,7 @@ function renderFrameInner() {
   const ctx = preview.getContext('2d');
   if (!ctx) return;
   const W = preview.width, H = preview.height;
-  ctx.fillStyle = '#000';
+  ctx.fillStyle = tl().background ?? '#000';
   ctx.fillRect(0, 0, W, H);
   boxes = [];
   const loc = locate(tl().clips, t);
@@ -2049,7 +2041,7 @@ function renderFrameInner() {
       if (fx.white > 0) { ctx.fillStyle = `rgba(255,255,255,${fx.white})`; ctx.fillRect(0, 0, W, H); }
       if (black > 0) { ctx.fillStyle = `rgba(0,0,0,${black})`; ctx.fillRect(0, 0, W, H); }
     }
-  } else {
+  } else if (!isBlank()) {
     ctx.fillStyle = '#6b6b6b';
     ctx.font = '500 18px "Segoe UI", sans-serif';
     ctx.textAlign = 'center';
@@ -2443,7 +2435,7 @@ function setZoomFromSlider(v: number) { zoomBy((2 * Math.pow(300, v / 100)) / px
 function fitZoom() {
   const body = $('#tl-body');
   if (!body || !P) return;
-  const total = Math.max(5000, timelineDuration(tl()));
+  const total = Math.max(isBlank() ? 30000 : 5000, timelineDuration(tl()));
   pxPerSec = clamp(((body.clientWidth - 60) / total) * 1000, 2, 600);
   scrollX = 0;
   const z = $<HTMLInputElement>('#zoom');
@@ -2619,6 +2611,7 @@ function drawTimelineInner() {
   ctx.textBaseline = 'middle';
   const lt = laneOf('text'), lc = laneOf('captions');
   if (!tl().texts.length) laneHint(ctx, 'text', 'Teks', lt.y, lt.h);
+  if (!tl().clips.length) { const lmn = laneOf('main'); laneHint(ctx, 'video', isBlank() ? `Kanvas kosong · ${tc(timelineDuration(tl()))} · tambah video di panel Media, atau taruh layer, teks, meme, musik` : 'Video utama', lmn.y, lmn.h); }
   if (!tl().captions.lines.length) laneHint(ctx, 'captions', 'Subtitle', lc.y, lc.h);
   const li = laneOf('image'), ls = laneOf('sound');
   if (!images().length) laneHint(ctx, 'image', 'Meme', li.y, li.h);
@@ -3083,7 +3076,7 @@ function setupTimeline() {
     if (drag.mode === 'item') {
       const sp = span(drag.kind, drag.id);
       if (!sp) return;
-      const total = Math.max(timelineDuration(tl()), drag.b);
+      const total = isBlank() ? 1e8 : Math.max(timelineDuration(tl()), drag.b);   // a blank canvas grows with what is moved
       const len = drag.b - drag.a;
       if (drag.edge === 'in') sp.set(Math.round(clamp(snapMs(drag.a + dms, drag.id), 0, drag.b - 100)), drag.b);
       else if (drag.edge === 'out') sp.set(drag.a, Math.round(clamp(snapMs(drag.b + dms, drag.id), drag.a + 100, Math.min(drag.kind === 'sound' || drag.kind === 'music' ? drag.a + sp.max : Infinity, Math.max(total, drag.b)))));
@@ -3149,7 +3142,7 @@ function setupTimeline() {
     const { x } = pos(e);
     if (e.ctrlKey || e.metaKey) zoomBy(e.deltaY < 0 ? 1.2 : 1 / 1.2, x);
     else {
-      const maxScroll = Math.max(0, (timelineDuration(tl()) / 1000) * pxPerSec - tlCanvas.clientWidth + 120);
+      const maxScroll = Math.max(0, (playheadMax() / 1000) * pxPerSec - tlCanvas.clientWidth + 120);
       scrollX = clamp(scrollX + (e.deltaX || e.deltaY), 0, maxScroll);
       drawTimeline();
     }
@@ -3298,7 +3291,7 @@ async function addToLibrary(paths: string[], cat?: string) {
 /** Drops a sound at the playhead. Selection is left alone so Space resumes play. */
 function insertSound(pad: Pad) {
   if (!P) return;
-  if (!tl().clips.length) { toast('Tambahkan video ke timeline dulu.'); return; }
+  if (!canPlace()) { toast('Tambahkan video ke timeline dulu.'); return; }
   const snd = soundOf(pad);
   if (!snd) { toast('File suara pad ini hilang dari library.'); return; }
   snapshot();
@@ -3311,7 +3304,7 @@ function insertSound(pad: Pad) {
 /** Drops a meme picture at the playhead with its default animations. */
 function insertMeme(m: Meme) {
   if (!P) return;
-  if (!tl().clips.length) { toast('Tambahkan video ke timeline dulu.'); return; }
+  if (!canPlace()) { toast('Tambahkan video ke timeline dulu.'); return; }
   snapshot();
   const at = Math.floor(t);
   const aspect = m.width / m.height;
@@ -3686,8 +3679,8 @@ async function addMusic(fromLibrary?: string, atMs = 0) {
     }
     snapshot();
     const total = Math.max(1000, timelineDuration(tl()));
-    const start = clamp(atMs, 0, Math.max(0, total - 500));
-    const item: MusicItem = { id: uid(), file: dest, name: musicName(dest), startMs: start, inMs: 0, lengthMs: Math.min(info.durationMs, total - start), sourceMs: info.durationMs, volume: 0.35, duck: 'medium' };
+    const start = isBlank() ? Math.max(0, atMs) : clamp(atMs, 0, Math.max(0, total - 500));
+    const item: MusicItem = { id: uid(), file: dest, name: musicName(dest), startMs: start, inMs: 0, lengthMs: isBlank() ? info.durationMs : Math.min(info.durationMs, total - start), sourceMs: info.durationMs, volume: 0.35, duck: 'medium' };
     music().push(item);
     sel = { kind: 'music', id: item.id };
     musicLib = null;
@@ -3907,7 +3900,7 @@ async function addVideoMemes(paths: string[], cat?: string) {
 /** Puts a video meme on the timeline as a layer with sound, at the playhead. */
 async function insertVideoMeme(c: VideoMeme) {
   if (!P) return;
-  if (!tl().clips.length) { toast('Tambahkan video ke timeline dulu.'); return; }
+  if (!canPlace()) { toast('Tambahkan video ke timeline dulu.'); return; }
   if (!(await invoke<boolean>('exists', { path: c.file }))) { toast(`File "${c.name}" tidak ditemukan di library.`, 'error'); return; }
   pause();
   snapshot();
@@ -4092,14 +4085,14 @@ function addMainLayer(name = 'Video utama', crop: Crop = { ...NO_CROP }, box?: V
 
 function addMediaLayer(m: MediaEntry) {
   if (!P) return;
-  if (!tl().clips.length) { toast('Tambahkan video ke timeline dulu, lalu jadikan video lain sebagai layer di atasnya.'); return; }
+  if (!canPlace()) { toast('Tambahkan video ke timeline dulu, lalu jadikan video lain sebagai layer di atasnya.'); return; }
   snapshot();
   const total = timelineDuration(tl());
-  const start = Math.floor(clamp(t, 0, Math.max(0, total - 500)));
+  const start = isBlank() ? Math.floor(t) : Math.floor(clamp(t, 0, Math.max(0, total - 500)));
   const box = boxFor(NO_CROP, { w: m.width, h: m.height }, m.width >= m.height ? 1 : 0.6);
   if (box.h > 1) { const k = 1 / box.h; box.w *= k; box.h = 1; }
   const ly: VideoLayer = {
-    id: uid(), name: m.name, source: 'media', mediaId: m.id, inMs: 0, startMs: start, endMs: Math.min(total, start + m.durationMs),
+    id: uid(), name: m.name, source: 'media', mediaId: m.id, inMs: 0, startMs: start, endMs: isBlank() ? start + m.durationMs : Math.min(total, start + m.durationMs),
     crop: { ...NO_CROP }, box, opacity: 1, volume: 0,
   };
   layers().push(ly);
@@ -4155,7 +4148,7 @@ function drawLayers(ctx: CanvasRenderingContext2D, W: number, H: number) {
     if (mainCopy.width !== W || mainCopy.height !== H) { mainCopy.width = W; mainCopy.height = H; }
     mainCopy.getContext('2d')!.drawImage(preview, 0, 0);
   }
-  if (tl().hideMain) { ctx.fillStyle = '#000'; ctx.fillRect(0, 0, W, H); }
+  if (tl().hideMain) { ctx.fillStyle = tl().background ?? '#000'; ctx.fillRect(0, 0, W, H); }
   for (const ly of active) {
     let src: CanvasImageSource | null = null, sw = 0, sh = 0;
     if (ly.source === 'main') { src = mainCopy; sw = W; sh = H; }
@@ -4804,7 +4797,7 @@ function renderExport() {
       },
     }, `📁 ${settings.outDir}`),
     h('button', {
-      class: 'primary wide', disabled: !tl().clips.length,
+      class: 'primary wide', disabled: !timelineDuration(tl()),
       onclick: async () => {
         pause();
         try {
