@@ -3,6 +3,8 @@ name: Build installer Windows
 on:
   push:
     branches: [main]
+    # changes to the export test or the docs alone do not need a new installer
+    paths-ignore: ['tests/**', '.github/workflows/test-export.yml', 'README.md']
   workflow_dispatch:
 
 permissions:
