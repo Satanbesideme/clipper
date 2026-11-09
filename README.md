@@ -50,7 +50,7 @@ Tombol format di bawah preview (mis. `9:16 · FHD · 30`) atau **Ctrl+Alt+C**: p
 Tab **Warna** (atau **Ctrl+U**). Klik satu potongan/layer untuk mengatur sendiri; kalau tidak ada yang dipilih, semua potongan video utama ikut berubah.
 - **Look**: Natural, Vivid, Cinematic, Gaming Pop, Warm, Cool, Moody, Film, B&W, dengan pratinjau dari frame yang sedang tampil.
 - **Cahaya**: Exposure, Kontras, Highlight, Shadow, Fade. **Warna**: Suhu, Tint, Saturasi, Vibrance. **Detail**: Sharpness, Vignette.
-- **LUT .cube** (dari Premiere, Resolve, paket LUT apa pun) dengan slider kekuatan. LUT yang pernah dipakai tersimpan.
+- **LUT .cube dan .3dl** (dari Premiere, Resolve, CapCut, paket LUT apa pun) dengan slider kekuatan, untuk video utama, layer, video meme, dan meme. LUT yang pernah dipakai tersimpan.
 - **Bandingkan**: tahan tombolnya (atau tahan **\\**) untuk melihat tanpa warna. Klik kanan video → **Salin warna / Tempel warna**.
 
 ## Shortcut ala Photoshop

@@ -3,7 +3,7 @@
 import { spawnSync } from 'node:child_process';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { DEFAULT_CAPTION, DEFAULT_TEXT, buildAss, renderArgs, type Timeline, type Media, type ImageItem } from '../src/render';
-import { bakeCube, gradeOf, hasColour, parseCube, type Grade } from '../src/grade';
+import { bakeCube, gradeOf, hasColour, parseLut, type Grade } from '../src/grade';
 
 const [ffmpeg, dir, fontsDir, font] = process.argv.slice(2);
 const run = (args: string[]) => spawnSync(ffmpeg, args, { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
@@ -15,6 +15,12 @@ make(['-f', 'lavfi', '-i', 'color=c=white:s=200x200:r=10:d=1', '-vf', "geq=r='25
 make(['-f', 'lavfi', '-i', 'aevalsrc=0.6*sin(2*PI*1320*t)*exp(-4.5*t):s=48000:d=1.2', '-c:a', 'libvorbis', `${dir}/sfx.ogg`]);
 // a "user" LUT: warm and contrasty, 17^3, made with the app's own baker
 writeFileSync(`${dir}/test.cube`, bakeCube(gradeOf({ temperature: 0.6, contrast: 0.3, saturation: 0.2 }), null, 17));
+// a tiny .3dl (10-bit, blue fastest) that swaps red and blue
+{
+  const rows = ['0 1023'];
+  for (let r = 0; r < 2; r++) for (let g = 0; g < 2; g++) for (let b = 0; b < 2; b++) rows.push(`${b * 1023} ${g * 1023} ${r * 1023}`);
+  writeFileSync(`${dir}/test.3dl`, rows.join('\n'));
+}
 make(['-f', 'lavfi', '-i', 'aevalsrc=0.15*(sin(2*PI*261.6*t)+sin(2*PI*329.6*t)):s=48000:d=30', '-c:a', 'libvorbis', `${dir}/music.ogg`]);
 
 const media: Record<string, Media> = { m: { id: 'm', path: '', playable: `${dir}/vod.mp4`, name: 'vod', durationMs: 12000, width: 1080, height: 1920, fps: 30, hasAudio: true } };
@@ -74,6 +80,7 @@ const scenarios: [string, (tl: Timeline) => void][] = [
   ['warna: B&W di layer video lain', (tl) => {
     tl.layers = [{ id: 'o', name: 'O', source: 'media', mediaId: 'm', inMs: 2000, startMs: 1000, endMs: 4000, crop: { l: 0, t: 0.5, r: 0, b: 0 }, box: { x: 0.5, y: 0.75, w: 1, h: 0.5 }, opacity: 1, volume: 0, grade: gradeOf({ saturation: -1, contrast: 0.25, vignette: 0.3 }) }];
   }],
+  ['warna: meme dengan LUT .3dl', (tl) => { tl.images = [{ ...meme('i', `${dir}/meme.png`, 500, 2500, 'pop', 'fade'), grade: gradeOf({ lut: `${dir}/test.3dl`, lutAmount: 1 }) }]; }],
   ['warna: LUT .cube 60% + exposure', (tl) => { tl.clips[1].grade = gradeOf({ exposure: 0.4, lut: `${dir}/test.cube`, lutAmount: 0.6 }); }],
   ['fade suara di potongan, efek, musik, layer', (tl) => {
     tl.clips[0].fadeInMs = 500; tl.clips[1].fadeOutMs = 900;
@@ -120,10 +127,10 @@ for (const [name, setup] of scenarios) {
   const q = name.startsWith('kualitas') ? 0.4 : 1;
   // like the app: one baked LUT per graded clip/layer
   const gradeLuts: Record<string, string> = {};
-  for (const it of [...tl.clips, ...(tl.layers ?? [])] as { id: string; grade?: Grade }[]) {
+  for (const it of [...tl.clips, ...(tl.layers ?? []), ...(tl.images ?? [])] as { id: string; grade?: Grade }[]) {
     if (!it.grade || !hasColour(gradeOf(it.grade))) continue;
     const g = gradeOf(it.grade);
-    const user = g.lut ? parseCube(readFileSync(g.lut, 'utf8')) : null;
+    const user = g.lut ? parseLut(readFileSync(g.lut, 'utf8')) : null;
     gradeLuts[it.id] = `${dir}/grade-${it.id}.cube`;
     writeFileSync(gradeLuts[it.id], bakeCube(g, user));
   }

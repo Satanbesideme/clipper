@@ -1,5 +1,5 @@
 import { icon, drawIcon, type IconName } from './icons';
-import { gradeImage, drawVignette, isNeutral, gradeOf, registerLut, lutReady, LOOKS, NEUTRAL, hasColour, parseCube, type Grade } from './grade';
+import { gradeImage, drawVignette, isNeutral, gradeOf, registerLut, lutReady, LOOKS, NEUTRAL, hasColour, parseLut, cssFilterOf, LUT_EXT, type Grade } from './grade';
 import './styles.css';
 import { dialog, fileSrc, invoke, isTauri, onDrop, extName, join, baseName, dirName } from './tauri';
 import { qualityBitrate } from './ffmpeg';
@@ -1664,16 +1664,30 @@ function deleteSelected() {
 
 // ================= preview engine =================
 
+/**
+ * Loads a file as CORS-clean media so the colour grading (WebGL) may read its pixels. Tauri's asset
+ * protocol answers with Access-Control-Allow-Origin; if a file still refuses, it loads again the plain way.
+ */
+function corsSrc(el: HTMLVideoElement | HTMLImageElement, url: string) {
+  el.crossOrigin = 'anonymous';
+  el.addEventListener('error', () => {
+    if (el.crossOrigin === null) return;
+    el.removeAttribute('crossorigin');
+    el.src = url;
+  }, { once: true });
+  el.src = url;
+}
+
 function videoFor(mediaId: string): HTMLVideoElement | null {
   let v = videos.get(mediaId);
   if (v) return v;
   const m = mediaOf(mediaId);
   if (!m) return null;
   v = h('video', { preload: 'auto', playsinline: true });
-  v.src = fileSrc(m.playable);
+  corsSrc(v, fileSrc(m.playable));
   v.addEventListener('seeked', () => { if (!playing) renderFrame(); });
   v.addEventListener('loadeddata', () => { if (!playing) { syncVideo(); renderFrame(); } });
-  v.addEventListener('error', () => toast(`Video ${m.name} tidak bisa diputar di preview (codec belum didukung). Ekspor tetap bisa.`, 'error'));
+  v.addEventListener('error', () => { if (v!.crossOrigin === null) toast(`Video ${m.name} tidak bisa diputar di preview (codec belum didukung). Ekspor tetap bisa.`, 'error'); });
   videos.set(mediaId, v);
   return v;
 }
@@ -1875,17 +1889,37 @@ const lutLoading = new Set<string>();
 function ensureLut(path?: string) {
   if (!path || lutReady(path) || lutLoading.has(path)) return;
   lutLoading.add(path);
-  invoke<string>('read_text', { path }).then((txt) => { registerLut(path, parseCube(txt)); renderFrame(); })
+  invoke<string>('read_text', { path }).then((txt) => { registerLut(path, parseLut(txt)); renderFrame(); })
     .catch(() => toast('File LUT tidak bisa dibaca.', 'error')).finally(() => lutLoading.delete(path));
 }
 /** The graded picture of a source for the preview, or null when it needs no grading. */
+let gradeCss = '';   // set when WebGL could not grade: the caller draws with this CSS filter instead
+let warnedGrade = false;
 function graded(src: TexImageSource, g: Grade | undefined, w: number, h: number): HTMLCanvasElement | null {
+  gradeCss = '';
   if (gradeBypass || !g || isNeutral(g)) return null;
   const x = gradeOf(g);
   if (!hasColour(x) && x.sharpen < 0.005) return null;
   ensureLut(x.lut);
   const k = Math.min(1, 1600 / Math.max(w, h));
-  return gradeImage(src, w * k, h * k, x);
+  const out = gradeImage(src, w * k, h * k, x);
+  if (!out) {
+    gradeCss = cssFilterOf(x);
+    if (!warnedGrade && x.lut) { warnedGrade = true; toast('Preview LUT tidak tersedia untuk file ini; hasil ekspor tetap memakai LUT.'); }
+  }
+  return out;
+}
+/** drawImage with the grade applied (WebGL, or the CSS fallback). */
+function drawGraded(ctx: CanvasRenderingContext2D, src: CanvasImageSource, g: Grade | undefined, sw: number, sh: number,
+  crop: [number, number, number, number] | null, dx: number, dy: number, dw: number, dh: number) {
+  const out = graded(src as TexImageSource, g, sw, sh);
+  const prev = ctx.filter;
+  if (!out && gradeCss) ctx.filter = prev && prev !== 'none' ? `${prev} ${gradeCss}` : gradeCss;
+  const img = out ?? src;
+  const kx = out ? out.width / sw : 1, ky = out ? out.height / sh : 1;
+  if (crop) ctx.drawImage(img, crop[0] * kx, crop[1] * ky, crop[2] * kx, crop[3] * ky, dx, dy, dw, dh);
+  else ctx.drawImage(img, dx, dy, dw, dh);
+  ctx.filter = prev;
 }
 const vignetteOf = (g?: Grade) => (gradeBypass || !g ? 0 : gradeOf(g).vignette);
 
@@ -1912,7 +1946,7 @@ function renderFrameInner() {
       const dw = vw * s, dh = vh * s;
       const pw = Math.max(dw, W), ph = Math.max(dh, H);
       const ox = (pw - W) * (c.zx ?? 0.5), oy = (ph - H) * (c.zy ?? 0.5);
-      ctx.drawImage(graded(v, c.grade, dw, dh) ?? v, (pw - dw) / 2 - ox, (ph - dh) / 2 - oy, dw, dh);
+      drawGraded(ctx, v, c.grade, vw, vh, null, (pw - dw) / 2 - ox, (ph - dh) / 2 - oy, dw, dh);
       ctx.setTransform(1, 0, 0, 1, 0, 0);
       ctx.filter = 'none';
       drawVignette(ctx, 0, 0, W, H, vignetteOf(c.grade));
@@ -1940,7 +1974,7 @@ function renderFrameInner() {
     if (el.complete && el.naturalWidth) {
       const aw = w * an.scale, ah = hh * an.scale;
       ctx.globalAlpha = an.alpha;
-      ctx.drawImage(el, im.x * W - aw / 2, im.y * H - ah / 2 + an.dy * H, aw, ah);
+      drawGraded(ctx, el, im.grade, el.naturalWidth, el.naturalHeight, null, im.x * W - aw / 2, im.y * H - ah / 2 + an.dy * H, aw, ah);
       ctx.globalAlpha = 1;
     }
     boxes.push({ kind: 'image', id: im.id, x, y, w, h: hh });
@@ -3037,8 +3071,8 @@ function imageEl(file: string) {
   let el = imageEls.get(file);
   if (!el) {
     el = new Image();
-    el.src = fileSrc(file);
     el.onload = () => { renderFrame(); drawTimeline(); };
+    corsSrc(el, fileSrc(file));
     imageEls.set(file, el);
   }
   return el;
@@ -3989,7 +4023,7 @@ function layerVideo(ly: VideoLayer): HTMLVideoElement | null {
   const m = mediaOf(ly.mediaId);
   if (!m) return null;
   v = h('video', { preload: 'auto', playsinline: true });
-  v.src = fileSrc(m.playable);
+  corsSrc(v, fileSrc(m.playable));
   v.addEventListener('seeked', () => { if (!playing) renderFrame(); });
   v.addEventListener('loadeddata', () => { if (!playing) renderFrame(); });
   layerVideos.set(ly.id, v);
@@ -4037,9 +4071,7 @@ function drawLayers(ctx: CanvasRenderingContext2D, W: number, H: number) {
     const bw = ly.box.w * W, bh = ly.box.h * H, bx = ly.box.x * W - bw / 2, by = ly.box.y * H - bh / 2;
     if (src) {
       ctx.globalAlpha = ly.opacity;
-      const gsrc = graded(src as TexImageSource, ly.grade, sw, sh);
-      const gw = gsrc ? gsrc.width : sw, gh = gsrc ? gsrc.height : sh;
-      ctx.drawImage(gsrc ?? src, ly.crop.l * gw, ly.crop.t * gh, gw * (1 - ly.crop.l - ly.crop.r), gh * (1 - ly.crop.t - ly.crop.b), bx, by, bw, bh);
+      drawGraded(ctx, src, ly.grade, sw, sh, [ly.crop.l * sw, ly.crop.t * sh, sw * (1 - ly.crop.l - ly.crop.r), sh * (1 - ly.crop.t - ly.crop.b)], bx, by, bw, bh);
       drawVignette(ctx, bx, by, bw, bh, vignetteOf(ly.grade));
       ctx.globalAlpha = 1;
     } else {
@@ -4340,6 +4372,8 @@ function gradeTargets(): { items: Gradable[]; label: string; kind: string; all: 
   if (ly) return { items: [ly], label: ly.name, kind: 'Layer video', all: false };
   const c = selected('clip');
   if (c) return { items: [c], label: mediaOf(c.mediaId)?.name ?? 'Video', kind: 'Potongan video', all: false };
+  const im = selected('image');
+  if (im) return { items: [im], label: im.name, kind: 'Meme / gambar', all: false };
   return { items: tl().clips, label: `${tl().clips.length} potongan`, kind: 'Semua video utama', all: true };
 }
 function editGrade(items: Gradable[], fn: (g: Grade) => void) {
@@ -4348,14 +4382,14 @@ function editGrade(items: Gradable[], fn: (g: Grade) => void) {
 async function loadLutLib() {
   const dir = join(await dataDir(), 'library', 'luts');
   const files = await invoke<string[]>('list_dir', { path: dir }).catch(() => [] as string[]);
-  lutLib = files.filter((f) => /\.cube$/i.test(f)).map((f) => join(dir, f));
+  lutLib = files.filter((f) => LUT_EXT.includes(extName(f))).map((f) => join(dir, f));
   if (tab === 'color') renderLeft();
 }
 async function pickLut(items: Gradable[]) {
-  const f = await dialog().open({ title: 'Pilih LUT (.cube)', filters: [{ name: 'LUT', extensions: ['cube', 'CUBE'] }] });
+  const f = await dialog().open({ title: 'Pilih LUT', filters: [{ name: 'LUT (.cube, .3dl)', extensions: [...LUT_EXT, ...LUT_EXT.map((e) => e.toUpperCase())] }] });
   if (typeof f !== 'string') return;
   try {
-    parseCube(await invoke<string>('read_text', { path: f }));   // check it before keeping it
+    parseLut(await invoke<string>('read_text', { path: f }));   // check it before keeping it
     const dir = join(await dataDir(), 'library', 'luts');
     await invoke('ensure_dir', { path: dir });
     const dest = join(dir, baseName(f));
@@ -4364,7 +4398,7 @@ async function pickLut(items: Gradable[]) {
     editGrade(items, (g) => { g.lut = dest; g.lutAmount = 1; });
     lutLib = null;
     changed();
-    toast(`LUT "${baseName(f).replace(/\.cube$/i, '')}" dipasang.`);
+    toast(`LUT "${baseName(f).replace(/\.(cube|3dl)$/i, '')}" dipasang.`);
   } catch (e) { toast((e as Error).message, 'error'); }
 }
 
@@ -4402,7 +4436,7 @@ function colorPanel(): Node[] {
       onclick: () => { snapshot(); editGrade(T.items, (g) => { const keep = { lut: g.lut, lutAmount: g.lutAmount }; Object.assign(g, NEUTRAL, lk.g, keep, { look: lk.id }); }); changed(); },
     }, lookThumb(lk.g, 84, 120), h('span', { class: 'look-name' }, lk.name));
   }));
-  const lutName = first.lut ? baseName(first.lut).replace(/\.cube$/i, '') : '';
+  const lutName = first.lut ? baseName(first.lut).replace(/\.(cube|3dl)$/i, '') : '';
   return [
     h('div', { class: 'tf-head' }, h('span', { class: 'tf-kind' }, T.kind), h('span', { class: 'tf-name' }, T.label)),
     T.all ? h('div', { class: 'muted small' }, 'Tidak ada yang dipilih: perubahan berlaku untuk semua potongan video utama. Klik satu potongan atau layer untuk mengatur sendiri.') : h('span'),
@@ -4431,13 +4465,13 @@ function colorPanel(): Node[] {
       h('div', { class: 'row-between' }, h('div', { class: 'label' }, 'LUT'), lutName ? h('span', { class: 'muted small' }, lutName) : h('span')),
       first.lut ? tfSlider('Kekuatan', (first.lutAmount ?? 1) * 100, 0, 100, 1, (v) => `${Math.round(v)}%`, live((g, v) => { g.lutAmount = v / 100; })) : h('span'),
       h('div', { class: 'lut-row' },
-        h('button', { class: 'secondary with-ico', onclick: () => void pickLut(T.items) }, icon('plus', 15), 'Pilih .cube'),
+        h('button', { class: 'secondary with-ico', onclick: () => void pickLut(T.items) }, icon('plus', 15), 'Pilih LUT'),
         first.lut ? h('button', { class: 'ghost', onclick: () => { snapshot(); editGrade(T.items, (g) => { g.lut = undefined; g.lutAmount = undefined; }); changed(); } }, 'Lepas LUT') : h('span'),
       ),
       (lutLib ?? []).length ? h('div', { class: 'lut-lib' }, ...(lutLib ?? []).map((f) => h('button', {
         class: `chip${first.lut === f ? ' on' : ''}`, title: f,
         onclick: () => { snapshot(); editGrade(T.items, (g) => { g.lut = f; g.lutAmount = g.lutAmount ?? 1; }); changed(); },
-      }, baseName(f).replace(/\.cube$/i, '')))) : h('div', { class: 'muted small' }, 'LUT dari Premiere, Resolve, atau paket LUT apa pun (.cube) bisa dipakai. Yang pernah dipilih tersimpan di sini.'),
+      }, baseName(f).replace(/\.(cube|3dl)$/i, '')))) : h('div', { class: 'muted small' }, 'LUT .cube dan .3dl dari Premiere, Resolve, CapCut, atau paket LUT apa pun bisa dipakai, untuk video utama, layer, video meme, dan meme. Yang pernah dipilih tersimpan di sini.'),
     ),
     h('div', { class: 'tf-actions' },
       h('button', {

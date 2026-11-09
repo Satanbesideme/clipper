@@ -9,7 +9,7 @@ import {
   type CaptionLine, type Range, type Timeline, type Word,
 } from './render';
 import { dataDir, projectDir, uid, type MediaEntry, type ModelSize, type Project } from './store';
-import { bakeCube, gradeOf, hasColour, parseCube, type Cube, type Grade } from './grade';
+import { bakeCube, gradeOf, hasColour, parseLut, type Cube, type Grade } from './grade';
 
 type ProgressCb = (outMs: number, pct: number) => void;
 const progressCbs = new Map<string, ProgressCb>();
@@ -404,14 +404,14 @@ const cubeCache = new Map<string, Cube>();
 /** Reads (once) a user's .cube file. */
 export async function loadCube(path: string): Promise<Cube> {
   let c = cubeCache.get(path);
-  if (!c) { c = parseCube(await invoke<string>('read_text', { path })); cubeCache.set(path, c); }
+  if (!c) { c = parseLut(await invoke<string>('read_text', { path })); cubeCache.set(path, c); }
   return c;
 }
 
 /** Writes one baked LUT per graded clip/layer for the export. */
 async function bakeGrades(tl: Timeline, dir: string, jobId: string): Promise<Record<string, string>> {
   const out: Record<string, string> = {};
-  const items: { id: string; grade?: Grade }[] = [...tl.clips, ...(tl.layers ?? [])];
+  const items: { id: string; grade?: Grade }[] = [...tl.clips, ...(tl.layers ?? []), ...(tl.images ?? [])];
   for (const it of items) {
     if (!it.grade) continue;
     const g = gradeOf(it.grade);

@@ -220,6 +220,7 @@ export interface ImageItem {
   animated: boolean;
   transIn?: Trans;
   transOut?: Trans;
+  grade?: Grade;   // colour only (LUT), no sharpness/vignette
 }
 
 /** Channel logo shown for the whole video. */
@@ -683,6 +684,8 @@ export function renderArgs(spec: RenderSpec): string[] {
     const ti = Math.min(TRANS_IN_MS / 1000, D / 2), to = Math.min(TRANS_OUT_MS / 1000, D / 2);
     const tin = im.transIn ?? 'none', tout = im.transOut ?? 'none';
     const chain = [`scale=${w}:-2:flags=lanczos`, 'format=rgba'];
+    const ilut = spec.gradeLuts?.[im.id];
+    if (ilut && im.grade && hasColour(gradeOf(im.grade))) chain.push(`lut3d=file='${filterPath(ilut)}':interp=tetrahedral`, 'format=rgba');
     // fades run first, on the fixed-size picture: newer ffmpeg stops when a frame changes size
     // before a filter that is not set up for it (the pop below changes the size every frame)
     if (tin === 'fade') chain.push(`fade=t=in:st=0:d=${ti}:alpha=1`);

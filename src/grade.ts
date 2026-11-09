@@ -107,6 +107,38 @@ export function parseCube(text: string): Cube {
   return { size, data };
 }
 
+/**
+ * Autodesk/Lustre .3dl: integer values (10, 12 or 16 bit), blue changing fastest. The first line may be
+ * the input mesh (one row of many numbers), which is skipped.
+ */
+export function parse3dl(text: string): Cube {
+  const rows: number[][] = [];
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line || line.startsWith('#') || /^[A-Za-z]/.test(line)) continue;
+    const p = line.split(/\s+/).map(Number);
+    if (p.length === 3 && p.every((n) => Number.isFinite(n))) rows.push(p);
+  }
+  const size = Math.round(Math.cbrt(rows.length));
+  if (size < 2 || size * size * size !== rows.length) throw new Error('File LUT .3dl tidak bisa dibaca.');
+  let max = 0;
+  for (const r of rows) max = Math.max(max, r[0], r[1], r[2]);
+  const scale = max > 4095 ? 65535 : max > 1023 ? 4095 : max > 1.0001 ? 1023 : 1;
+  const data = new Float32Array(size * size * size * 3);
+  let n = 0;
+  for (let r = 0; r < size; r++) for (let g = 0; g < size; g++) for (let b = 0; b < size; b++) {
+    const row = rows[n++], o = ((b * size + g) * size + r) * 3;
+    data[o] = clamp01(row[0] / scale); data[o + 1] = clamp01(row[1] / scale); data[o + 2] = clamp01(row[2] / scale);
+  }
+  return { size, data };
+}
+
+/** Any supported LUT file (.cube or .3dl), by content. */
+export function parseLut(text: string): Cube {
+  return /LUT_3D_SIZE/i.test(text) ? parseCube(text) : parse3dl(text);
+}
+export const LUT_EXT = ['cube', '3dl'];
+
 /** Trilinear lookup in a cube. */
 export function sampleCube(cube: Cube, r: number, g: number, b: number): [number, number, number] {
   const n = cube.size - 1;
@@ -140,6 +172,23 @@ export function bakeCube(x: Grade, user: Cube | null, size = 33): string {
     lines.push(`${r.toFixed(5)} ${g.toFixed(5)} ${b.toFixed(5)}`);
   }
   return lines.join('\n') + '\n';
+}
+
+/**
+ * Rough CSS-filter version of a grade, for when WebGL cannot read the picture. Colour only, no LUT.
+ */
+export function cssFilterOf(x: Grade): string {
+  const f: string[] = [];
+  const b = Math.pow(2, x.exposure * 0.75) * (1 + 0.15 * x.shadows + 0.1 * x.highlights) * (1 + 0.06 * x.fade);
+  if (Math.abs(b - 1) > 0.005) f.push(`brightness(${b.toFixed(3)})`);
+  const c = (1 + x.contrast) * (1 - 0.2 * x.fade);
+  if (Math.abs(c - 1) > 0.005) f.push(`contrast(${c.toFixed(3)})`);
+  const s = Math.max(0, (1 + x.saturation) * (1 + 0.5 * x.vibrance));
+  if (Math.abs(s - 1) > 0.005) f.push(`saturate(${s.toFixed(3)})`);
+  if (x.temperature > 0.005) f.push(`sepia(${(x.temperature * 0.35).toFixed(3)})`);
+  if (x.temperature < -0.005) f.push(`hue-rotate(${(x.temperature * 12).toFixed(1)}deg)`);
+  if (Math.abs(x.tint) > 0.005) f.push(`hue-rotate(${(x.tint * 8).toFixed(1)}deg)`);
+  return f.join(' ');
 }
 
 /** ffmpeg filters for sharpness and vignette (on the canvas-sized picture). */
