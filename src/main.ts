@@ -1,11 +1,11 @@
 import { icon, drawIcon, type IconName } from './icons';
 import './styles.css';
-import { dialog, fileSrc, invoke, isTauri, onDrop, extName, join, baseName } from './tauri';
+import { dialog, fileSrc, invoke, isTauri, onDrop, extName, join, baseName, dirName } from './tauri';
 import { qualityBitrate } from './ffmpeg';
 import {
   DEFAULT_CAPTION, DEFAULT_TEXT, clipDuration, clipStarts, locate, splitAt, timelineDuration,
   type CaptionLine, type ImageItem, type Watermark, type SoundItem, type TextItem, type TextStyle, type Trans, type VideoClip, type Word,
-  transState, TRANS_IN_MS, textAnimState, wordScale, wordColor, lineAnimOf, SHOUT_COLOR, type WordFx, type TextAnim, type CapAnim, clipFx, removePauses, remapItems, invertRanges, DUCK_LEVEL,
+  transState, TRANS_IN_MS, textAnimState, fadesOf, fadeGain, MUSIC_FADE_IN, MUSIC_FADE_OUT, wordScale, wordColor, lineAnimOf, SHOUT_COLOR, type WordFx, type TextAnim, type CapAnim, clipFx, removePauses, remapItems, invertRanges, DUCK_LEVEL,
   type ClipTrans, type Duck, type MusicItem, type Range, type VideoLayer, type Crop, NO_CROP, cropSize,
 } from './render';
 import {
@@ -96,13 +96,57 @@ function logoMark(size: number, cls = 'mark'): SVGSVGElement {
   return svg;
 }
 
-const FONTS = ['Segoe UI', 'Bahnschrift', 'Impact', 'Arial', 'Verdana', 'Trebuchet MS', 'Georgia', 'Comic Sans MS'];
+const FONTS = ['Segoe UI', 'Bahnschrift', 'Impact', 'Arial', 'Arial Black', 'Verdana', 'Trebuchet MS', 'Georgia', 'Comic Sans MS'];
+
+/** Ready-made caption looks: font, colours, mode, animation and height in one click. */
+interface CapTemplate { id: string; name: string; hint: string; style: TextStyle; mode: 'word' | 'line'; anim: CapAnim; y: number; caps: boolean; sample: string }
+const CAP_TEMPLATES: CapTemplate[] = [
+  { id: 'minimal', name: 'Minimal', hint: 'Tipis dan bersih, satu kalimat sekaligus.', mode: 'line', anim: 'fade', y: 0.78, caps: false, sample: 'cuma mau bilang',
+    style: { font: 'Segoe UI', size: 62, color: '#ffffff', highlight: '#ffffff', outline: 3, bold: false, box: false } },
+  { id: 'kinetic', name: 'Kinetic', hint: 'Huruf besar, kata yang diucapkan memantul.', mode: 'word', anim: 'bounce', y: 0.62, caps: true, sample: 'GAS TERUS',
+    style: { font: 'Arial Black', size: 86, color: '#ffffff', highlight: '#3cc3b3', outline: 8, bold: true, box: false } },
+  { id: 'documentary', name: 'Documentary', hint: 'Serif kalem di kotak gelap, seperti film dokumenter.', mode: 'line', anim: 'fade', y: 0.82, caps: false, sample: 'Malam itu…',
+    style: { font: 'Georgia', size: 56, color: '#f3efe4', highlight: '#f3efe4', outline: 0, bold: false, box: true } },
+  { id: 'gaming', name: 'Gaming', hint: 'Tebal, kuning menyala, muncul dengan pop.', mode: 'word', anim: 'pop', y: 0.6, caps: true, sample: 'CLUTCH!',
+    style: { font: 'Impact', size: 104, color: '#ffffff', highlight: '#ffd400', outline: 10, bold: false, box: false } },
+  { id: 'podcast', name: 'Podcast', hint: 'Kata muncul satu per satu di kotak, enak untuk ngobrol.', mode: 'word', anim: 'word', y: 0.72, caps: false, sample: 'jadi gini ya',
+    style: { font: 'Bahnschrift', size: 70, color: '#ffffff', highlight: '#5bd6c8', outline: 0, bold: true, box: true } },
+];
+
+function captionTemplates(): HTMLElement {
+  const cap = tl().captions;
+  return h('div', { class: 'block' },
+    h('div', { class: 'label' }, 'Template'),
+    h('div', { class: 'cap-tpl-grid' }, ...CAP_TEMPLATES.map((tp) => {
+      const st = tp.style;
+      const shadow = st.outline ? `-1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000, 1px 1px 0 #000, 0 2px 0 #000` : 'none';
+      const words = tp.sample.split(' ');
+      return h('button', {
+        class: `cap-tpl${cap.preset === tp.id ? ' on' : ''}`, title: tp.hint,
+        onclick: () => {
+          snapshot();
+          cap.style = { ...tp.style }; cap.mode = tp.mode; cap.anim = tp.anim; cap.y = tp.y; cap.caps = tp.caps; cap.preset = tp.id;
+          changed({ left: true, inspector: false });
+          const l = cap.lines.find((x) => x.endMs > t) ?? cap.lines[0];
+          if (l) { seek(l.startMs); play(); setTimeout(() => pause(), Math.min(2500, l.endMs - l.startMs + 300)); }
+          toast(`Template ${tp.name} dipasang ke semua subtitle. Masih bisa diubah di bawah.`);
+        },
+      },
+        h('span', { class: 'cap-tpl-sample' },
+          h('span', { class: `cap-tpl-text${st.box ? ' boxed' : ''}`, style: `font-family:"${st.font}";font-weight:${st.bold ? 700 : 400};color:${st.color};text-shadow:${shadow}` },
+            ...words.map((w, i) => h('span', { style: i === words.length - 1 && tp.mode === 'word' ? `color:${st.highlight}` : '' }, `${w}${i < words.length - 1 ? ' ' : ''}`)))),
+        h('span', { class: 'cap-tpl-name' }, tp.name),
+      );
+    })),
+    h('div', { class: 'muted small' }, cap.preset ? (CAP_TEMPLATES.find((x) => x.id === cap.preset)?.hint ?? '') : 'Pilih template, lalu ubah detailnya di bawah kalau perlu.'),
+  );
+}
 
 // ================= state =================
 
 type SelKind = 'clip' | 'text' | 'line' | 'sound' | 'image' | 'music' | 'layer';
 type Sel = { kind: SelKind; id: string } | null;
-type LeftTab = 'media' | 'layers' | 'music' | 'sound' | 'meme' | 'vmeme' | 'text' | 'captions';
+type LeftTab = 'media' | 'layers' | 'transform' | 'crop' | 'music' | 'sound' | 'meme' | 'vmeme' | 'text' | 'captions';
 
 let settings: Settings = { outDir: '', encoder: '', model: 'small' };
 let P: Project | null = null;
@@ -498,7 +542,7 @@ function renderEditor() {
 }
 
 const RAIL: [LeftTab, IconName, string][] = [
-  ['media', 'media', 'Media'], ['layers', 'layers', 'Layer'], ['music', 'music', 'Musik'], ['sound', 'wave', 'Suara'], ['meme', 'meme', 'Meme'], ['vmeme', 'vmeme', 'Video meme'], ['text', 'text', 'Teks'], ['captions', 'captions', 'Subtitle'],
+  ['media', 'media', 'Media'], ['layers', 'layers', 'Layer'], ['transform', 'move', 'Transform'], ['crop', 'crop', 'Crop'], ['music', 'music', 'Musik'], ['sound', 'wave', 'Suara'], ['meme', 'meme', 'Meme'], ['vmeme', 'vmeme', 'Video meme'], ['text', 'text', 'Teks'], ['captions', 'captions', 'Subtitle'],
 ];
 let safeGuide = false;
 
@@ -681,6 +725,8 @@ function renderLeftInner() {
   if (tab === 'media') el.replaceChildren(...mediaPanel());
   else if (tab === 'layers') el.replaceChildren(...layerPanel());
   else if (tab === 'music') el.replaceChildren(...musicPanel());
+  else if (tab === 'transform') el.replaceChildren(...transformPanel());
+  else if (tab === 'crop') el.replaceChildren(...cropPanel());
   else if (tab === 'sound') el.replaceChildren(...soundPanel());
   else if (tab === 'vmeme') el.replaceChildren(...videoMemePanel());
   else if (tab === 'meme') el.replaceChildren(...memePanel());
@@ -689,9 +735,78 @@ function renderLeftInner() {
   markAuditionButtons();
 }
 
+// ================= stinger =================
+let stingerFile = '';
+async function stingerPath() {
+  if (!stingerFile) stingerFile = join(dirName(await invoke<string>('starter_sfx_dir')), 'stinger', 'galsurku-stinger.mp4');
+  return stingerFile;
+}
+
+/**
+ * Puts the GALSURKU stinger before the first clip. Everything placed on the timeline moves along by the
+ * stinger's length, so captions, memes and sounds stay on the moments they belong to.
+ */
+async function addStinger() {
+  if (!P) return;
+  const path = await stingerPath();
+  if (!(await invoke<boolean>('exists', { path }))) { toast('File stinger tidak ditemukan di folder aplikasi.', 'error'); return; }
+  setBusy('Menyiapkan stinger…');
+  try {
+    let m = P.media.find((x) => x.path === path);
+    if (!m) { m = await importMedia(path, setBusy); P.media.push(m); void buildThumbs(P, m).then(() => saveProject(P!)).then(() => loadSheets(m!)); }
+    if (tl().clips[0]?.mediaId === m.id) { toast('Stinger sudah ada di awal video.'); return; }
+    snapshot();
+    const d = Math.round(m.durationMs);
+    const sh = (x: { startMs: number; endMs?: number }) => { x.startMs += d; if (typeof x.endMs === 'number' && x.endMs < UNTIL_END) x.endMs += d; };
+    tl().texts.forEach(sh); images().forEach(sh); sounds().forEach(sh); music().forEach(sh);
+    layers().forEach((ly) => { if (ly.source === 'media') sh(ly); else if (ly.startMs > 0) sh(ly); });
+    tl().captions.lines.forEach((l) => { sh(l); l.words.forEach((w) => { w.startMs += d; w.endMs += d; }); });
+    const first = tl().clips[0];
+    if (first && (first.trans ?? 'none') === 'none') first.trans = 'fade';   // the stinger ends dark: fade the video in from it
+    tl().clips.unshift({ id: uid(), mediaId: m.id, inMs: 0, outMs: m.durationMs, speed: 1, volume: 0.8, fit: 'fill' });
+    if (tl().clips.length === 1) tl().fps = 60;
+    changed({ left: true });
+    fitZoom();
+    toast('Stinger dipasang di awal. Subtitle, meme, dan suara ikut bergeser supaya tetap pas.');
+  } catch (e) {
+    toast((e as Error).message, 'error');
+  } finally {
+    setBusy('');
+  }
+}
+
+async function saveStingerCopy() {
+  try {
+    const src = await stingerPath();
+    await invoke('ensure_dir', { path: settings.outDir });
+    const dest = join(settings.outDir, 'GALSURKU stinger.mp4');
+    await invoke('copy_file', { src, dest });
+    void invoke('reveal', { path: dest });
+    toast(`Disimpan: ${dest}`);
+  } catch (e) { toast((e as Error).message, 'error'); }
+}
+
+function stingerCard(): HTMLElement {
+  const vid = h('video', { class: 'stinger-vid', muted: true, playsinline: true, loop: true, preload: 'metadata' });
+  void stingerPath().then((p) => { vid.src = fileSrc(p); vid.muted = true; vid.currentTime = 0.9; }).catch(() => undefined);
+  const has = !!P && tl().clips[0] && mediaOf(tl().clips[0].mediaId)?.path === stingerFile && !!stingerFile;
+  return h('div', { class: 'stinger-card' },
+    h('div', { class: 'stinger-thumb', onpointerenter: () => { vid.currentTime = 0; void vid.play().catch(() => undefined); }, onpointerleave: () => { vid.pause(); vid.currentTime = 0.9; } }, vid),
+    h('div', { class: 'stinger-meta' },
+      h('div', { class: 'stinger-title' }, 'Stinger GALSURKU'),
+      h('div', { class: 'muted small' }, '1,9 dtk · 1080×1920 · dengan suara. Arahkan mouse untuk melihat.'),
+      h('div', { class: 'stinger-actions' },
+        h('button', { class: 'primary small-btn', disabled: has, onclick: () => void addStinger() }, has ? 'Sudah di awal' : 'Pasang di awal'),
+        h('button', { class: 'ghost small', title: 'Simpan file MP4-nya ke folder ekspor', onclick: () => void saveStingerCopy() }, 'Simpan file'),
+      ),
+    ),
+  );
+}
+
 function mediaPanel(): Node[] {
   const p = P!;
   return [
+    stingerCard(),
     h('button', { class: 'secondary wide with-ico', onclick: () => void pickAndImport() }, icon('video', 16), 'Tambah video'),
     p.media.length ? h('div', { class: 'media-grid' },
       ...p.media.map((m) => {
@@ -912,8 +1027,13 @@ function captionPanel(): Node[] {
       downloading >= 0 ? h('div', {}, h('div', { class: 'bar-track' }, h('div', { class: 'bar-fill', id: 'dl-bar', style: `width:${Math.round(downloading * 100)}%` })), h('div', { class: 'muted small', id: 'dl-label' }, 'Mengunduh model…')) : null,
       !hasClips ? h('div', { class: 'muted small' }, 'Tambahkan video ke timeline dulu.') : null,
     ),
+    captionTemplates(),
     h('div', { class: 'block' },
       h('div', { class: 'label' }, 'Gaya'),
+      h('label', { class: 'check' }, h('input', {
+        type: 'checkbox', checked: !!cap.caps,
+        onchange: (e) => { snapshot(); cap.caps = (e.target as HTMLInputElement).checked; changed({ inspector: false }); },
+      }), 'HURUF BESAR SEMUA'),
       h('div', { class: 'seg' },
         h('button', { class: cap.mode === 'word' ? 'on' : '', onclick: () => { snapshot(); cap.mode = 'word'; changed({ left: true, inspector: false }); } }, 'Kata menyala'),
         h('button', { class: cap.mode === 'line' ? 'on' : '', onclick: () => { snapshot(); cap.mode = 'line'; changed({ left: true, inspector: false }); } }, 'Per kalimat'),
@@ -1031,7 +1151,10 @@ function styleControls(st: TextStyle, set: (p: Partial<TextStyle>) => void, show
   ];
 }
 
-function renderInspector() { try { renderInspectorInner(); markAuditionButtons(); } catch (e) { reportOnce(e); } }
+function renderInspector() {
+  try { renderInspectorInner(); markAuditionButtons(); } catch (e) { reportOnce(e); }
+  if (tab === 'transform' || tab === 'crop') renderLeft();
+}
 
 function groupInspector(): Node[] {
   const kinds: Record<string, number> = {};
@@ -1101,6 +1224,7 @@ function renderInspectorInner() {
         (clip.zoom ?? 1) > 1 ? h('button', { class: 'ghost small', onclick: () => set({ zoom: 1, zx: 0.5, zy: 0.5 }) }, 'Reset zoom') : h('span'),
       ),
       transBlock(clip),
+      m?.hasAudio ? fadeBlock('clip', clip.id) : h('span'),
       h('div', { class: 'block' },
         h('button', { class: 'secondary wide', onclick: splitHere }, '✂ Split di playhead'),
         h('button', { class: 'danger-ghost wide', onclick: deleteSelected }, 'Hapus potongan'),
@@ -1133,9 +1257,10 @@ function renderInspectorInner() {
           oninput: (e) => { ((e.target as HTMLElement).previousElementSibling as HTMLElement).textContent = `Mulai lagu dari ${tc(Number((e.target as HTMLInputElement).value) * 1000)}`; },
           onchange: (e) => { const v = Number((e.target as HTMLInputElement).value) * 1000; set({ inMs: v, lengthMs: Math.min(mus.lengthMs, mus.sourceMs - v) }); },
         })),
-        h('div', { class: 'muted small' }, 'Lagu otomatis fade in di awal dan fade out di akhir. Tarik ujung kanannya di timeline untuk memendekkan.'),
-        h('button', { class: 'danger-ghost wide', onclick: deleteSelected }, 'Hapus musik'),
+        h('div', { class: 'muted small' }, 'Tarik ujung kanannya di timeline untuk memendekkan.'),
       ),
+      fadeBlock('music', mus.id),
+      h('button', { class: 'danger-ghost wide', onclick: deleteSelected }, 'Hapus musik'),
     );
     return;
   }
@@ -1154,8 +1279,9 @@ function renderInspectorInner() {
         })),
         h('button', { class: 'secondary wide with-ico', 'data-aud': snd.file, 'data-aud-label': 'Dengarkan', 'data-aud-size': 15, onclick: () => toggleAudition(snd.file, snd.volume, snd.name) }, icon('play', 15), h('span', {}, 'Dengarkan')),
         h('div', { class: 'muted small' }, 'Geser di timeline untuk memindah. Tarik ujung kanannya untuk memotong.'),
-        h('button', { class: 'danger-ghost wide', onclick: deleteSelected }, 'Hapus suara'),
       ),
+      fadeBlock('sound', snd.id),
+      h('button', { class: 'danger-ghost wide', onclick: deleteSelected }, 'Hapus suara'),
     );
     return;
   }
@@ -1269,6 +1395,176 @@ function renderInspectorInner() {
 
 // ================= editing actions =================
 
+// ================= clipboard =================
+type ClipEntry = { kind: SelKind; data: unknown; start: number };
+let clipboard: { items: ClipEntry[]; base: number } | null = null;
+
+/** The picked items: the group selection, else the single selection. */
+function pickedItems(): { kind: SelKind; id: string }[] {
+  if (multi.size) return [...multi].map((k) => { const [kind, ...r] = k.split(':'); return { kind: kind as SelKind, id: r.join(':') }; });
+  return sel ? [sel] : [];
+}
+
+function copySelection(cut = false): boolean {
+  if (!P) return false;
+  const picked = pickedItems();
+  const items: ClipEntry[] = [];
+  for (const { kind, id } of picked) {
+    if (kind === 'clip') {
+      const i = tl().clips.findIndex((c) => c.id === id);
+      if (i >= 0) items.push({ kind, data: structuredClone(tl().clips[i]), start: clipStarts(tl().clips)[i] });
+      continue;
+    }
+    const obj = (listOf(kind) as { id: string }[]).find((x) => x.id === id);
+    const sp = span(kind, id);
+    if (obj && sp) items.push({ kind, data: structuredClone(obj), start: sp.a });
+  }
+  if (!items.length) { toast('Pilih dulu item di timeline untuk disalin.'); return false; }
+  clipboard = { items, base: Math.min(...items.map((i) => i.start)) };
+  if (cut) {
+    if (items.some((i) => i.kind === 'clip')) { toast('Potongan video utama tidak bisa dipotong-tempel. Pakai Salin lalu hapus potongannya.'); }
+    else deleteSelected();
+  }
+  toast(`${items.length} item ${cut ? 'dipotong' : 'disalin'}. Ctrl+V untuk menempel.`);
+  return true;
+}
+
+/** A main-track clip becomes a video layer: same file, same part, its own place on the canvas. */
+function clipAsLayer(c: VideoClip, start: number): VideoLayer | null {
+  const m = mediaOf(c.mediaId);
+  if (!m) return null;
+  const ly: VideoLayer = {
+    id: uid(), name: `${m.name} (salinan)`, source: 'media', mediaId: m.id, inMs: c.inMs, startMs: Math.max(0, Math.round(start)),
+    endMs: Math.max(0, Math.round(start)) + Math.round((c.outMs - c.inMs) / c.speed), crop: { ...NO_CROP }, box: { x: 0.5, y: 0.5, w: 1, h: 1 }, opacity: 1, volume: 0,
+  };
+  fillArea(ly, { x: 0.5, y: 0.5, w: 1, h: 1 });
+  return ly;
+}
+
+/**
+ * Pastes the clipboard. `at`: where the earliest item lands (default the playhead). Video clips from the main
+ * track always land at their own time as a new layer, so the copy stays in sync with the original.
+ */
+function pasteClipboard(at?: number) {
+  if (!P || !clipboard) { toast('Belum ada yang disalin. Pilih item lalu Ctrl+C.'); return; }
+  snapshot();
+  const shift = (at ?? t) - clipboard.base;
+  const fresh: { kind: SelKind; id: string }[] = [];
+  let videoLayers = 0, speedNote = false;
+  for (const it of clipboard.items) {
+    const d = structuredClone(it.data) as Record<string, unknown> & { id: string };
+    if (it.kind === 'clip') {
+      const c = d as unknown as VideoClip;
+      const ly = clipAsLayer(c, it.start);
+      if (!ly) continue;
+      if (c.speed !== 1) speedNote = true;
+      layers().push(ly); fresh.push({ kind: 'layer', id: ly.id }); videoLayers++;
+      continue;
+    }
+    d.id = uid();
+    const mv = (k: string) => { if (typeof d[k] === 'number' && (d[k] as number) < UNTIL_END) d[k] = Math.max(0, Math.round((d[k] as number) + shift)); };
+    mv('startMs'); mv('endMs');
+    if (it.kind === 'line') (d as unknown as CaptionLine).words = (d as unknown as CaptionLine).words.map((w) => ({ ...w, startMs: Math.max(0, w.startMs + shift), endMs: Math.max(0, w.endMs + shift) }));
+    if (it.kind === 'layer' && !/\(salinan\)$/.test((d as unknown as VideoLayer).name)) (d as unknown as VideoLayer).name = `${(d as unknown as VideoLayer).name} (salinan)`;
+    (listOf(it.kind) as unknown[]).push(d);
+    fresh.push({ kind: it.kind, id: d.id });
+  }
+  tl().captions.lines.sort((a, b) => a.startMs - b.startMs);
+  multi.clear();
+  if (fresh.length === 1) sel = fresh[0];
+  else { sel = null; for (const f of fresh) multi.add(mkey(f.kind, f.id)); }
+  changed({ left: true });
+  toast(videoLayers
+    ? `Video ditempel jadi layer baru di waktu yang sama.${speedNote ? ' Kecepatan potongan aslinya tidak ikut (layer diputar 1×).' : ''} Atur lewat tab Transform dan Crop.`
+    : `${fresh.length} item ditempel di ${tc(Math.max(0, (at ?? t)))}.`);
+}
+
+/** Copy + paste right after (clips: as a layer on the same time). */
+function duplicateSelection() {
+  if (!copySelection()) return;
+  const end = Math.max(...pickedItems().map(({ kind, id }) => (kind === 'clip' ? 0 : span(kind, id)?.b ?? 0)));
+  pasteClipboard(clipboard!.items.every((i) => i.kind === 'clip') ? undefined : end);
+}
+
+// ================= right-click menu =================
+type MenuItem = { label: string; icon?: IconName; keys?: string; run: () => void; danger?: boolean; disabled?: boolean } | 'sep';
+
+function closeMenu() { document.querySelector('.ctx-menu')?.remove(); }
+function openMenu(clientX: number, clientY: number, items: MenuItem[]) {
+  closeMenu();
+  const menu = h('div', { class: 'ctx-menu', role: 'menu' },
+    ...items.map((it) => it === 'sep' ? h('div', { class: 'ctx-sep' }) : h('button', {
+      class: `ctx-item${it.danger ? ' danger' : ''}`, role: 'menuitem', disabled: it.disabled,
+      onclick: () => { closeMenu(); it.run(); },
+    }, it.icon ? icon(it.icon, 15) : h('span', { class: 'ctx-ico' }), h('span', { class: 'ctx-label' }, it.label), it.keys ? h('kbd', {}, it.keys) : '')));
+  document.body.append(menu);
+  const r = menu.getBoundingClientRect();
+  menu.style.left = `${Math.min(clientX, window.innerWidth - r.width - 8)}px`;
+  menu.style.top = `${Math.min(clientY, window.innerHeight - r.height - 8)}px`;
+  const away = (e: Event) => { if (!(e.target as HTMLElement).closest?.('.ctx-menu')) { closeMenu(); off(); } };
+  const esc = (e: KeyboardEvent) => { if (e.key === 'Escape') { closeMenu(); off(); } };
+  const off = () => { window.removeEventListener('pointerdown', away, true); window.removeEventListener('keydown', esc, true); window.removeEventListener('blur', closeMenu); };
+  setTimeout(() => { window.addEventListener('pointerdown', away, true); window.addEventListener('keydown', esc, true); window.addEventListener('blur', closeMenu); }, 0);
+}
+
+function setFade(kind: FadeKind, id: string, which: 'in' | 'out' | 'none', ms = 500) {
+  const ft = fadeTarget(kind, id);
+  if (!ft) return;
+  snapshot();
+  if (which === 'none') { ft.obj.fadeInMs = 0; ft.obj.fadeOutMs = 0; }
+  else if (which === 'in') ft.obj.fadeInMs = Math.min(ms, Math.max(0, ft.len / 2 - 25));
+  else ft.obj.fadeOutMs = Math.min(ms, Math.max(0, ft.len / 2 - 25));
+  changed();
+}
+
+/** Right-click on the timeline: actions for what is under the pointer (or the picked group). */
+function timelineMenu(e: MouseEvent, x: number, y: number) {
+  if (!P) return;
+  const hit = y >= RULER ? hitTest(x, y) : null;
+  const atMs = Math.max(0, xToMs(x));
+  if (hit && !hit.marker && !isSelected(hit.kind, hit.id)) { multi.clear(); sel = { kind: hit.kind, id: hit.id }; renderInspector(); drawTimeline(); renderFrame(); }
+  const picked = pickedItems();
+  const one = picked.length === 1 ? picked[0] : null;
+  const paste: MenuItem[] = [
+    { label: 'Tempel di sini', icon: 'paste', disabled: !clipboard, run: () => pasteClipboard(atMs) },
+    { label: 'Tempel di playhead', icon: 'paste', keys: 'Ctrl+V', disabled: !clipboard, run: () => pasteClipboard() },
+    { label: 'Tempel di waktu aslinya', icon: 'paste', keys: 'Ctrl+Shift+V', disabled: !clipboard, run: () => pasteClipboard(clipboard?.base) },
+  ];
+  if (!picked.length) {
+    openMenu(e.clientX, e.clientY, [
+      ...paste, 'sep',
+      { label: 'Pilih semua item', icon: 'select', keys: 'Ctrl+A', run: () => { multi.clear(); for (const r of itemRects()) multi.add(mkey(r.kind, r.id)); sel = null; renderInspector(); drawTimeline(); } },
+      { label: 'Layer dari seluruh video utama', icon: 'layers', run: () => { snapshot(); const ly = addMainLayer(); if (ly) { sel = { kind: 'layer', id: ly.id }; changed({ left: true }); switchTab('transform'); } } },
+    ]);
+    return;
+  }
+  const items: MenuItem[] = [
+    { label: picked.length > 1 ? `Salin ${picked.length} item` : 'Salin', icon: 'copy', keys: 'Ctrl+C', run: () => copySelection() },
+    { label: 'Potong', icon: 'split', keys: 'Ctrl+X', disabled: picked.some((p) => p.kind === 'clip'), run: () => copySelection(true) },
+    { label: 'Duplikat', icon: 'dup', keys: 'Ctrl+D', run: duplicateSelection },
+  ];
+  if (one?.kind === 'clip') items.push({ label: 'Salin ke layer baru', icon: 'layers', run: () => { if (copySelection()) { pasteClipboard(); switchTab('transform'); } } });
+  items.push(...paste, 'sep');
+  if (one) {
+    const visual = one.kind === 'clip' || one.kind === 'layer' || one.kind === 'image' || one.kind === 'text';
+    if (visual) items.push({ label: 'Transform', icon: 'move', run: () => switchTab('transform') });
+    if (one.kind === 'clip' || one.kind === 'layer') items.push({ label: 'Crop', icon: 'crop', run: () => switchTab('crop') });
+    const fadeKind: FadeKind | null = one.kind === 'clip' ? (mediaOf(selected('clip')?.mediaId ?? '')?.hasAudio ? 'clip' : null)
+      : one.kind === 'sound' || one.kind === 'music' ? one.kind : one.kind === 'layer' && selected('layer')?.source === 'media' ? 'layer' : null;
+    if (fadeKind) {
+      items.push(
+        { label: 'Fade in 0,5 dtk', icon: 'fadeIn', run: () => setFade(fadeKind, one.id, 'in') },
+        { label: 'Fade out 0,5 dtk', icon: 'fadeOut', run: () => setFade(fadeKind, one.id, 'out') },
+        { label: 'Hapus fade', run: () => setFade(fadeKind, one.id, 'none') },
+      );
+    }
+    if (visual || fadeKind) items.push('sep');
+    items.push({ label: 'Split di playhead', icon: 'split', keys: 'Ctrl+B', run: splitHere });
+  }
+  items.push({ label: picked.length > 1 ? `Hapus ${picked.length} item` : 'Hapus', icon: 'trash', keys: 'Del', danger: true, run: deleteSelected });
+  openMenu(e.clientX, e.clientY, items);
+}
+
 function splitHere() {
   if (!P) return;
   const text = selected('text');
@@ -1337,6 +1633,16 @@ function videoFor(mediaId: string): HTMLVideoElement | null {
 
 let activeVideo: HTMLVideoElement | null = null;
 let activeIndex = -1;
+
+/** The main video's volume follows its clip's audio fades while playing. */
+function clipFadeVolume() {
+  const c = tl().clips[activeIndex], v = activeVideo;
+  if (!c || !v) return;
+  const start = clipStarts(tl().clips)[activeIndex];
+  const len = clipDuration(c);
+  const fd = fadesOf(c, len);
+  v.volume = clamp(c.volume * fadeGain(t - start, len, fd.fi, fd.fo), 0, 1);
+}
 
 /** Points the right <video> at the right source time for the playhead. */
 function syncVideo() {
@@ -1425,6 +1731,7 @@ function tickInner() {
   syncSfx();
   syncMusic();
   syncLayers();
+  clipFadeVolume();
   renderFrame();
   drawTimeline();
   updateTime();
@@ -1518,7 +1825,7 @@ function renderFrameInner() {
     let active = -1;
     line.words.forEach((w, i) => { if (t >= w.startMs) active = i; });
     const segs: Seg[] = line.words.map((w, i) => ({
-      text: w.text,
+      text: cap.caps ? w.text.toLocaleUpperCase('id-ID') : w.text,
       color: wordColor(w, i === active, cap),
       scale: wordScale(w.fx, anim, i === active, i <= active ? t - Math.max(line.startMs, w.startMs) : -1),
       hidden: anim === 'word' && i > active,
@@ -1938,6 +2245,83 @@ function capsule(ctx: CanvasRenderingContext2D, kind: keyof typeof TL_HUE, x: nu
   ctx.restore();
 }
 
+// ---------- audio fades on the timeline ----------
+type FadeKind = 'clip' | 'sound' | 'music' | 'layer';
+let fadeHandles: { kind: FadeKind; id: string; which: 'in' | 'out'; x: number; y: number }[] = [];
+/** The item whose audio fades, where it sits on the timeline, and its fade defaults. */
+function fadeTarget(kind: FadeKind, id: string) {
+  if (kind === 'clip') {
+    const i = tl().clips.findIndex((c) => c.id === id);
+    if (i < 0) return null;
+    const c = tl().clips[i];
+    return { obj: c as { fadeInMs?: number; fadeOutMs?: number }, start: clipStarts(tl().clips)[i], len: clipDuration(c), defIn: 0, defOut: 0 };
+  }
+  if (kind === 'sound') { const x = sounds().find((q) => q.id === id); return x ? { obj: x, start: x.startMs, len: x.lengthMs, defIn: 0, defOut: 0 } : null; }
+  if (kind === 'music') { const x = music().find((q) => q.id === id); return x ? { obj: x, start: x.startMs, len: Math.min(x.lengthMs, timelineDuration(tl()) - x.startMs), defIn: MUSIC_FADE_IN, defOut: MUSIC_FADE_OUT } : null; }
+  const x = layers().find((q) => q.id === id);
+  return x ? { obj: x, start: x.startMs, len: Math.min(x.endMs, timelineDuration(tl())) - x.startMs, defIn: 0, defOut: 0 } : null;
+}
+/** Ramps showing an audio fade, plus draggable dots when the item is selected. */
+function drawFades(ctx: CanvasRenderingContext2D, kind: FadeKind, id: string, x: number, y: number, w: number, hgt: number, isSel: boolean) {
+  const ft = fadeTarget(kind, id);
+  if (!ft) return;
+  const { fi, fo } = fadesOf(ft.obj, ft.len, ft.defIn, ft.defOut);
+  const fiPx = (fi / 1000) * pxPerSec, foPx = (fo / 1000) * pxPerSec;
+  ctx.save();
+  roundRect(ctx, x + 1, y + 0.5, Math.max(6, w - 2), hgt - 1, Math.min(8, hgt / 2));
+  ctx.clip();
+  ctx.fillStyle = 'rgba(8,10,10,.45)';
+  ctx.strokeStyle = 'rgba(255,255,255,.75)';
+  ctx.lineWidth = 1.2;
+  if (fiPx > 1) {
+    ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x + fiPx, y); ctx.lineTo(x, y + hgt); ctx.closePath(); ctx.fill();
+    ctx.beginPath(); ctx.moveTo(x, y + hgt); ctx.lineTo(x + fiPx, y); ctx.stroke();
+  }
+  if (foPx > 1) {
+    ctx.beginPath(); ctx.moveTo(x + w, y); ctx.lineTo(x + w - foPx, y); ctx.lineTo(x + w, y + hgt); ctx.closePath(); ctx.fill();
+    ctx.beginPath(); ctx.moveTo(x + w, y + hgt); ctx.lineTo(x + w - foPx, y); ctx.stroke();
+  }
+  ctx.restore();
+  if (!isSel || w < 30) return;
+  for (const [which, hx] of [['in', x + Math.max(6, fiPx)], ['out', x + w - Math.max(6, foPx)]] as const) {
+    ctx.beginPath(); ctx.arc(hx, y + 5, 4.5, 0, Math.PI * 2);
+    ctx.fillStyle = '#ffffff'; ctx.fill();
+    ctx.strokeStyle = '#0f1414'; ctx.lineWidth = 1.5; ctx.stroke();
+    fadeHandles.push({ kind, id, which, x: hx, y: y + 5 });
+  }
+}
+
+/** Fade in / fade out sliders, mirrored by the dots on the timeline. */
+function fadeBlock(kind: FadeKind, id: string): HTMLElement {
+  const ft = fadeTarget(kind, id);
+  if (!ft) return h('span');
+  const cur = fadesOf(ft.obj, ft.len, ft.defIn, ft.defOut);
+  const maxS = Math.max(0.1, Math.min(10, (ft.len - 100) / 1000));
+  const slider = (which: 'in' | 'out') => {
+    const v = (which === 'in' ? cur.fi : cur.fo) / 1000;
+    const name = which === 'in' ? 'Fade in' : 'Fade out';
+    return field(`${name} ${v.toFixed(1)} dtk`, h('input', {
+      type: 'range', min: 0, max: maxS, step: 0.1, value: Math.min(v, maxS),
+      onpointerdown: () => snapshot(),
+      oninput: (e) => {
+        const val = Number((e.target as HTMLInputElement).value) * 1000;
+        const other = which === 'in' ? fadesOf(ft.obj, ft.len, ft.defIn, ft.defOut).fo : fadesOf(ft.obj, ft.len, ft.defIn, ft.defOut).fi;
+        const ok = Math.round(clamp(val, 0, ft.len - other - 50));
+        if (which === 'in') ft.obj.fadeInMs = ok; else ft.obj.fadeOutMs = ok;
+        ((e.target as HTMLElement).previousElementSibling as HTMLElement).textContent = `${name} ${(ok / 1000).toFixed(1)} dtk`;
+        drawTimeline();
+      },
+      onchange: () => changed({ inspector: false, left: tab === 'music' }),
+    }));
+  };
+  return h('div', { class: 'block fade-block' },
+    h('div', { class: 'label' }, 'Fade suara'),
+    h('div', { class: 'fade-pic', 'aria-hidden': 'true' }, h('i', { style: `width:${Math.min(45, (cur.fi / ft.len) * 100)}%` }), h('b'), h('i', { style: `width:${Math.min(45, (cur.fo / ft.len) * 100)}%` })),
+    slider('in'), slider('out'),
+    h('div', { class: 'muted small' }, 'Atau tarik titik putih di pojok atas kotaknya di timeline.'),
+  );
+}
+
 function laneHint(ctx: CanvasRenderingContext2D, name: IconName, text: string, y: number, hgt: number) {
   drawIcon(ctx, name, 10, y + hgt / 2 - 6, 12, '#4d5452');
   ctx.fillStyle = '#5e6562';
@@ -1955,6 +2339,7 @@ function drawTimelineInner() {
   ctx.fillStyle = '#141616';
   ctx.fillRect(0, 0, W, H);
   computeLanes();
+  fadeHandles = [];
 
   // lane backgrounds
   for (const l of lanes) {
@@ -2032,6 +2417,7 @@ function drawTimelineInner() {
       roundRect(ctx, x + 2, lm.y + lm.h / 2 - 11, 5, 22, 2.5); ctx.fill();
       roundRect(ctx, x + w - 7, lm.y + lm.h / 2 - 11, 5, 22, 2.5); ctx.fill();
     }
+    if (mediaOf(c.mediaId)?.hasAudio) drawFades(ctx, 'clip', c.id, x, lm.y, w, lm.h, isSel);
   });
 
   // transition markers on the cuts
@@ -2078,6 +2464,7 @@ function drawTimelineInner() {
     const xx = msToX(ly.startMs), w = ((Math.min(ly.endMs, timelineDuration(tl())) - ly.startMs) / 1000) * pxPerSec;
     if (xx + w < 0 || xx > W) continue;
     capsule(ctx, 'layer', xx, ln.y, w, ln.h, isSelected('layer', ly.id), `${ly.name}${ly.source === 'main' ? ' · video utama' : ''}${ly.hidden ? ' · disembunyikan' : ''}`, !!ly.hidden);
+    if (ly.source === 'media' && ly.volume > 0.001) drawFades(ctx, 'layer', ly.id, xx, ln.y, w, ln.h, isSelected('layer', ly.id) && !multi.size);
   }
 
   // meme pictures
@@ -2099,6 +2486,7 @@ function drawTimelineInner() {
     const xx = msToX(mu.startMs), w = (mu.lengthMs / 1000) * pxPerSec;
     if (xx + w < 0 || xx > W) continue;
     capsule(ctx, 'music', xx, ln.y, w, ln.h, isSelected('music', mu.id), `${mu.name}${mu.duck !== 'off' ? '  · ducking' : ''}`);
+    drawFades(ctx, 'music', mu.id, xx, ln.y, Math.min(w, ((timelineDuration(tl()) - mu.startMs) / 1000) * pxPerSec), ln.h, isSelected('music', mu.id) && !multi.size);
   }
 
   // sound effects
@@ -2107,6 +2495,7 @@ function drawTimelineInner() {
     const xx = msToX(sn.startMs), w = (sn.lengthMs / 1000) * pxPerSec;
     if (xx + w < 0 || xx > W) continue;
     capsule(ctx, 'sound', xx, ln.y, w, ln.h, isSelected('sound', sn.id), sn.name);
+    drawFades(ctx, 'sound', sn.id, xx, ln.y, w, ln.h, isSelected('sound', sn.id) && !multi.size);
   }
 
   // drop marker while dragging a clip
@@ -2280,15 +2669,29 @@ function setupTimeline() {
     | { mode: 'move-clip'; id: string; sx: number; moved: boolean }
     | { mode: 'item'; kind: SelKind; id: string; edge: 'in' | 'out' | null; sx: number; a: number; b: number }
     | { mode: 'group'; sx: number; items: { kind: SelKind; id: string; a: number; b: number }[]; moved: boolean }
-    | { mode: 'marquee'; x0: number; y0: number; add: Set<string>; moved: boolean };
+    | { mode: 'marquee'; x0: number; y0: number; add: Set<string>; moved: boolean }
+    | { mode: 'fade'; kind: FadeKind; id: string; which: 'in' | 'out' };
   let drag: Drag | null = null;
   const pos = (e: MouseEvent) => { const r = tlCanvas.getBoundingClientRect(); return { x: e.clientX - r.left, y: e.clientY - r.top }; };
 
+  tlCanvas.addEventListener('contextmenu', (e) => {
+    e.preventDefault();
+    drag = null;
+    const { x, y } = pos(e);
+    timelineMenu(e, x, y);
+  });
+  tlCanvas.addEventListener('pointermove', (e) => {
+    if (drag) return;
+    const { x, y } = pos(e);
+    tlCanvas.style.cursor = fadeHandles.some((q) => Math.hypot(q.x - x, q.y - y) <= 8) ? 'ew-resize' : '';
+  });
   tlCanvas.addEventListener('pointerdown', (e) => {
-    if (!P) return;
+    if (!P || e.button === 2) return;
     const { x, y } = pos(e);
     tlCanvas.setPointerCapture(e.pointerId);
     if (y < RULER) { drag = { mode: 'scrub' }; seek(xToMs(x)); return; }
+    const fh = fadeHandles.find((q) => Math.hypot(q.x - x, q.y - y) <= 8);
+    if (fh && e.button === 0) { snapshot(); drag = { mode: 'fade', kind: fh.kind, id: fh.id, which: fh.which }; return; }
     const hit = hitTest(x, y);
     const additive = e.ctrlKey || e.metaKey || e.shiftKey;
     if (!hit) {
@@ -2355,6 +2758,18 @@ function setupTimeline() {
     }
     const dms = ((x - (('sx' in drag) ? drag.sx : x)) / pxPerSec) * 1000;
     if (drag.mode === 'scrub') { seek(xToMs(x)); return; }
+    if (drag.mode === 'fade') {
+      const ft = fadeTarget(drag.kind, drag.id);
+      if (!ft) return;
+      const cur = fadesOf(ft.obj, ft.len, ft.defIn, ft.defOut);
+      const at = xToMs(x) - ft.start;
+      if (drag.which === 'in') ft.obj.fadeInMs = Math.round(clamp(at, 0, ft.len - cur.fo - 50));
+      else ft.obj.fadeOutMs = Math.round(clamp(ft.len - at, 0, ft.len - cur.fi - 50));
+      const v = drag.which === 'in' ? ft.obj.fadeInMs! : ft.obj.fadeOutMs!;
+      tlCanvas.title = `Fade ${drag.which === 'in' ? 'in' : 'out'} ${(v / 1000).toFixed(2)} dtk`;
+      drawTimeline();
+      return;
+    }
     if (drag.mode === 'marquee') {
       if (!drag.moved && Math.hypot(x - drag.x0, y - drag.y0) < 4) return;
       drag.moved = true;
@@ -2416,6 +2831,7 @@ function setupTimeline() {
 
   const end = (e: PointerEvent) => {
     if (!drag || !P) { drag = null; return; }
+    if (drag.mode === 'fade') { drag = null; tlCanvas.title = ''; changed(); return; }
     if (drag.mode === 'marquee') {
       const d = drag;
       drag = null;
@@ -2572,7 +2988,8 @@ function syncSfx() {
     const inside = t >= s.startMs && t < soundEnd(s);
     if (!inside) { if (a && !a.paused) a.pause(); continue; }
     if (!a) { a = new Audio(fileSrc(s.file)); a.preload = 'auto'; sfxEls.set(s.id, a); }
-    a.volume = clamp(s.volume, 0, 1);
+    const sfd = fadesOf(s, s.lengthMs);
+    a.volume = clamp(s.volume * fadeGain(t - s.startMs, s.lengthMs, sfd.fi, sfd.fo), 0, 1);
     const want = (t - s.startMs) / 1000;
     if (a.paused) { a.currentTime = want; void a.play().catch(() => undefined); }
     else if (Math.abs(a.currentTime - want) > 0.25) a.currentTime = want;
@@ -2580,7 +2997,12 @@ function syncSfx() {
 }
 
 function switchTab(k: LeftTab) {
+  if (k === 'crop' && sel?.kind === 'layer') cropMode = true;
+  if (k === 'transform') cropMode = false;
+  if (tab === 'crop' && k !== 'crop') cropMode = false;
   tab = k;
+  if (settings.leftHidden) togglePanel('left');
+  renderFrame();
   document.querySelectorAll('.rail button').forEach((b) => { const on = (b as HTMLElement).dataset.tab === k; b.classList.toggle('on', on); b.setAttribute('aria-selected', on ? 'true' : 'false'); });
   const head = $('#left-head');
   if (head) head.textContent = RAIL.find((r) => r[0] === k)![2];
@@ -3118,7 +3540,9 @@ function syncMusic() {
     const cur = musicLevel.get(mu.id) ?? target;
     const next = cur + (target - cur) * (target < cur ? 0.35 : 0.06);  // fast down, slow up, like the export
     musicLevel.set(mu.id, next);
-    a.volume = clamp(next, 0, 1);
+    const mlen = Math.min(mu.lengthMs, timelineDuration(tl()) - mu.startMs);
+    const mfd = fadesOf(mu, mlen, MUSIC_FADE_IN, MUSIC_FADE_OUT);
+    a.volume = clamp(next * fadeGain(t - mu.startMs, mlen, mfd.fi, mfd.fo), 0, 1);
     const want = (mu.inMs + t - mu.startMs) / 1000;
     if (a.paused) { a.currentTime = want; void a.play().catch(() => undefined); }
     else if (Math.abs(a.currentTime - want) > 0.3) a.currentTime = want;
@@ -3414,22 +3838,6 @@ function addMediaLayer(m: MediaEntry) {
   toast(`"${m.name}" jadi layer. Geser, tarik pojoknya, atau tekan C untuk crop.`);
 }
 
-/** The usual fix for a recording that caught extra windows: the same video twice, framed differently. */
-function splitTopBottom() {
-  if (!P || !tl().clips.length) { toast('Tambahkan video ke timeline dulu.'); return; }
-  snapshot();
-  const W = tl().width, H = tl().height;
-  const top = addMainLayer('Atas (gameplay)', { l: 0, t: 0, r: 0, b: 0.5 }, { x: 0.5, y: 0.25, w: 1, h: 0.5 });
-  const bottom = addMainLayer('Bawah (facecam)', { l: 0, t: 0.5, r: 0, b: 0 }, { x: 0.5, y: 0.75, w: 1, h: 0.5 });
-  void W; void H;
-  tl().hideMain = true;
-  if (top) sel = { kind: 'layer', id: top.id };
-  cropMode = true;
-  changed({ left: true });
-  void bottom;
-  toast('Dua layer dibuat dari video utama. Atur kotak crop tiap layer ke bagian yang mau dipakai, lalu Enter.');
-}
-
 function layerVideo(ly: VideoLayer): HTMLVideoElement | null {
   if (ly.source !== 'media' || !ly.mediaId) return null;
   let v = layerVideos.get(ly.id);
@@ -3453,7 +3861,9 @@ function syncLayers() {
     if (!v) continue;
     const inside = !ly.hidden && t >= ly.startMs && t < ly.endMs;
     v.muted = ly.volume <= 0.001;
-    v.volume = clamp(ly.volume, 0, 1);
+    const llen = Math.min(ly.endMs, timelineDuration(tl())) - ly.startMs;
+    const lfd = fadesOf(ly, llen);
+    v.volume = clamp(ly.volume * fadeGain(t - ly.startMs, llen, lfd.fi, lfd.fo), 0, 1);
     const want = (ly.inMs + (t - ly.startMs)) / 1000;
     if (!inside) { if (!v.paused) v.pause(); continue; }
     if (playing) {
@@ -3634,13 +4044,217 @@ function layerPointerUp(): boolean {
   return true;
 }
 
+// ================= Transform & Crop tabs =================
+
+/** A slider row: label with value, live preview while dragging, saved when let go. */
+function tfSlider(label: string, value: number, min: number, max: number, step: number, fmt: (v: number) => string, apply: (v: number) => void): HTMLElement {
+  return h('div', { class: 'tf-row' },
+    h('span', { class: 'tf-label' }, label),
+    h('input', {
+      type: 'range', min, max, step, value, 'aria-label': label,
+      onpointerdown: () => snapshot(),
+      oninput: (e) => { const v = Number((e.target as HTMLInputElement).value); apply(v); ((e.target as HTMLElement).nextElementSibling as HTMLElement).textContent = fmt(v); renderFrame(); },
+      onchange: () => changed(),
+    }),
+    h('span', { class: 'tf-val mono' }, fmt(value)),
+  );
+}
+const pct = (v: number) => `${Math.round(v)}%`;
+
+function tfHeader(kind: string, name: string): HTMLElement {
+  return h('div', { class: 'tf-head' }, h('span', { class: 'tf-kind' }, kind), h('span', { class: 'tf-name' }, name));
+}
+function tfEmpty(what: string): Node[] {
+  const vids = layers();
+  return [
+    h('div', { class: 'empty-drop' },
+      h('div', { class: 'empty-title' }, 'Pilih dulu yang mau diatur'),
+      h('div', { class: 'muted small' }, `Klik ${what} di timeline atau di preview, lalu atur di sini.`),
+    ),
+    vids.length ? h('div', { class: 'block' }, h('div', { class: 'label' }, 'Layer video'),
+      ...[...vids].reverse().map((ly) => h('button', { class: 'secondary wide', onclick: () => { multi.clear(); sel = { kind: 'layer', id: ly.id }; if (t < ly.startMs || t >= ly.endMs) seek(ly.startMs); if (tab === 'crop') cropMode = true; renderInspector(); drawTimeline(); renderFrame(); } }, ly.name))) : h('span'),
+  ];
+}
+
+function transformPanel(): Node[] {
+  const set = (fn: () => void) => { snapshot(); fn(); changed(); };
+  const ly = selected('layer');
+  if (ly) {
+    const src = srcSize(ly);
+    const ratio = () => { const cs = cropSize(ly.crop, src.w, src.h); return (cs.h / cs.w) * (tl().width / tl().height); };
+    return [
+      tfHeader('Layer video', ly.name),
+      h('div', { class: 'block' },
+        h('div', { class: 'label' }, 'Posisi cepat'),
+        h('div', { class: 'quick-grid' },
+          h('button', { class: 'chip', onclick: () => set(() => fillArea(ly, { x: 0.5, y: 0.5, w: 1, h: 1 })) }, 'Penuh'),
+          h('button', { class: 'chip', onclick: () => set(() => fillArea(ly, { x: 0.5, y: 0.25, w: 1, h: 0.5 })) }, 'Atas'),
+          h('button', { class: 'chip', onclick: () => set(() => fillArea(ly, { x: 0.5, y: 0.75, w: 1, h: 0.5 })) }, 'Bawah'),
+          h('button', { class: 'chip', onclick: () => set(() => { ly.box = boxFor(ly.crop, src, 1, 0.5, 0.5); }) }, 'Pas lebar'),
+          h('button', { class: 'chip', onclick: () => set(() => { ly.box = boxFor(ly.crop, src, 0.34, 0.78, 0.2); }) }, 'Pojok kanan'),
+          h('button', { class: 'chip', onclick: () => set(() => { ly.box = boxFor(ly.crop, src, 0.34, 0.22, 0.2); }) }, 'Pojok kiri'),
+        ),
+      ),
+      h('div', { class: 'block' },
+        h('div', { class: 'label' }, 'Posisi & ukuran'),
+        tfSlider('X', ly.box.x * 100, -20, 120, 0.5, pct, (v) => { ly.box.x = v / 100; }),
+        tfSlider('Y', ly.box.y * 100, -20, 120, 0.5, pct, (v) => { ly.box.y = v / 100; }),
+        tfSlider('Ukuran', ly.box.w * 100, 5, 250, 1, pct, (v) => { ly.box.w = v / 100; ly.box.h = ly.box.w * ratio(); }),
+        h('label', { class: 'check' }, h('input', {
+          type: 'checkbox', checked: Math.abs(ly.box.h - ly.box.w * ratio()) < 0.01,
+          onchange: (e) => { if ((e.target as HTMLInputElement).checked) set(() => { ly.box.h = ly.box.w * ratio(); }); },
+        }), 'Tidak gepeng (ikut proporsi crop)'),
+        tfSlider('Lebar', ly.box.w * 100, 5, 250, 1, pct, (v) => { ly.box.w = v / 100; }),
+        tfSlider('Tinggi', ly.box.h * 100, 5, 250, 1, pct, (v) => { ly.box.h = v / 100; }),
+        tfSlider('Opacity', ly.opacity * 100, 5, 100, 1, pct, (v) => { ly.opacity = v / 100; }),
+      ),
+      h('div', { class: 'tf-actions' },
+        h('button', { class: 'secondary with-ico', onclick: () => switchTab('crop') }, icon('crop', 15), 'Crop'),
+        h('button', { class: 'ghost', onclick: () => set(() => fillArea(ly, { x: 0.5, y: 0.5, w: 1, h: 1 })) }, 'Reset'),
+      ),
+      h('div', { class: 'muted small' }, 'Bisa juga langsung di preview: geser untuk memindah, tarik pojok untuk resize (Shift = bebas).'),
+    ];
+  }
+  const clip = selected('clip');
+  if (clip) {
+    return [
+      tfHeader('Video utama', mediaOf(clip.mediaId)?.name ?? ''),
+      h('div', { class: 'block' },
+        h('div', { class: 'label' }, 'Isi layar'),
+        h('div', { class: 'seg' },
+          h('button', { class: clip.fit === 'fill' ? 'on' : '', onclick: () => set(() => { clip.fit = 'fill'; }) }, 'Penuh'),
+          h('button', { class: clip.fit === 'fit' ? 'on' : '', onclick: () => set(() => { clip.fit = 'fit'; }) }, 'Utuh'),
+        ),
+        tfSlider('Zoom', (clip.zoom ?? 1) * 100, 100, 300, 5, pct, (v) => { clip.zoom = v / 100; }),
+        tfSlider('Arah X', (clip.zx ?? 0.5) * 100, 0, 100, 1, pct, (v) => { clip.zx = v / 100; }),
+        tfSlider('Arah Y', (clip.zy ?? 0.5) * 100, 0, 100, 1, pct, (v) => { clip.zy = v / 100; }),
+      ),
+      h('div', { class: 'tf-actions' },
+        h('button', { class: 'ghost', onclick: () => set(() => { clip.zoom = 1; clip.zx = 0.5; clip.zy = 0.5; }) }, 'Reset zoom'),
+      ),
+      h('div', { class: 'muted small' }, 'Video utama mengisi seluruh layar. Mau digeser, dikecilkan, atau di-crop bebas? Jadikan layer dulu: Ctrl+C lalu Ctrl+V, atau klik kanan → Salin ke layer baru.'),
+    ];
+  }
+  const im = selected('image');
+  if (im) {
+    return [
+      tfHeader('Meme', im.name),
+      h('div', { class: 'block' },
+        h('div', { class: 'label' }, 'Posisi cepat'),
+        h('div', { class: 'quick-grid' },
+          h('button', { class: 'chip', onclick: () => set(() => { im.x = 0.5; im.y = 0.5; }) }, 'Tengah'),
+          h('button', { class: 'chip', onclick: () => set(() => { im.x = 0.5; im.y = 0.28; }) }, 'Atas'),
+          h('button', { class: 'chip', onclick: () => set(() => { im.x = 0.5; im.y = 0.62; }) }, 'Bawah'),
+        ),
+        tfSlider('X', im.x * 100, 0, 100, 0.5, pct, (v) => { im.x = v / 100; }),
+        tfSlider('Y', im.y * 100, 0, 100, 0.5, pct, (v) => { im.y = v / 100; }),
+        tfSlider('Ukuran', im.scale * 100, 5, 150, 1, pct, (v) => { im.scale = v / 100; }),
+      ),
+    ];
+  }
+  const tx = selected('text');
+  if (tx) {
+    return [
+      tfHeader('Teks', tx.text.split('\n')[0]),
+      h('div', { class: 'block' },
+        h('div', { class: 'quick-grid' },
+          h('button', { class: 'chip', onclick: () => set(() => { tx.x = 0.5; tx.y = 0.18; }) }, 'Atas'),
+          h('button', { class: 'chip', onclick: () => set(() => { tx.x = 0.5; tx.y = 0.5; }) }, 'Tengah'),
+          h('button', { class: 'chip', onclick: () => set(() => { tx.x = 0.5; tx.y = 0.8; }) }, 'Bawah'),
+        ),
+        tfSlider('X', tx.x * 100, 0, 100, 0.5, pct, (v) => { tx.x = v / 100; }),
+        tfSlider('Y', tx.y * 100, 0, 100, 0.5, pct, (v) => { tx.y = v / 100; }),
+        tfSlider('Ukuran', tx.style.size, 24, 200, 1, (v) => `${Math.round(v)}`, (v) => { tx.style.size = Math.round(v); }),
+      ),
+    ];
+  }
+  return tfEmpty('video, layer, meme, atau teks');
+}
+
+/** Trims a crop around its centre to an aspect ratio (w/h of the result in pixels). */
+function cropToAspect(ly: VideoLayer, aspect: number) {
+  const src = srcSize(ly);
+  const c = { ...ly.crop };
+  const cs = cropSize(c, src.w, src.h);
+  const have = cs.w / cs.h;
+  if (have > aspect) { const cut = (cs.w - cs.h * aspect) / src.w / 2; c.l += cut; c.r += cut; }
+  else { const cut = (cs.h - cs.w / aspect) / src.h / 2; c.t += cut; c.b += cut; }
+  ly.crop = c;
+}
+
+function cropPanel(): Node[] {
+  const ly = selected('layer');
+  if (ly) {
+    const src = srcSize(ly);
+    const set = (fn: () => void, keepBox = true) => { snapshot(); fn(); if (keepBox) ly.box = boxFor(ly.crop, src, ly.box.w, ly.box.x, ly.box.y); changed(); };
+    const side = (label: string, k: keyof Crop, other: keyof Crop) => tfSlider(label, ly.crop[k] * 100, 0, 95, 0.5, pct, (v) => { ly.crop[k] = Math.min(v / 100, 0.97 - ly.crop[other]); });
+    return [
+      tfHeader('Layer video', ly.name),
+      h('div', { class: 'block' },
+        h('div', { class: 'seg' },
+          h('button', { class: cropMode ? 'on' : '', onclick: () => { cropMode = true; renderLeft(); renderFrame(); } }, 'Crop di preview'),
+          h('button', { class: !cropMode ? 'on' : '', onclick: () => { cropMode = false; renderLeft(); renderFrame(); } }, 'Selesai'),
+        ),
+        h('div', { class: 'muted small' }, cropMode ? 'Tarik sisi atau pojok kotak kuning di preview. Bagian yang terpotong tampil redup.' : 'Klik "Crop di preview" untuk menarik kotak crop langsung di video.'),
+      ),
+      h('div', { class: 'block' },
+        h('div', { class: 'label' }, 'Bentuk'),
+        h('div', { class: 'quick-grid' },
+          ...([['Bebas', 0], ['9:16', 9 / 16], ['1:1', 1], ['4:5', 4 / 5], ['16:9', 16 / 9], ['4:3', 4 / 3]] as [string, number][]).map(([n, a]) =>
+            h('button', { class: 'chip', title: n === 'Bebas' ? 'Hapus crop' : `Potong jadi ${n} dari tengah`, onclick: () => set(() => { if (!a) ly.crop = { ...NO_CROP }; else { ly.crop = { ...NO_CROP }; cropToAspect(ly, a); } }) }, n)),
+        ),
+        h('div', { class: 'label' }, 'Ambil bagian'),
+        h('div', { class: 'quick-grid' },
+          h('button', { class: 'chip', onclick: () => set(() => { ly.crop = { l: 0, t: 0, r: 0, b: 0.5 }; }) }, 'Atas'),
+          h('button', { class: 'chip', onclick: () => set(() => { ly.crop = { l: 0, t: 0.5, r: 0, b: 0 }; }) }, 'Bawah'),
+          h('button', { class: 'chip', onclick: () => set(() => { ly.crop = { l: 0, t: 0.25, r: 0, b: 0.25 }; }) }, 'Tengah'),
+          h('button', { class: 'chip', onclick: () => set(() => { ly.crop = { l: 0, t: 0, r: 0.5, b: 0 }; }) }, 'Kiri'),
+          h('button', { class: 'chip', onclick: () => set(() => { ly.crop = { l: 0.5, t: 0, r: 0, b: 0 }; }) }, 'Kanan'),
+          h('button', { class: 'chip', onclick: () => set(() => { ly.crop = { ...NO_CROP }; }) }, 'Reset'),
+        ),
+      ),
+      h('div', { class: 'block' },
+        h('div', { class: 'label' }, 'Potong dari tiap sisi'),
+        side('Kiri', 'l', 'r'), side('Atas', 't', 'b'), side('Kanan', 'r', 'l'), side('Bawah', 'b', 't'),
+        h('button', { class: 'ghost small', onclick: () => set(() => undefined) }, 'Kotak ikut proporsi crop (tidak gepeng)'),
+      ),
+      h('div', { class: 'tf-actions' },
+        h('button', { class: 'secondary with-ico', onclick: () => switchTab('transform') }, icon('move', 15), 'Transform'),
+      ),
+    ];
+  }
+  const clip = selected('clip');
+  if (clip) {
+    return [
+      tfHeader('Video utama', mediaOf(clip.mediaId)?.name ?? ''),
+      h('div', { class: 'empty-drop' },
+        h('div', { class: 'empty-title' }, 'Crop dilakukan di layer'),
+        h('div', { class: 'muted small' }, 'Video utama selalu mengisi layar. Salin potongan ini jadi layer, lalu crop sesukamu. Video utamanya bisa disembunyikan.'),
+      ),
+      h('button', {
+        class: 'primary wide with-ico', onclick: () => {
+          const i = tl().clips.indexOf(clip);
+          const ly = clipAsLayer(clip, clipStarts(tl().clips)[i]);
+          if (!ly) return;
+          snapshot(); layers().push(ly); multi.clear(); sel = { kind: 'layer', id: ly.id }; cropMode = true;
+          changed({ left: true });
+          toast('Potongan ini sekarang juga jadi layer. Tarik kotak kuning di preview untuk crop.');
+        },
+      }, icon('layers', 16), 'Salin ke layer & crop'),
+      h('label', { class: 'check' }, h('input', {
+        type: 'checkbox', checked: !tl().hideMain,
+        onchange: (e) => { snapshot(); tl().hideMain = !(e.target as HTMLInputElement).checked; changed({ left: true }); },
+      }), 'Tampilkan video utama di belakang layer'),
+    ];
+  }
+  return tfEmpty('video atau layer');
+}
+
 function layerPanel(): Node[] {
   const list = [...layers()].reverse();  // top first
   return [
-    h('p', { class: 'muted small hint-p' }, 'Setiap layer bisa digeser, di-resize, dan di-crop di preview. Layer paling atas tampil paling depan.'),
+    h('p', { class: 'muted small hint-p' }, 'Mau video yang sama di dua tempat? Klik video di timeline, Ctrl+C lalu Ctrl+V (atau klik kanan → Salin ke layer baru), lalu atur lewat tab Transform dan Crop. Layer paling atas tampil paling depan.'),
     h('div', { class: 'stack' },
-      h('button', { class: 'primary wide', onclick: splitTopBottom }, '⬒ Pisah atas + bawah dari video utama'),
-      h('div', { class: 'muted small' }, 'Untuk rekaman yang ikut merekam jendela lain: bagian atas dan bawah video yang sama jadi dua layer, sisanya dibuang.'),
       h('button', { class: 'secondary wide', onclick: () => { snapshot(); const ly = addMainLayer(); if (ly) { sel = { kind: 'layer', id: ly.id }; cropMode = true; changed({ left: true }); } } }, '+ Layer dari video utama'),
       h('button', {
         class: 'secondary wide', onclick: async () => {
@@ -3743,8 +4357,9 @@ function layerInspector(ly: VideoLayer): Node[] {
         onchange: (e) => set(() => { ly.volume = Number((e.target as HTMLInputElement).value) / 100; }),
       })) : h('div', { class: 'muted small' }, 'Suara layer dari video utama sudah ikut di video utama.'),
       h('div', { class: 'muted small' }, 'Atur kapan layer muncul dengan menarik ujung kotaknya di lajur LAYER pada timeline.'),
-      h('button', { class: 'danger-ghost wide', onclick: deleteSelected }, 'Hapus layer'),
     ),
+    ly.source === 'media' && ly.volume > 0.001 ? fadeBlock('layer', ly.id) : h('span'),
+    h('button', { class: 'danger-ghost wide', onclick: deleteSelected }, 'Hapus layer'),
   ];
 }
 
@@ -3887,6 +4502,10 @@ function onKey(e: KeyboardEvent) {
   if (ctrl && e.key.toLowerCase() === 'z') { e.preventDefault(); if (e.shiftKey) redo(); else undo(); return; }
   if (ctrl && e.key.toLowerCase() === 'y') { e.preventDefault(); redo(); return; }
   if (ctrl && e.key.toLowerCase() === 'b') { e.preventDefault(); splitHere(); return; }
+  if (ctrl && e.key.toLowerCase() === 'c') { e.preventDefault(); copySelection(); return; }
+  if (ctrl && e.key.toLowerCase() === 'x') { e.preventDefault(); copySelection(true); return; }
+  if (ctrl && e.key.toLowerCase() === 'v') { e.preventDefault(); pasteClipboard(e.shiftKey && clipboard ? clipboard.base : undefined); return; }
+  if (ctrl && e.key.toLowerCase() === 'd') { e.preventDefault(); duplicateSelection(); return; }
   if (ctrl && e.key.toLowerCase() === 'a') {
     e.preventDefault();
     multi.clear();

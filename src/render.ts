@@ -29,6 +29,8 @@ export interface VideoClip {
   zx?: number;    // 0..1, where the zoom looks (horizontal)
   zy?: number;    // 0..1 (vertical)
   trans?: ClipTrans;  // transition from the previous clip into this one
+  fadeInMs?: number;  // audio fade at the start / end of this piece
+  fadeOutMs?: number;
 }
 
 export type ClipTrans = 'none' | 'punch' | 'shake' | 'flash' | 'blur' | 'fade';
@@ -64,6 +66,8 @@ export interface MusicItem {
   sourceMs: number;
   volume: number;    // 0..1.5
   duck: Duck;
+  fadeInMs?: number;   // default 600
+  fadeOutMs?: number;  // default 1200
 }
 
 export interface TextStyle {
@@ -173,6 +177,8 @@ export interface Captions {
   style: TextStyle;
   lines: CaptionLine[];
   anim?: CapAnim;
+  caps?: boolean;      // show every word in capitals
+  preset?: string;     // name of the template last applied
 }
 
 /** Caption animation: how each line enters (pop/fade/rise/shake), or word by word (word/bounce). */
@@ -190,6 +196,8 @@ export interface SoundItem {
   lengthMs: number;    // how much of the sound plays (<= source length)
   sourceMs: number;    // full length of the file
   volume: number;      // 0..2
+  fadeInMs?: number;
+  fadeOutMs?: number;
 }
 
 export type Trans = 'none' | 'fade' | 'pop' | 'slide';
@@ -280,6 +288,31 @@ export interface VideoLayer {
   opacity: number;    // 0..1
   volume: number;     // media layers, 0..2 (0 = muted)
   hidden?: boolean;
+  fadeInMs?: number;  // media layers: audio fade
+  fadeOutMs?: number;
+}
+
+export const MUSIC_FADE_IN = 600, MUSIC_FADE_OUT = 1200;
+/** Audio fade lengths of an item, never longer than half of it together. */
+export function fadesOf(it: { fadeInMs?: number; fadeOutMs?: number }, lenMs: number, defIn = 0, defOut = 0) {
+  let fi = Math.max(0, it.fadeInMs ?? defIn), fo = Math.max(0, it.fadeOutMs ?? defOut);
+  const room = Math.max(0, lenMs - 50);
+  if (fi + fo > room) { const k = room / (fi + fo || 1); fi *= k; fo *= k; }
+  return { fi, fo };
+}
+/** Loudness 0..1 at `localMs` into an item `lenMs` long (straight ramps, the same as ffmpeg's afade). */
+export function fadeGain(localMs: number, lenMs: number, fi: number, fo: number) {
+  let g = 1;
+  if (fi > 0 && localMs < fi) g = Math.max(0, localMs / fi);
+  if (fo > 0 && localMs > lenMs - fo) g = Math.min(g, Math.max(0, (lenMs - localMs) / fo));
+  return g;
+}
+/** afade filters for an item `lenS` seconds long, placed before any delay. */
+function afades(fi: number, fo: number, lenMs: number): string {
+  const out: string[] = [];
+  if (fi > 0) out.push(`afade=t=in:st=0:d=${(fi / 1000).toFixed(3)}`);
+  if (fo > 0) out.push(`afade=t=out:st=${(Math.max(0, lenMs - fo) / 1000).toFixed(3)}:d=${(fo / 1000).toFixed(3)}`);
+  return out.length ? `,${out.join(',')}` : '';
 }
 
 export const NO_CROP: Crop = { l: 0, t: 0, r: 0, b: 0 };
@@ -412,7 +445,7 @@ export function buildAss(tl: Timeline, fontScale: (font: string, bold: boolean) 
         ? `\\fscx${sc(0.3 * v)}\\fscy${sc(0.3 * v)}\\t(0,140,\\fscx${sc(1.12 * v)}\\fscy${sc(1.12 * v)})\\t(140,240,\\fscx${sc(v)}\\fscy${sc(v)})`
         : `\\fscx${sc(v)}\\fscy${sc(v)}`;
       const text = ws.length ? ws.map((x, j) => {
-        let t = assEscape(x.text);
+        let t = assEscape(cap.caps ? x.text.toLocaleUpperCase('id-ID') : x.text);
         const isActive = j === e.active;
         const col = wordColor(x, isActive, cap);
         if (col !== cap.style.color) t = `{\\c${assColor(col)}&}${t}{${base}}`;
@@ -552,8 +585,11 @@ export function renderArgs(spec: RenderSpec): string[] {
     f.push(`[${i}:v]setpts=PTS-STARTPTS${sp},${chain},format=yuv420p[v${i}]`);
     const dur = (clipDuration(c) / 1000).toFixed(3);
     if (m.hasAudio) {
+      const cf = fadesOf(c, clipDuration(c));
       const chain = ['asetpts=PTS-STARTPTS', ...atempoChain(c.speed), `volume=${Number(c.volume.toFixed(3))}`,
         'aresample=48000:async=1', 'aformat=sample_fmts=fltp:channel_layouts=stereo', `apad`, `atrim=0:${dur}`];
+      const fx = afades(cf.fi, cf.fo, clipDuration(c));
+      if (fx) chain.push(fx.slice(1));
       f.push(`[${i}:a]${chain.join(',')}[a${i}]`);
     } else {
       f.push(`anullsrc=r=48000:cl=stereo,atrim=0:${dur},aformat=sample_fmts=fltp:channel_layouts=stereo[a${i}]`);
@@ -601,7 +637,8 @@ export function renderArgs(spec: RenderSpec): string[] {
       f.push(`[${input}:v]setpts=PTS-STARTPTS,fps=${F},${look},setpts=PTS+${st}/TB[ly${k}]`);
       if (m.hasAudio && l.volume > 0.001) {
         const d = Math.round(a);
-        f.push(`[${input}:a]asetpts=PTS-STARTPTS,aformat=sample_fmts=fltp:channel_layouts=stereo,aresample=48000,volume=${num(l.volume)},adelay=${d}|${d}[lya${k}]`);
+        const lf = fadesOf(l, b - a);
+        f.push(`[${input}:a]asetpts=PTS-STARTPTS,aformat=sample_fmts=fltp:channel_layouts=stereo,aresample=48000,volume=${num(l.volume)}${afades(lf.fi, lf.fo, b - a)},adelay=${d}|${d}[lya${k}]`);
         layerAudio.push(`[lya${k}]`);
       }
       input++;
@@ -681,8 +718,8 @@ export function renderArgs(spec: RenderSpec): string[] {
     const len = Math.min(m.lengthMs, total - m.startMs) / 1000;
     args.push('-ss', (m.inMs / 1000).toFixed(3), '-t', len.toFixed(3), '-i', m.file);
     const d = Math.max(0, Math.round(m.startMs));
-    const fo = Math.max(0, len - 1.2).toFixed(3);
-    f.push(`[${input}:a]aformat=sample_fmts=fltp:channel_layouts=stereo,aresample=48000,volume=${Number(m.volume.toFixed(3))},afade=t=in:d=0.6,afade=t=out:st=${fo}:d=1.2,adelay=${d}|${d}[mu${k}]`);
+    const mf = fadesOf(m, len * 1000, MUSIC_FADE_IN, MUSIC_FADE_OUT);
+    f.push(`[${input}:a]aformat=sample_fmts=fltp:channel_layouts=stereo,aresample=48000,volume=${Number(m.volume.toFixed(3))}${afades(mf.fi, mf.fo, len * 1000)},adelay=${d}|${d}[mu${k}]`);
     if (m.duck !== 'off') {
       f.push(`[mu${k}][sc${dj}]sidechaincompress=threshold=0.015:ratio=${DUCK_RATIO[m.duck]}:attack=20:release=450:makeup=1[md${k}]`);
       labels.push(`[md${k}]`);
@@ -697,7 +734,8 @@ export function renderArgs(spec: RenderSpec): string[] {
     sfx.forEach((s, k) => {
       args.push('-t', (s.lengthMs / 1000).toFixed(3), '-i', s.file);
       const d = Math.max(0, Math.round(s.startMs));
-      f.push(`[${input}:a]aformat=sample_fmts=fltp:channel_layouts=stereo,aresample=48000,volume=${Number(s.volume.toFixed(3))},adelay=${d}|${d}[sfx${k}]`);
+      const sf = fadesOf(s, s.lengthMs);
+      f.push(`[${input}:a]aformat=sample_fmts=fltp:channel_layouts=stereo,aresample=48000,volume=${Number(s.volume.toFixed(3))}${afades(sf.fi, sf.fo, s.lengthMs)},adelay=${d}|${d}[sfx${k}]`);
       labels.push(`[sfx${k}]`);
       input++;
     });

@@ -58,6 +58,19 @@ const scenarios: [string, (tl: Timeline) => void][] = [
     tl.layers = [{ id: 'o', name: 'Lain', source: 'media', mediaId: 'm', inMs: 6000, startMs: 2000, endMs: 5000, crop: { l: 0.1, t: 0.1, r: 0.1, b: 0.5 }, box: { x: 0.5, y: 0.5, w: 0.6, h: 0.3 }, opacity: 1, volume: 0.8 }];
   }],
   ['kualitas 40%', () => undefined],
+  ['fade suara di potongan, efek, musik, layer', (tl) => {
+    tl.clips[0].fadeInMs = 500; tl.clips[1].fadeOutMs = 900;
+    tl.sounds = [{ id: 's', file: `${dir}/sfx.ogg`, name: 's', startMs: 1000, lengthMs: 1200, sourceMs: 1200, volume: 1, fadeInMs: 300, fadeOutMs: 600 }];
+    tl.music = [{ id: 'mu', file: `${dir}/music.ogg`, name: 'm', startMs: 500, inMs: 0, lengthMs: 30000, sourceMs: 30000, volume: 0.5, duck: 'off', fadeInMs: 2000, fadeOutMs: 0 }];
+    tl.layers = [{ id: 'o', name: 'Salinan', source: 'media', mediaId: 'm', inMs: 5000, startMs: 2000, endMs: 6000, crop: { l: 0, t: 0.5, r: 0, b: 0 }, box: { x: 0.5, y: 0.75, w: 1, h: 0.5 }, opacity: 1, volume: 0.7, fadeInMs: 400, fadeOutMs: 400 }];
+  }],
+  ['fade lebih panjang dari itemnya (dipotong otomatis)', (tl) => {
+    tl.sounds = [{ id: 's', file: `${dir}/sfx.ogg`, name: 's', startMs: 1000, lengthMs: 600, sourceMs: 1200, volume: 1, fadeInMs: 5000, fadeOutMs: 5000 }];
+  }],
+  ['subtitle huruf besar (template Kinetic)', (tl) => {
+    tl.captions = { ...tl.captions, mode: 'word', anim: 'bounce', caps: true, style: { ...tl.captions.style, size: 86, highlight: '#3cc3b3', outline: 8 } };
+    tl.captions.lines = [{ id: 'l', startMs: 300, endMs: 2000, words: [{ text: 'gas', startMs: 300, endMs: 800 }, { text: 'terus', startMs: 800, endMs: 2000 }] }];
+  }],
   ...(['pop', 'fade', 'rise', 'shake', 'word', 'bounce'] as const).flatMap((a) => (['word', 'line'] as const).map((mode): [string, (tl: Timeline) => void] => [`subtitle animasi ${a} (${mode})`, (tl) => {
     tl.captions.mode = mode;
     tl.captions.anim = a;

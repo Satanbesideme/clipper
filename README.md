@@ -43,9 +43,22 @@ Saat mendengarkan suara soundboard atau musik, bar kecil muncul di bawah panel k
 ## Volume suara
 Suara soundboard dan video meme dipasang dengan volume 25% supaya tidak menutupi suaramu. Ubah bawaannya lewat **Volume saat ditempel** di panel Suara / Video meme; tiap suara yang sudah dipasang tetap bisa dibesarkan di panel kanan.
 
+## Salin & tempel
+Pilih item di timeline lalu **Ctrl+C**, **Ctrl+V** (tempel di playhead), **Ctrl+Shift+V** (tempel di waktu aslinya), **Ctrl+X** (potong), atau **Ctrl+D** (duplikat). Klik kanan di timeline membuka menu yang sama, plus Transform, Crop, fade suara, split, dan hapus.
+
+Potongan video utama yang disalin ditempel sebagai **layer baru di waktu yang sama**, jadi video yang sama bisa tampil di dua tempat (misalnya gameplay di atas, facecam di bawah). Atur lewat tab **Transform** dan **Crop**.
+
+## Transform & Crop
+Klik video, layer, meme, atau teks di timeline, lalu buka tab **Transform** (posisi, ukuran, opacity, posisi cepat) atau **Crop** (bentuk 9:16/1:1/16:9, ambil bagian atas/bawah/kiri/kanan, potong per sisi, atau tarik kotak kuning di preview). Video utama selalu mengisi layar; untuk meng-crop-nya, salin dulu jadi layer.
+
+## Fade suara
+Pilih potongan video, suara, musik, atau layer video, lalu tarik **titik putih** di pojok atas kotaknya di timeline, atau atur slider **Fade suara** di panel kanan. Klik kanan juga punya Fade in/out 0,5 detik.
+
+## Stinger
+Tab **Media → Stinger GALSURKU → Pasang di awal**: intro 1,9 detik (1080×1920, dengan suara) dipasang sebelum video, dan semua subtitle, meme, serta suara ikut bergeser. **Simpan file** menyalin MP4-nya ke folder ekspor.
+
 ## Layer video
 Panel **Layer** (rail kiri). Setiap layer bisa digeser, di-resize (tarik pojok, Shift untuk bebas), diregang (tarik sisi), dan di-crop (tombol **C** atau tab Crop, Enter untuk selesai).
-- **Pisah atas + bawah dari video utama**: untuk rekaman yang ikut merekam jendela lain. Video yang sama jadi dua layer (misal gameplay di atas, facecam di bawah); bagian yang tidak dipakai hilang.
 - **Layer dari video utama** mengikuti potongan, speed, dan hapus jeda video utama.
 - **Layer dari video lain**: file lain dengan waktu dan volume sendiri.
 - Posisi cepat (Penuh, Setengah atas/bawah) mengisi area dengan zoom, tidak gepeng.
@@ -56,7 +69,7 @@ Panel **Video meme**: tambah klip reaksi (MP4/MOV/WebM/MKV) atau impor satu fold
 ## Animasi teks
 Pilih teks, lalu di panel kanan pilih **Pop**, **Fade**, **Naik**, **Ketik**, atau **Goyang**. Teks baru otomatis memakai Pop.
 
-Subtitle punya animasinya sendiri di panel **Subtitle → Animasi**: Pop, Fade, Naik, Goyang (per baris), **Per kata** (kata muncul satu per satu), dan **Memantul** (kata yang diucapkan membesar sebentar). Ini berlaku untuk semua baris.
+Subtitle punya **Template** (Minimal, Kinetic, Documentary, Gaming, Podcast) yang memasang font, warna, mode, animasi, dan posisi sekaligus. Animasinya juga bisa diatur di **Subtitle → Animasi**: Pop, Fade, Naik, Goyang (per baris), **Per kata** (kata muncul satu per satu), dan **Memantul** (kata yang diucapkan membesar sebentar). Ini berlaku untuk semua baris.
 
 Untuk bagian tertentu, klik baris subtitle-nya, lalu di panel kanan:
 - **Animasi baris ini**: animasi khusus baris itu saja. **Umum** = ikut animasi semua.
