@@ -6,7 +6,7 @@ import { qualityBitrate } from './ffmpeg';
 import {
   DEFAULT_CAPTION, DEFAULT_TEXT, clipDuration, clipStarts, locate, splitAt, timelineDuration,
   type CaptionLine, type ImageItem, type Watermark, type SoundItem, type TextItem, type TextStyle, type Trans, type VideoClip, type Word,
-  transState, TRANS_IN_MS, textAnimState, unitOf, fadesOf, fadeGain, MUSIC_FADE_IN, MUSIC_FADE_OUT, wordScale, wordColor, lineAnimOf, SHOUT_COLOR, type WordFx, type TextAnim, type CapAnim, clipFx, removePauses, remapItems, invertRanges, DUCK_LEVEL,
+  transState, TRANS_IN_MS, textAnimState, unitOf, wordPulse, fadesOf, fadeGain, MUSIC_FADE_IN, MUSIC_FADE_OUT, wordScale, wordColor, lineAnimOf, SHOUT_COLOR, type WordFx, type TextAnim, type CapAnim, clipFx, removePauses, remapItems, invertRanges, DUCK_LEVEL,
   type ClipTrans, type Duck, type MusicItem, type Range, type VideoLayer, type Crop, NO_CROP, cropSize,
 } from './render';
 import {
@@ -2195,11 +2195,16 @@ function captionBreaks(line: CaptionLine): number[] {
   const ctx = measureCtx!;
   const u = unitOf(tl());
   ctx.font = fontOf(cap.style, u);
-  const space = ctx.measureText(' ').width, maxW = tl().width - 120 * u;
+  const space = ctx.measureText(' ').width;
+  const anim = lineAnimOf(line, cap);
+  const widths = line.words.map((wd) => ctx.measureText(cap.caps ? wd.text.toLocaleUpperCase('id-ID') : wd.text).width);
+  // leave room for the word that grows while it is said (bounce, pop, shout), so it stays inside the screen
+  const grow = Math.max(0, ...line.words.map((wd, i) => { const p = wordPulse(wd.fx, anim); return (Math.max(p.peak, p.base) - 1) * widths[i]; }));
+  const maxW = tl().width - 120 * u - grow;
   const out: number[] = [];
   let w = 0;
   line.words.forEach((wd, i) => {
-    const sw = ctx.measureText(cap.caps ? wd.text.toLocaleUpperCase('id-ID') : wd.text).width;
+    const sw = widths[i];
     if (i && w + space + sw > maxW) { out.push(i); w = 0; }
     w += (w ? space : 0) + sw;
   });
