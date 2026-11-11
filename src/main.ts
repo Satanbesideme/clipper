@@ -2089,7 +2089,7 @@ function renderFrameInner() {
       scale: wordScale(w.fx, anim, i === active, i <= active ? t - Math.max(line.startMs, w.startMs) : -1),
       hidden: anim === 'word' && i > active,
     }));
-    const lines = wrapSegs(ctx, segs, cap.style, k, W - 120 * k);
+    const lines = rowsByBreaks(segs, captionBreaks(line));
     // line entrance/exit like the export: pop, fade, rise and shake reuse the text animation curves
     const entrance = anim === 'pop' || anim === 'fade' || anim === 'rise' || anim === 'shake' ? anim : 'none';
     const an = textAnimState(entrance, t - line.startMs, line.endMs - line.startMs, 0);
@@ -2182,6 +2182,36 @@ function drawSafeGuide(ctx: CanvasRenderingContext2D, W: number, H: number) {
 
 type Seg = { text: string; color: string; scale?: number; hidden?: boolean };
 const fontOf = (st: TextStyle, k: number) => `${st.bold ? 700 : 400} ${st.size * k}px "${st.font}", "Segoe UI", sans-serif`;
+
+/**
+ * Rows of a caption line, measured once with the real font at canvas size and normal word size, so the
+ * preview and the export break the line at the same words and the line never re-wraps while words grow.
+ */
+let measureCtx: CanvasRenderingContext2D | null = null;
+function captionBreaks(line: CaptionLine): number[] {
+  if (!P) return [];
+  const cap = tl().captions;
+  measureCtx ??= document.createElement('canvas').getContext('2d');
+  const ctx = measureCtx!;
+  const u = unitOf(tl());
+  ctx.font = fontOf(cap.style, u);
+  const space = ctx.measureText(' ').width, maxW = tl().width - 120 * u;
+  const out: number[] = [];
+  let w = 0;
+  line.words.forEach((wd, i) => {
+    const sw = ctx.measureText(cap.caps ? wd.text.toLocaleUpperCase('id-ID') : wd.text).width;
+    if (i && w + space + sw > maxW) { out.push(i); w = 0; }
+    w += (w ? space : 0) + sw;
+  });
+  return out;
+}
+function rowsByBreaks<T>(items: T[], breaks: number[]): T[][] {
+  const rows: T[][] = [];
+  let cur: T[] = [];
+  items.forEach((it, i) => { if (i && breaks.includes(i)) { rows.push(cur); cur = []; } cur.push(it); });
+  if (cur.length) rows.push(cur);
+  return rows;
+}
 
 function wrapSegs(ctx: CanvasRenderingContext2D, segs: Seg[], st: TextStyle, k: number, maxW: number): Seg[][] {
   ctx.font = fontOf(st, k);
@@ -4803,7 +4833,7 @@ function renderExport() {
         try {
           await flush();
           const fontScale = await fontScales();
-          await enqueueExport(P!, { outDir: settings.outDir, encoder: settings.encoder || (await detectEncoder()), fontScale, quality: settings.quality ?? 0.75 });
+          await enqueueExport(P!, { outDir: settings.outDir, encoder: settings.encoder || (await detectEncoder()), fontScale, quality: settings.quality ?? 0.75, captionBreaks });
         } catch (e) { toast((e as Error).message, 'error'); }
       },
     }, 'Ekspor video'),

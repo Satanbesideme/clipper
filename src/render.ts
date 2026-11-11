@@ -432,8 +432,32 @@ function overrides(st: TextStyle, x: number, y: number, W: number, H: number, sc
   return `{${tags.join('')}}`;
 }
 
+/** Words joined by spaces, with a hard line break before each word index in `breaks`. */
+function joinRows(parts: string[], breaks: Set<number>): string {
+  return parts.map((p, i) => (i === 0 ? p : `${breaks.has(i) ? '\\N' : ' '}${p}`)).join('');
+}
+
 /** Captions + free text as one ASS file on a W x H canvas. */
-export function buildAss(tl: Timeline, fontScale: (font: string, bold: boolean) => number = () => 1): string {
+/**
+ * Where a caption line breaks: indexes of the words that start a new row. The app measures with the real
+ * font (the same way the preview wraps); without that, a rough per-character estimate is used.
+ */
+export type CaptionBreaks = (line: CaptionLine) => number[] | undefined;
+export function estimateBreaks(words: string[], st: TextStyle, W: number, H: number): number[] {
+  const u = Math.min(W, H) / 1080;
+  const em = st.size * u * (st.bold ? 0.6 : 0.55);
+  const maxW = W - 120 * u;
+  const out: number[] = [];
+  let w = 0;
+  words.forEach((t, i) => {
+    const ww = t.length * em;
+    if (i && w + em * 0.5 + ww > maxW) { out.push(i); w = 0; }
+    w += (w ? em * 0.5 : 0) + ww;
+  });
+  return out;
+}
+
+export function buildAss(tl: Timeline, fontScale: (font: string, bold: boolean) => number = () => 1, captionBreaks?: CaptionBreaks): string {
   const W = tl.width, H = tl.height;
   const lines: string[] = [
     '[Script Info]', 'ScriptType: v4.00+', `PlayResX: ${W}`, `PlayResY: ${H}`, 'WrapStyle: 0', 'ScaledBorderAndShadow: yes', '',
@@ -455,8 +479,10 @@ export function buildAss(tl: Timeline, fontScale: (font: string, bold: boolean) 
   const sc = (v: number) => Math.round(v * 100);
   for (const line of cap.lines) {
     const anim: CapAnim = lineAnimOf(line, cap);
-    const pre0 = overrides(cap.style, 0.5, cap.y, W, H, fontScale(cap.style.font, cap.style.bold));
+    const pre0 = overrides(cap.style, 0.5, cap.y, W, H, fontScale(cap.style.font, cap.style.bold)).replace(/}$/, '\\q2}');
     const ws = line.words;
+    // fixed rows for the whole line: the active word growing (bounce, pop, shout) must not re-wrap it
+    const breaks = new Set(captionBreaks?.(line) ?? estimateBreaks(ws.map((w) => (cap.caps ? w.text.toLocaleUpperCase('id-ID') : w.text)), cap.style, W, H));
     const perWord = ws.length > 0 && (cap.mode === 'word' || anim === 'word' || anim === 'bounce' || ws.some((w) => w.fx === 'pop' || w.fx === 'shout'));
     // the events that make up this line: one per word window when words matter, else one for the line
     const evs: { a: number; b: number; active: number }[] = [];
@@ -475,7 +501,7 @@ export function buildAss(tl: Timeline, fontScale: (font: string, bold: boolean) 
       const size = (v: number) => first && anim === 'pop'
         ? `\\fscx${sc(0.3 * v)}\\fscy${sc(0.3 * v)}\\t(0,140,\\fscx${sc(1.12 * v)}\\fscy${sc(1.12 * v)})\\t(140,240,\\fscx${sc(v)}\\fscy${sc(v)})`
         : `\\fscx${sc(v)}\\fscy${sc(v)}`;
-      const text = ws.length ? ws.map((x, j) => {
+      const text = ws.length ? joinRows(ws.map((x, j) => {
         let t = assEscape(cap.caps ? x.text.toLocaleUpperCase('id-ID') : x.text);
         const isActive = j === e.active;
         const col = wordColor(x, isActive, cap);
@@ -487,7 +513,7 @@ export function buildAss(tl: Timeline, fontScale: (font: string, bold: boolean) 
         // not yet said: kept in place but invisible, so the line does not shift as words appear
         if (anim === 'word' && j > e.active) t = `{\\alpha&HFF&}${t}{\\alpha&H00&}`;
         return t;
-      }).join(' ') : '';
+      }), breaks) : '';
       let pre = pre0;
       const extra: string[] = [];
       if (first) {

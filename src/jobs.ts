@@ -6,7 +6,7 @@ import {
 } from './ffmpeg';
 import {
   buildAss, filterPath, groupLines, parseSilences, renderArgs, silencesOnTimeline, snapWordsToSpeech, timelineDuration, wordsFromWhisper,
-  type CaptionLine, type Range, type Timeline, type Word,
+  type CaptionBreaks, type CaptionLine, type Range, type Timeline, type Word,
 } from './render';
 import { dataDir, projectDir, uid, type MediaEntry, type ModelSize, type Project } from './store';
 import { bakeCube, gradeOf, hasColour, parseLut, type Cube, type Grade } from './grade';
@@ -439,7 +439,7 @@ async function uniquePath(dir: string, base: string): Promise<string> {
   return p;
 }
 
-export async function enqueueExport(p: Project, opts: { outDir: string; encoder: Encoder; fontScale?: Record<string, number>; quality?: number }) {
+export async function enqueueExport(p: Project, opts: { outDir: string; encoder: Encoder; fontScale?: Record<string, number>; quality?: number; captionBreaks?: CaptionBreaks }) {
   const tl: Timeline = structuredClone(p.timeline);
   if (!timelineDuration(tl)) throw new Error('Timeline masih kosong. Tambahkan video, layer, teks, atau musik dulu.');
   tl.texts = tl.texts.map((t) => ({ ...t, text: stripEmoji(t.text) })).filter((t) => t.text);
@@ -450,7 +450,7 @@ export async function enqueueExport(p: Project, opts: { outDir: string; encoder:
   if (tl.texts.length || tl.captions.lines.length) {
     assFile = join(await projectDir(p.id), `export-${id}.ass`);
     const fs = opts.fontScale ?? {};
-    await invoke('write_text', { path: assFile, content: buildAss(tl, (font, bold) => fs[`${font}|${bold ? 1 : 0}`] ?? 1) });
+    await invoke('write_text', { path: assFile, content: buildAss(tl, (font, bold) => fs[`${font}|${bold ? 1 : 0}`] ?? 1, opts.captionBreaks) });
   }
   const outPath = await uniquePath(opts.outDir, safeName(p.name));
   const media = Object.fromEntries(p.media.map((m) => [m.id, m]));
