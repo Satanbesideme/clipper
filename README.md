@@ -69,7 +69,7 @@ Tab **Warna** (atau **Ctrl+U**). Klik satu potongan/layer untuk mengatur sendiri
 Klik kanan di timeline **atau langsung di preview** membuka menu: Transform, Crop, Warna, Salin, Tempel, Duplikat, fade suara, urutan layer, split, hapus.
 
 ## AI Asisten (offline, di PC sendiri)
-Tab **AI** di rel kiri. Unduh model sekali (Pintar ±2,5 GB atau Cepat ±1,1 GB, model Qwen3 berlisensi Apache 2.0), lalu semuanya jalan tanpa internet lewat llama.cpp. Rekaman tidak dikirim ke mana pun.
+Tab **AI** di rel kiri. Unduh model sekali (Super ±5 GB untuk kartu grafis 8 GB seperti RTX 4060 Ti, Pintar ±2,5 GB, atau Cepat ±1,1 GB; model Qwen3 berlisensi Apache 2.0), lalu semuanya jalan tanpa internet lewat llama.cpp versi Vulkan, jadi memakai kartu grafis kalau ada. Rekaman tidak dikirim ke mana pun.
 - **Cari momen seru**: mendengarkan teriakan/tawa dan membaca kata seru di subtitle, lalu AI menilai dan memberi judul tiap momen. Satu klik untuk jadikan In/Out (lalu ekspor bagian itu) atau marker.
 - **Judul, deskripsi & hashtag**: 5 pilihan judul dari isi subtitle.
 - **Koreksi subtitle**: membetulkan kata salah dengar; kamu pilih mana yang dipakai.

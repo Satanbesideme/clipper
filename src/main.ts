@@ -5969,7 +5969,7 @@ function maskBlock(obj: { mask?: Mask | null; key?: ChromaKey | null }): HTMLEle
 
 
 // ================= AI assistant (local model) =================
-let aiModel: AiModelId = 'pintar';
+let aiModel: AiModelId = 'super';
 let aiState: { engine: boolean; ready: Record<AiModelId, boolean> } | null = null;
 let aiBusy = '';
 let aiDl: { id: AiModelId; frac: number } | null = null;
@@ -5979,9 +5979,9 @@ let titleOut: { judul: string[]; deskripsi: string; hashtag: string[] } | null =
 let fixes: { id: string; before: string; after: string; on: boolean }[] | null = null;
 
 async function refreshAi() {
-  const [engine, a, b] = await Promise.all([aiEngineReady(), aiModelReady('pintar'), aiModelReady('cepat')]);
-  aiState = { engine, ready: { pintar: a, cepat: b } };
-  if (!aiState.ready[aiModel] && aiState.ready[aiModel === 'pintar' ? 'cepat' : 'pintar']) aiModel = aiModel === 'pintar' ? 'cepat' : 'pintar';
+  const [engine, c, a, b] = await Promise.all([aiEngineReady(), aiModelReady('super'), aiModelReady('pintar'), aiModelReady('cepat')]);
+  aiState = { engine, ready: { super: c, pintar: a, cepat: b } };
+  if (!aiState.ready[aiModel]) aiModel = (['super', 'pintar', 'cepat'] as AiModelId[]).find((k) => aiState!.ready[k]) ?? 'super';
   if (tab === 'ai') renderLeft();
 }
 const aiReady = () => !!aiState?.engine && !!aiState.ready[aiModel];
@@ -6157,7 +6157,7 @@ function aiPanel(): Node[] {
             }, 'Unduh'),
       );
     })),
-    h('div', { class: 'muted small' }, 'Diunduh sekali, lalu jalan tanpa internet. Semua diproses di PC, rekaman tidak dikirim ke mana pun.'),
+    h('div', { class: 'muted small' }, 'Diunduh sekali, lalu jalan tanpa internet di kartu grafis (kalau ada). Semua diproses di PC, rekaman tidak dikirim ke mana pun.'),
   );
   const busy = aiBusy ? h('div', { class: 'ai-busy' }, h('span', { class: 'spinner' }), h('span', {}, aiBusy), h('button', { class: 'ghost small', onclick: () => void cancelAi() }, 'Batal')) : '';
   const hasSubs = tl().captions.lines.length > 0;

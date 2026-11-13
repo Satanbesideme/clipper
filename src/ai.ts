@@ -3,10 +3,18 @@
 import { invoke, join } from './tauri';
 import { dataDir, uid } from './store';
 
-export type AiModelId = 'pintar' | 'cepat';
+export type AiModelId = 'super' | 'pintar' | 'cepat';
 export const AI_MODELS: Record<AiModelId, { name: string; hint: string; bytes: number; urls: string[] }> = {
+  super: {
+    name: 'Super (GPU)', hint: 'Qwen3 8B · ±5 GB · paling pintar, jalan di kartu grafis 8 GB (cocok untuk RTX 4060 Ti)', bytes: 5_030_000_000,
+    urls: [
+      'https://huggingface.co/Qwen/Qwen3-8B-GGUF/resolve/main/Qwen3-8B-Q4_K_M.gguf',
+      'https://huggingface.co/bartowski/Qwen_Qwen3-8B-GGUF/resolve/main/Qwen_Qwen3-8B-Q4_K_M.gguf',
+      'https://huggingface.co/unsloth/Qwen3-8B-GGUF/resolve/main/Qwen3-8B-Q4_K_M.gguf',
+    ],
+  },
   pintar: {
-    name: 'Pintar', hint: 'Qwen3 4B · ±2,5 GB · hasil paling bagus', bytes: 2_500_000_000,
+    name: 'Pintar', hint: 'Qwen3 4B · ±2,5 GB · untuk PC tanpa kartu grafis', bytes: 2_500_000_000,
     urls: [
       'https://huggingface.co/Qwen/Qwen3-4B-GGUF/resolve/main/Qwen3-4B-Q4_K_M.gguf',
       'https://huggingface.co/bartowski/Qwen_Qwen3-4B-GGUF/resolve/main/Qwen_Qwen3-4B-Q4_K_M.gguf',
@@ -46,6 +54,7 @@ export async function downloadAiModel(id: AiModelId, onFrac: (f: number) => void
 }
 
 let aiJob: string | null = null;
+let gpuLayers = 99;
 export async function cancelAi() { if (aiJob) await invoke('ffmpeg_cancel', { job: aiJob }).catch(() => undefined); }
 
 /**
@@ -61,14 +70,25 @@ export async function aiJson<T>(model: AiModelId, system: string, user: string, 
   await invoke('write_text', { path: promptFile, content: prompt });
   await invoke('write_text', { path: schemaFile, content: JSON.stringify(schema) });
   const cpus = await invoke<number>('cpu_count').catch(() => 4);
-  const ctx = Math.min(16384, Math.max(2048, Math.ceil(prompt.length / 2.6) + maxTokens + 256));
+  // 8 GB of video memory: the 8B model (±5 GB) plus up to 12k of context stays on the card
+  const ctx = Math.min(model === 'super' ? 12288 : 16384, Math.max(2048, Math.ceil(prompt.length / 2.6) + maxTokens + 256));
   aiJob = `ai-${id}`;
   try {
-    const out = await invoke<string>('llama_run', {
-      job: aiJob,
-      args: ['-m', await aiModelPath(model), '-f', promptFile, '-no-cnv', '--no-display-prompt', '-n', String(maxTokens), '-c', String(ctx),
-        '--temp', '0.6', '--top-p', '0.9', '-t', String(Math.max(2, Math.min(8, cpus - 1))), '-jf', schemaFile],
-    });
+    const base = ['-m', await aiModelPath(model), '-f', promptFile, '-no-cnv', '--no-display-prompt', '-n', String(maxTokens), '-c', String(ctx),
+      '--temp', '0.6', '--top-p', '0.9', '-t', String(Math.max(2, Math.min(12, cpus - 2))), '-jf', schemaFile];
+    let out: string;
+    // all layers on the graphics card when there is one (Vulkan); if that fails (too little video memory), run on the CPU
+    // try fully on the card, then partly (if video memory is short), then CPU only; remember what worked
+    const tries = gpuLayers === 99 ? [99, 24, 0] : gpuLayers === 24 ? [24, 0] : [0];
+    let last: unknown = null;
+    out = '';
+    for (const n of tries) {
+      try { out = await invoke<string>('llama_run', { job: aiJob, args: [...base, '-ngl', String(n)] }); gpuLayers = n; last = null; break; } catch (e) {
+        last = e;
+        if (String((e as Error)?.message ?? e).includes('Dibatalkan')) throw e;
+      }
+    }
+    if (last) throw last instanceof Error ? last : new Error(String(last));
     const a = out.indexOf('{'), b = out.lastIndexOf('}');
     if (a < 0 || b < a) throw new Error('Jawaban AI tidak terbaca. Coba lagi.');
     // the switch word must never end up in an answer
