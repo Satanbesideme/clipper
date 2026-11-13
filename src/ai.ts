@@ -57,7 +57,7 @@ export async function aiJson<T>(model: AiModelId, system: string, user: string, 
   await invoke('ensure_dir', { path: dir });
   const id = uid().slice(0, 8);
   const promptFile = join(dir, `p-${id}.txt`), schemaFile = join(dir, `s-${id}.json`);
-  const prompt = `<|im_start|>system\n${system}<|im_end|>\n<|im_start|>user\n${user} /no_think<|im_end|>\n<|im_start|>assistant\n`;
+  const prompt = `<|im_start|>system\n${system}<|im_end|>\n<|im_start|>user\n${user}\n\n/no_think<|im_end|>\n<|im_start|>assistant\n`;
   await invoke('write_text', { path: promptFile, content: prompt });
   await invoke('write_text', { path: schemaFile, content: JSON.stringify(schema) });
   const cpus = await invoke<number>('cpu_count').catch(() => 4);
@@ -71,7 +71,8 @@ export async function aiJson<T>(model: AiModelId, system: string, user: string, 
     });
     const a = out.indexOf('{'), b = out.lastIndexOf('}');
     if (a < 0 || b < a) throw new Error('Jawaban AI tidak terbaca. Coba lagi.');
-    return JSON.parse(out.slice(a, b + 1)) as T;
+    // the switch word must never end up in an answer
+    return JSON.parse(out.slice(a, b + 1).replace(/\s*\/no_think/g, '')) as T;
   } finally {
     aiJob = null;
     await invoke('remove_path', { path: promptFile }).catch(() => undefined);
