@@ -138,6 +138,19 @@ scenarios.push(['transform: rotasi, flip, anchor, distort', (tl) => {
     tf: { rot: 20, flipH: true, anchor: [0, 0], pins: [[0.1, 0], [0, 0.05], [-0.1, 0], [0, -0.05]] } }];
   tl.images = [{ ...meme('i', `${dir}/meme.png`, 500, 2500, 'pop', 'fade'), tf: { rot: -30, flipV: true } }, { ...meme('g', `${dir}/anim.gif`, 1000, 3000, 'none', 'none', true), tf: { pins: [[0.2, 0.1], [0, 0], [0, 0], [0, 0]] }, blend: 'screen' }];
 }]);
+// a mask picture like the app draws: white ellipse with a soft edge on black
+make(['-f', 'lavfi', '-i', 'color=c=black:s=400x300', '-vf', "geq=lum='255*clip((1-hypot((X-200)/170\\,(Y-150)/120))*6\\,0\\,1)'", '-frames:v', '1', `${dir}/mask.png`]);
+scenarios.push(['mask + reveal + green screen (layer video lain)', (tl) => {
+  tl.layers = [{ id: 'o', name: 'O', source: 'media', mediaId: 'm', inMs: 2000, startMs: 1000, endMs: 4000, crop: { l: 0, t: 0, r: 0, b: 0.5 }, box: { x: 0.5, y: 0.5, w: 0.8, h: 0.4 }, opacity: 0.9, volume: 0.5,
+    mask: { shape: 'ellipse', x: 0.5, y: 0.5, w: 0.9, h: 0.9, feather: 0.1, reveal: { dir: 'left', ms: 800 } }, key: { color: '#00ff00', similarity: 0.3, blend: 0.1 }, tf: { rot: 10 } }];
+  extra = { ...extra, masks: { o: `${dir}/mask.png` } };
+}]);
+scenarios.push(['mask layer video utama + mask meme', (tl) => {
+  tl.layers = [{ id: 'g', name: 'G', source: 'main', inMs: 0, startMs: 500, endMs: 99999, crop: { l: 0, t: 0, r: 0, b: 0.5 }, box: { x: 0.5, y: 0.3, w: 1, h: 0.5 }, opacity: 1, volume: 0,
+    mask: { shape: 'rect', x: 0.5, y: 0.5, w: 0.8, h: 0.8, feather: 0.05, invert: true, reveal: { dir: 'center', ms: 600 } }, blend: 'screen' }];
+  tl.images = [{ ...meme('i', `${dir}/meme.png`, 500, 2500, 'pop', 'fade'), mask: { shape: 'ellipse', x: 0.5, y: 0.5, w: 1, h: 1, feather: 0.2 }, key: { color: '#ff6a1a', similarity: 0.1, blend: 0.05 } }];
+  extra = { ...extra, masks: { g: `${dir}/mask.png`, i: `${dir}/mask.png` } };
+}]);
 // extra export options a scenario can set (In/Out range, captions drawn by the app as PNG frames)
 let extra: Partial<RenderSpec> = {};
 let expectSec = 0;

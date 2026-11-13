@@ -442,6 +442,8 @@ async function uniquePath(dir: string, base: string): Promise<string> {
 export async function enqueueExport(p: Project, opts: { outDir: string; encoder: Encoder; fontScale?: Record<string, number>; quality?: number; captionBreaks?: CaptionBreaks;
   range?: { inMs: number; outMs: number } | null;
   fileName?: string;   // without .mp4; default: the project name
+  /** Draws the mask pictures of masked layers/pictures into `dir`; id -> file. */
+  renderMasks?: (dir: string) => Promise<Record<string, string>>;
   /** Draws captions and text as frames with the app's own renderer (exactly like the preview); null = nothing to draw. */
   renderOverlay?: (dir: string) => Promise<{ list: string; x: number; y: number; dir: string } | null> }) {
   const tl: Timeline = structuredClone(p.timeline);
@@ -469,10 +471,12 @@ export async function enqueueExport(p: Project, opts: { outDir: string; encoder:
   const media = Object.fromEntries(p.media.map((m) => [m.id, m]));
   const quality = opts.quality ?? 0.75;
   const gradeLuts = await bakeGrades(tl, await projectDir(p.id), id);
-  const build = (encoder: Encoder) => renderArgs({ tl, media, encoder, bitrateK: qualityBitrate(tl.fps, quality, tl.width * tl.height), quality, assFile, fontsDir: FONTS_DIR, outPath, gradeLuts, overlay: overlay ?? undefined, range: opts.range ?? undefined });
+  const maskDir = join(await projectDir(p.id), `export-${id}-masks`);
+  const masks = opts.renderMasks ? await opts.renderMasks(maskDir).catch((e) => { console.warn('masks failed', e); return {} as Record<string, string>; }) : {};
+  const build = (encoder: Encoder) => renderArgs({ tl, media, encoder, bitrateK: qualityBitrate(tl.fps, quality, tl.width * tl.height), quality, assFile, fontsDir: FONTS_DIR, outPath, gradeLuts, overlay: overlay ?? undefined, range: opts.range ?? undefined, masks });
   const job: ExportJob = {
     id, projectId: p.id, label: p.name, outPath, totalMs: opts.range ? opts.range.outMs - opts.range.inMs : timelineDuration(tl), progress: 0, status: 'queued', error: '',
-    args: build(opts.encoder), encoder: opts.encoder, build, assFile, extraFiles: [...Object.values(gradeLuts), ...(overlay ? [overlay.dir] : [])],
+    args: build(opts.encoder), encoder: opts.encoder, build, assFile, extraFiles: [...Object.values(gradeLuts), ...(overlay ? [overlay.dir] : []), ...(Object.keys(masks).length ? [maskDir] : [])],
   };
   queue.push(job);
   onChange();

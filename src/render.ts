@@ -240,6 +240,8 @@ export interface ImageItem {
   locked?: boolean;
   group?: string;
   tf?: Tf;
+  mask?: Mask | null;
+  key?: ChromaKey | null;
 }
 
 /** Channel logo shown for the whole video. */
@@ -353,12 +355,26 @@ export interface VideoLayer {
   locked?: boolean;
   group?: string;
   tf?: Tf;
+  mask?: Mask | null;
+  key?: ChromaKey | null;
 }
 
 /**
  * Advanced transform of a layer or picture. rot: degrees clockwise; flip: mirror; anchor: the point (0..1 of the
  * box) it turns around; pins: corner offsets for distort/perspective, as shares of the box (tl, tr, br, bl).
  */
+/** Shape mask on a layer or picture, in shares of its box; white inside. reveal: wipes it in at the start. */
+export interface Mask {
+  shape: 'rect' | 'ellipse';
+  x: number; y: number; w: number; h: number;   // centre and size, 0..1 of the box
+  feather: number;     // 0..0.5 of the box's short side
+  invert?: boolean;
+  reveal?: { dir: 'left' | 'right' | 'up' | 'down' | 'center'; ms: number } | null;
+}
+/** Green screen: pixels close to `color` turn transparent (same maths as ffmpeg colorkey). */
+export interface ChromaKey { color: string; similarity: number; blend: number }
+export const maskActive = (m?: Mask | null) => !!m && (m.invert || m.feather > 0.001 || m.x !== 0.5 || m.y !== 0.5 || m.w < 0.999 || m.h < 0.999 || m.shape === 'ellipse' || !!m.reveal);
+
 export interface Tf { rot?: number; flipH?: boolean; flipV?: boolean; anchor?: [number, number]; pins?: [number, number][] | null }
 export const tfActive = (tf?: Tf) => !!tf && (!!tf.rot || !!tf.flipH || !!tf.flipV || !!tf.pins?.some(([a, b]) => a || b));
 /** Centre of a box after turning it around its anchor (all in pixels). */
@@ -651,6 +667,8 @@ export interface RenderSpec {
   overlay?: { list: string; x: number; y: number };
   /** Export only this part of the timeline (In/Out). */
   range?: { inMs: number; outMs: number };
+  /** item id -> mask picture (white = visible), drawn by the caller from the item's Mask */
+  masks?: Record<string, string>;
 }
 
 /** Colour (baked LUT) for a clip or layer, run on its own pixels. */
@@ -673,6 +691,41 @@ export function atempoChain(speed: number): string[] {
   while (s > 2) { out.push('atempo=2'); s /= 2; }
   if (Math.abs(s - 1) > 1e-3) out.push(`atempo=${Number(s.toFixed(4))}`);
   return out;
+}
+
+const keyFilter = (k?: ChromaKey | null) => k ? `colorkey=0x${k.color.replace('#', '').slice(0, 6)}:${Math.max(0.01, k.similarity).toFixed(3)}:${k.blend.toFixed(3)}` : '';
+/** Wipe-in of a mask in geq: progress from `off` seconds over `dur` seconds, soft edge. */
+function revealExpr(r: NonNullable<Mask['reveal']>, off: number, ) {
+  const P = `clip((T-${off.toFixed(3)})/${Math.max(0.05, r.ms / 1000).toFixed(3)},0,1)`;
+  const edge = (pos: string, size: string) => `clip((${P}*(${size}*1.15)-${pos})/(${size}*0.15),0,1)`;
+  switch (r.dir) {
+    case 'left': return edge('X', 'W');
+    case 'right': return edge('(W-X)', 'W');
+    case 'down': return edge('Y', 'H');
+    case 'up': return edge('(H-Y)', 'H');
+    default: return `clip((${P}*hypot(W/2,H/2)*1.15-hypot(X-W/2,Y-H/2))/(hypot(W/2,H/2)*0.15),0,1)`;
+  }
+}
+/**
+ * Green screen and mask on a picture with alpha: `src` -> `out`. The mask picture comes in as input `maskInput`
+ * (looped), is sized to the picture, and multiplies its alpha.
+ */
+function maskAndKey(f: string[], src: string, out: string, key: ChromaKey | null | undefined, mask: Mask | null | undefined, maskInput: number | null, revealOff: number) {
+  const kf = keyFilter(key);
+  let cur = src;
+  if (kf) { f.push(`[${cur}]${kf}[${out}k]`); cur = `${out}k`; }
+  if (maskInput !== null && mask) {
+    const rv = mask.reveal ? `,geq=lum='p(X,Y)*${revealExpr(mask.reveal, revealOff)}'` : '';
+    f.push(`[${maskInput}:v]format=gray[${out}m0]`);
+    f.push(`[${out}m0][${cur}]scale2ref[${out}m1][${out}c]`);
+    f.push(`[${out}m1]format=gray${rv}[${out}m2]`);
+    f.push(`[${out}c]split[${out}c1][${out}c2]`);
+    f.push(`[${out}c2]alphaextract[${out}a]`);
+    f.push(`[${out}a][${out}m2]blend=all_mode=multiply:shortest=0[${out}am]`);
+    f.push(`[${out}c1][${out}am]alphamerge[${out}]`);
+    return;
+  }
+  f.push(`[${cur}]null[${out}]`);
 }
 
 /** ffmpeg filters for flip, distort (corner pins) and rotation of a w x h picture with alpha. */
@@ -823,25 +876,42 @@ export function renderArgs(spec: RenderSpec): string[] {
     const llut = lutFilter(spec, l.id, l.grade);
     const lsp = isNeutral(l.grade) ? [] : spatialFilters(gradeOf(l.grade));
     const ltf = tfFilters(l.tf, bw, bh);
-    const look = `${crop}${llut ? `,${llut}` : ''},scale=${bw}:${bh}:flags=lanczos,setsar=1${lsp.length ? `,${lsp.join(',')}` : ''},format=rgba${l.opacity < 0.999 ? `,colorchannelmixer=aa=${num(l.opacity)}` : ''}${ltf.length ? `,${ltf.join(',')}` : ''}`;
+    const lmask = spec.masks?.[l.id] && maskActive(l.mask) ? l.mask : null;
+    const special = !!lmask || !!l.key;
+    const pre = `${crop}${llut ? `,${llut}` : ''},scale=${bw}:${bh}:flags=lanczos,setsar=1${lsp.length ? `,${lsp.join(',')}` : ''},format=rgba${l.opacity < 0.999 ? `,colorchannelmixer=aa=${num(l.opacity)}` : ''}`;
+    const look = `${pre}${ltf.length ? `,${ltf.join(',')}` : ''}`;
+    // with a mask or green screen the picture goes pre -> key/mask -> transform
+    const finish = (preLabel: string, startOff: number) => {
+      let maskIn: number | null = null;
+      if (lmask) {
+        args.push('-loop', '1', '-framerate', String(F), '-t', (l.source === 'main' ? total / 1000 : (b - a) / 1000).toFixed(3), '-i', spec.masks![l.id]);
+        maskIn = input + (l.source === 'main' ? 0 : 1);
+      }
+      maskAndKey(f, preLabel, `mk${k}`, l.key, lmask, maskIn, startOff);
+      f.push(`[mk${k}]${ltf.length ? ltf.join(',') : 'null'}${l.source === 'main' ? '' : `,setpts=PTS+${st}/TB`}[ly${k}]`);
+      return lmask ? 1 : 0;
+    };
     const [lcx, lcy] = anchoredCentre(l.box.x * W, l.box.y * H, bw, bh, l.tf);
     const lx = ltf.length ? `'${Math.round(lcx)}-overlay_w/2'` : `${x}`, lyy = ltf.length ? `'${Math.round(lcy)}-overlay_h/2'` : `${y}`;
     let src: string;
     if (l.source === 'main') {
       src = `[mc${copy++}]`;
-      f.push(`${src}${look}[ly${k}]`);
+      if (special) { f.push(`${src}${pre}[pr${k}]`); input += finish(`pr${k}`, a / 1000); }
+      else f.push(`${src}${look}[ly${k}]`);
     } else {
       const m = spec.media[l.mediaId!];
       const dur = ((b - a) / 1000).toFixed(3);
       args.push('-ss', (l.inMs / 1000).toFixed(3), '-t', dur, '-i', m.playable);
-      f.push(`[${input}:v]setpts=PTS-STARTPTS,fps=${F},${look},setpts=PTS+${st}/TB[ly${k}]`);
+      if (special) { f.push(`[${input}:v]setpts=PTS-STARTPTS,fps=${F},${pre}[pr${k}]`); }
+      else f.push(`[${input}:v]setpts=PTS-STARTPTS,fps=${F},${look},setpts=PTS+${st}/TB[ly${k}]`);
       if (m.hasAudio && l.volume > 0.001) {
         const d = Math.round(a);
         const lf = fadesOf(l, b - a);
         f.push(`[${input}:a]aresample=async=1:min_hard_comp=0.01:first_pts=0,aformat=sample_fmts=fltp:channel_layouts=stereo,aresample=48000,volume=${num(l.volume)}${afades(lf.fi, lf.fo, b - a)},adelay=${d}|${d}[lya${k}]`);
         layerAudio.push(`[lya${k}]`);
       }
-      input++;
+      const used = special ? finish(`pr${k}`, 0) : 0;
+      input += 1 + used;
     }
     if (l.blend && l.blend !== 'normal') v = blendOnto(f, v, `ly${k}`, lx, lyy, st, en, l.blend, `lv${k}`, W, H, F, total);
     else {
@@ -867,7 +937,19 @@ export function renderArgs(spec: RenderSpec): string[] {
     const chain = [`scale=${w}:-2:flags=lanczos`, 'format=rgba'];
     const ilut = spec.gradeLuts?.[im.id];
     if (ilut && im.grade && hasColour(gradeOf(im.grade))) chain.push(`lut3d=file='${filterPath(ilut)}':interp=tetrahedral`, 'format=rgba');
+    const imask = spec.masks?.[im.id] && maskActive(im.mask) ? im.mask : null;
+    let imgIn = `${input}:v`;
+    if (imask || im.key) {
+      f.push(`[${input}:v]${chain.join(',')}[ip${k}]`);
+      chain.length = 0;
+      let maskIn: number | null = null;
+      if (imask) { args.push('-loop', '1', '-framerate', String(F), '-t', dur, '-i', spec.masks![im.id]); maskIn = input + 1; }
+      maskAndKey(f, `ip${k}`, `im${k}m`, im.key, imask, maskIn, 0);
+      imgIn = `im${k}m`;
+      if (imask) input++;
+    }
     chain.push(...tfFilters(im.tf, w, Math.max(2, Math.round(w / im.aspect / 2) * 2)));
+    if (!chain.length) chain.push('null');
     // fades run first, on the fixed-size picture: newer ffmpeg stops when a frame changes size
     // before a filter that is not set up for it (the pop below changes the size every frame)
     if (tin === 'fade') chain.push(`fade=t=in:st=0:d=${ti}:alpha=1`);
@@ -879,7 +961,7 @@ export function renderArgs(spec: RenderSpec): string[] {
       chain.push(`scale=w='max(2,trunc(${w}*max(0.01,(${sIn})*(${sOut}))/2)*2)':h=-2:eval=frame`);
     }
     chain.push(`setpts=PTS-STARTPTS+${st}/TB`);
-    f.push(`[${input}:v]${chain.join(',')}[im${k}]`);
+    f.push(`[${imgIn}]${chain.join(',')}[im${k}]`);
     // slide: vertical offset driven by the main timeline time
     const lt = `(t-${st})`;
     let dy = '0';

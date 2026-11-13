@@ -8,7 +8,7 @@ import {
   DEFAULT_CAPTION, DEFAULT_TEXT, clipDuration, clipStarts, locate, splitAt, timelineDuration,
   type CaptionLine, type ImageItem, type Watermark, type SoundItem, type TextItem, type TextStyle, type Trans, type VideoClip, type Word,
   transState, TRANS_IN_MS, textAnimState, unitOf, wordPulse, fadesOf, fadeGain, MUSIC_FADE_IN, MUSIC_FADE_OUT, wordScale, wordColor, lineAnimOf, SHOUT_COLOR, type WordFx, type TextAnim, type CapAnim, clipFx, removePauses, remapItems, invertRanges, DUCK_LEVEL,
-  type ClipTrans, type Duck, type MusicItem, type Range, type VideoLayer, type Crop, NO_CROP, cropSize, type Marker, youtubeChapters, type Blend, BLENDS, type LayerGroup, type Tf, tfActive, anchoredCentre,
+  type ClipTrans, type Duck, type MusicItem, type Range, type VideoLayer, type Crop, NO_CROP, cropSize, type Marker, youtubeChapters, type Blend, BLENDS, type LayerGroup, type Tf, tfActive, anchoredCentre, type Mask, type ChromaKey, maskActive,
 } from './render';
 import {
   IMAGE_EXT, SOUND_EXT, VIDEO_MEME_EXT, addVideoMeme, categoriesOf, deleteMeme, deletePad, deleteVideoMeme, importFiles as importLibFiles, loadLibrary, move, saveLibrary, soundOf,
@@ -2228,7 +2228,10 @@ function renderFrameInner() {
       const aw = w * an.scale, ah = hh * an.scale;
       ctx.globalAlpha = an.alpha;
       ctx.globalCompositeOperation = blendCss(im.blend);
-      drawTf(ctx, im.tf, im.x * W, im.y * H + an.dy * H, aw, ah, (c, x, y, w, hh) => drawGraded(c, el, im.grade, el.naturalWidth, el.naturalHeight, null, x, y, w, hh));
+      drawTf(ctx, im.tf, im.x * W, im.y * H + an.dy * H, aw, ah, (c, x, y, w, hh) => {
+        if (!needsFx(im)) { drawGraded(c, el, im.grade, el.naturalWidth, el.naturalHeight, null, x, y, w, hh); return; }
+        c.drawImage(withMaskKey(w, hh, im, (fc) => drawGraded(fc, el, im.grade, el.naturalWidth, el.naturalHeight, null, 0, 0, Math.round(w), Math.round(hh))), x, y, w, hh);
+      });
       ctx.globalCompositeOperation = 'source-over';
       ctx.globalAlpha = 1;
     }
@@ -2624,6 +2627,17 @@ function setupPreviewDrag() {
   preview.addEventListener('pointerdown', (e) => {
     if (e.button === 2) return;
     const p = toCanvas(e);
+    if (pickingKey) {
+      const kk = pickingKey; pickingKey = null; preview.style.cursor = '';
+      keyBypass = true; renderFrame();
+      try {
+        const px = preview.getContext('2d')!.getImageData(Math.round(p.x), Math.round(p.y), 1, 1).data;
+        snapshot(); kk.color = `#${[px[0], px[1], px[2]].map((v) => v.toString(16).padStart(2, '0')).join('')}`;
+        toast(`Warna latar ${kk.color} dipakai.`);
+      } catch { toast('Warna tidak bisa diambil dari preview ini.', 'error'); }
+      keyBypass = false; changed();
+      return;
+    }
     distortDrag = distortPointerDown(p);
     if (distortDrag) { preview.setPointerCapture(e.pointerId); return; }
     if (layerPointerDown(p, e)) { preview.setPointerCapture(e.pointerId); return; }
@@ -4546,7 +4560,10 @@ function drawLayers(ctx: CanvasRenderingContext2D, W: number, H: number) {
       ctx.globalCompositeOperation = blendCss(ly.blend);
       const crop: [number, number, number, number] = [ly.crop.l * sw, ly.crop.t * sh, sw * (1 - ly.crop.l - ly.crop.r), sh * (1 - ly.crop.t - ly.crop.b)];
       const s0 = src;
-      drawTf(ctx, ly.tf, bx + bw / 2, by + bh / 2, bw, bh, (c, x, y, w, hh) => drawGraded(c, s0, ly.grade, sw, sh, crop, x, y, w, hh));
+      drawTf(ctx, ly.tf, bx + bw / 2, by + bh / 2, bw, bh, (c, x, y, w, hh) => {
+        if (!needsFx(ly)) { drawGraded(c, s0, ly.grade, sw, sh, crop, x, y, w, hh); return; }
+        c.drawImage(withMaskKey(w, hh, ly, (fc) => drawGraded(fc, s0, ly.grade, sw, sh, crop, 0, 0, Math.round(w), Math.round(hh))), x, y, w, hh);
+      });
       drawVignette(ctx, bx, by, bw, bh, vignetteOf(ly.grade));
       ctx.globalCompositeOperation = 'source-over';
       ctx.globalAlpha = 1;
@@ -4750,7 +4767,7 @@ function transformBody(): Node[] {
     const ratio = () => { const cs = cropSize(ly.crop, src.w, src.h); return (cs.h / cs.w) * (tl().width / tl().height); };
     return [
       tfHeader('Layer video', ly.name),
-      ...(ly.source === 'adjust' ? [] : [tfAdvancedBlock(ly)]),
+      ...(ly.source === 'adjust' ? [] : [tfAdvancedBlock(ly), maskBlock(ly)]),
       h('div', { class: 'block' },
         h('div', { class: 'label' }, 'Posisi cepat'),
         h('div', { class: 'quick-grid' },
@@ -4807,6 +4824,7 @@ function transformBody(): Node[] {
     return [
       tfHeader('Meme', im.name),
       tfAdvancedBlock(im),
+      maskBlock(im),
       h('div', { class: 'block' },
         h('div', { class: 'label' }, 'Posisi cepat'),
         h('div', { class: 'quick-grid' },
@@ -5488,6 +5506,7 @@ function renderExport() {
             range: exportRangeOnly ? rangeNow() : null,
             fileName: exportFileName(),
             renderOverlay: (dir) => renderOverlayTrack(dir, (f) => { btn.textContent = `Menyiapkan teks… ${Math.round(f * 100)}%`; }),
+            renderMasks: (dir) => renderMaskFiles(dir),
           }).finally(() => { btn.disabled = false; btn.textContent = 'Ekspor video'; });
         } catch (e) { toast((e as Error).message, 'error'); }
       },
@@ -5797,6 +5816,152 @@ function distortPointerDown(p: { x: number; y: number }): ((q: { x: number; y: n
     d.obj.tf = tf;
     renderFrame();
   };
+}
+
+
+// ================= masks & green screen =================
+/** Paints a mask. Export: grey picture (white = visible). Preview: opaque where visible, for destination-in. */
+function paintMask(c: CanvasRenderingContext2D, w: number, h: number, m: Mask, forExport: boolean) {
+  c.save();
+  c.setTransform(1, 0, 0, 1, 0, 0);
+  c.clearRect(0, 0, w, h);
+  if (forExport) { c.fillStyle = m.invert ? '#fff' : '#000'; c.fillRect(0, 0, w, h); }
+  else if (m.invert) { c.fillStyle = '#fff'; c.fillRect(0, 0, w, h); c.globalCompositeOperation = 'destination-out'; }
+  const fe = m.feather * Math.min(w, h);
+  c.filter = fe > 0.5 ? `blur(${(fe / 2).toFixed(1)}px)` : 'none';
+  c.fillStyle = forExport && m.invert ? '#000' : '#fff';
+  const cx = m.x * w, cy = m.y * h, mw = m.w * w, mh = m.h * h;
+  c.beginPath();
+  if (m.shape === 'ellipse') c.ellipse(cx, cy, Math.max(0.5, mw / 2), Math.max(0.5, mh / 2), 0, 0, Math.PI * 2);
+  else c.rect(cx - mw / 2, cy - mh / 2, mw, mh);
+  c.fill();
+  c.restore();
+}
+/** Same wipe as the export's geq: `p` is 0..1 progress. Applied with destination-in. */
+function paintReveal(c: CanvasRenderingContext2D, w: number, h: number, dir: NonNullable<Mask['reveal']>['dir'], p: number) {
+  if (p >= 1) return;
+  c.save();
+  c.globalCompositeOperation = 'destination-in';
+  let g: CanvasGradient;
+  if (dir === 'center') {
+    const R = Math.hypot(w / 2, h / 2);
+    g = c.createRadialGradient(w / 2, h / 2, Math.max(0, p * 1.15 * R - 0.15 * R), w / 2, h / 2, Math.max(0.01, p * 1.15 * R));
+  } else {
+    const S = dir === 'left' || dir === 'right' ? w : h;
+    const a = p * 1.15 * S - 0.15 * S, b = p * 1.15 * S;
+    const at = (v: number) => (dir === 'right' ? w - v : dir === 'up' ? h - v : v);
+    g = dir === 'left' || dir === 'right' ? c.createLinearGradient(at(a), 0, at(b), 0) : c.createLinearGradient(0, at(a), 0, at(b));
+  }
+  g.addColorStop(0, 'rgba(0,0,0,1)'); g.addColorStop(1, 'rgba(0,0,0,0)');
+  c.fillStyle = g;
+  c.fillRect(0, 0, w, h);
+  c.restore();
+}
+/** ffmpeg colorkey on canvas pixels. */
+function applyKey(c: CanvasRenderingContext2D, w: number, h: number, k: ChromaKey) {
+  let img: ImageData;
+  try { img = c.getImageData(0, 0, w, h); } catch { return; }
+  const d = img.data, kr = parseInt(k.color.slice(1, 3), 16), kg = parseInt(k.color.slice(3, 5), 16), kb = parseInt(k.color.slice(5, 7), 16);
+  const sim = Math.max(0.01, k.similarity), bl = k.blend, norm = 1 / (3 * 255 * 255);
+  for (let i = 0; i < d.length; i += 4) {
+    const dr = d[i] - kr, dg = d[i + 1] - kg, db = d[i + 2] - kb;
+    const diff = Math.sqrt((dr * dr + dg * dg + db * db) * norm);
+    if (diff < sim) d[i + 3] = 0;
+    else if (bl > 0) d[i + 3] = Math.round(d[i + 3] * Math.min(1, (diff - sim) / bl));
+  }
+  c.putImageData(img, 0, 0);
+}
+let keyBypass = false;
+const fxCanvases: HTMLCanvasElement[] = [];
+/** Paints a picture w x h with its green screen, mask and wipe applied, into a reusable canvas. */
+function withMaskKey(w: number, h: number, item: { mask?: Mask | null; key?: ChromaKey | null; startMs: number }, paint: (c: CanvasRenderingContext2D) => void): HTMLCanvasElement {
+  const W2 = Math.max(2, Math.round(w)), H2 = Math.max(2, Math.round(h));
+  const [cv, mk] = [0, 1].map((i) => { fxCanvases[i] ??= document.createElement('canvas'); const x = fxCanvases[i]; if (x.width !== W2 || x.height !== H2) { x.width = W2; x.height = H2; } return x; });
+  const c = cv.getContext('2d', { willReadFrequently: true })!;
+  c.setTransform(1, 0, 0, 1, 0, 0); c.globalCompositeOperation = 'source-over'; c.globalAlpha = 1;
+  c.clearRect(0, 0, W2, H2);
+  paint(c);
+  if (item.key && !keyBypass) applyKey(c, W2, H2, item.key);
+  if (item.mask && maskActive(item.mask)) {
+    const mc = mk.getContext('2d')!;
+    paintMask(mc, W2, H2, item.mask, false);
+    c.save(); c.globalCompositeOperation = 'destination-in'; c.drawImage(mk, 0, 0); c.restore();
+    if (item.mask.reveal) paintReveal(c, W2, H2, item.mask.reveal.dir, clamp((t - item.startMs) / Math.max(50, item.mask.reveal.ms), 0, 1));
+  }
+  return cv;
+}
+const needsFx = (it: { mask?: Mask | null; key?: ChromaKey | null }) => !!it.key || maskActive(it.mask);
+
+/** Mask pictures for the export, one per masked layer or picture, at its size in the video. */
+async function renderMaskFiles(dir: string): Promise<Record<string, string>> {
+  const T = tl(), W = T.width, H = T.height, out: Record<string, string> = {};
+  const even = (n: number) => Math.max(2, Math.round(n / 2) * 2);
+  const jobs: { id: string; w: number; h: number; m: Mask }[] = [];
+  for (const l of layers()) if (l.source !== 'adjust' && !l.hidden && l.mask && maskActive(l.mask)) jobs.push({ id: l.id, w: even(l.box.w * W), h: even(l.box.h * H), m: l.mask });
+  for (const im of images()) if (!im.hidden && im.mask && maskActive(im.mask)) { const w = even(W * im.scale); jobs.push({ id: im.id, w, h: even(w / im.aspect), m: im.mask }); }
+  if (!jobs.length) return out;
+  await invoke('ensure_dir', { path: dir });
+  const cv = document.createElement('canvas');
+  for (const j of jobs) {
+    cv.width = j.w; cv.height = j.h;
+    paintMask(cv.getContext('2d')!, j.w, j.h, j.m, true);
+    const blob = await new Promise<Blob | null>((res) => cv.toBlob(res, 'image/png'));
+    if (!blob) continue;
+    const file = join(dir, `mask-${j.id.slice(0, 8)}.png`);
+    await invoke('write_bytes', { path: file, content: Array.from(new Uint8Array(await blob.arrayBuffer())) });
+    out[j.id] = file;
+  }
+  return out;
+}
+
+let pickingKey: ChromaKey | null = null;
+const MASK0: Mask = { shape: 'ellipse', x: 0.5, y: 0.5, w: 1, h: 1, feather: 0.2 };
+function maskBlock(obj: { mask?: Mask | null; key?: ChromaKey | null }): HTMLElement {
+  const m = obj.mask;
+  const set = (fn: () => void) => { snapshot(); fn(); changed(); };
+  const mset = (p: Partial<Mask>) => set(() => { obj.mask = { ...(obj.mask ?? MASK0), ...p }; });
+  const live = (p: (v: number) => Partial<Mask>) => (v: number) => { obj.mask = { ...(obj.mask ?? MASK0), ...p(v) }; };
+  const k = obj.key;
+  const kset = (p: Partial<ChromaKey>) => set(() => { obj.key = { ...(obj.key ?? { color: '#00ff00', similarity: 0.3, blend: 0.1 }), ...p }; });
+  return h('div', { class: 'block' },
+    h('div', { class: 'label' }, 'Mask'),
+    h('div', { class: 'seg' },
+      h('button', { class: !m ? 'on' : '', onclick: () => set(() => { obj.mask = null; }) }, 'Tanpa'),
+      h('button', { class: m?.shape === 'rect' ? 'on' : '', onclick: () => mset({ shape: 'rect', ...(m ? {} : { w: 0.8, h: 0.8, feather: 0.05 }) }) }, 'Kotak'),
+      h('button', { class: m?.shape === 'ellipse' ? 'on' : '', onclick: () => mset({ shape: 'ellipse' }) }, 'Elips'),
+    ),
+    m ? h('div', { class: 'stack' },
+      h('div', { class: 'quick-grid' },
+        h('button', { class: 'chip', title: 'Tepi memudar lembut', onclick: () => mset({ shape: 'ellipse', x: 0.5, y: 0.5, w: 1.05, h: 1.05, feather: 0.35, invert: false }) }, 'Vignette'),
+        h('button', { class: 'chip', onclick: () => mset({ shape: 'ellipse', x: 0.5, y: 0.5, w: 0.8, h: 0.8, feather: 0.02, invert: false }) }, 'Lingkaran'),
+        h('button', { class: 'chip', title: 'Tepi kotak memudar', onclick: () => mset({ shape: 'rect', x: 0.5, y: 0.5, w: 0.9, h: 0.9, feather: 0.12, invert: false }) }, 'Fade tepi'),
+      ),
+      tfSlider('X', m.x * 100, 0, 100, 0.5, pct, live((v) => ({ x: v / 100 }))),
+      tfSlider('Y', m.y * 100, 0, 100, 0.5, pct, live((v) => ({ y: v / 100 }))),
+      tfSlider('Lebar', m.w * 100, 5, 150, 1, pct, live((v) => ({ w: v / 100 }))),
+      tfSlider('Tinggi', m.h * 100, 5, 150, 1, pct, live((v) => ({ h: v / 100 }))),
+      tfSlider('Feather', m.feather * 100, 0, 50, 1, (v) => `${Math.round(v)}`, live((v) => ({ feather: v / 100 }))),
+      h('label', { class: 'check' }, h('input', { type: 'checkbox', checked: !!m.invert, onchange: (e) => mset({ invert: (e.target as HTMLInputElement).checked || undefined }) }), 'Balik (sembunyikan bagian dalam)'),
+      h('div', { class: 'label' }, 'Muncul bertahap'),
+      h('div', { class: 'seg' }, ...([['', 'Tanpa'], ['left', '→'], ['right', '←'], ['down', '↓'], ['up', '↑'], ['center', '◎']] as const).map(([d, n]) => h('button', {
+        class: (m.reveal?.dir ?? '') === d ? 'on' : '', title: d ? `Muncul dari ${({ left: 'kiri', right: 'kanan', down: 'atas', up: 'bawah', center: 'tengah' } as const)[d]}` : 'Langsung tampil',
+        onclick: () => mset({ reveal: d ? { dir: d, ms: m.reveal?.ms ?? 700 } : null }),
+      }, n))),
+      m.reveal ? tfSlider('Durasi', m.reveal.ms / 1000, 0.1, 3, 0.1, (v) => `${v.toFixed(1)} dtk`, live((v) => ({ reveal: { ...m.reveal!, ms: Math.round(v * 1000) } }))) : '',
+    ) : h('div', { class: 'muted small' }, 'Bentuk kotak/elips dengan tepi lembut: buat vignette, potong bentuk, atau munculkan bertahap.'),
+    h('div', { class: 'label', style: 'margin-top:6px' }, 'Green screen'),
+    h('label', { class: 'check' }, h('input', { type: 'checkbox', checked: !!k, onchange: (e) => set(() => { obj.key = (e.target as HTMLInputElement).checked ? { color: '#00ff00', similarity: 0.3, blend: 0.1 } : null; }) }), 'Hapus warna latar (chroma key)'),
+    k ? h('div', { class: 'stack' },
+      h('div', { class: 'quick-grid' },
+        h('button', { class: `chip${k.color.toLowerCase() === '#00ff00' ? ' on' : ''}`, onclick: () => kset({ color: '#00ff00' }) }, 'Hijau'),
+        h('button', { class: `chip${k.color.toLowerCase() === '#0047bb' ? ' on' : ''}`, onclick: () => kset({ color: '#0047bb' }) }, 'Biru'),
+        h('input', { type: 'color', value: k.color, 'aria-label': 'Warna latar', onchange: (e) => kset({ color: (e.target as HTMLInputElement).value }) }),
+        h('button', { class: 'chip', title: 'Lalu klik warna latar di preview', onclick: () => { pickingKey = k; preview.style.cursor = 'crosshair'; toast('Klik warna latar di preview.'); } }, 'Ambil dari preview'),
+      ),
+      tfSlider('Kemiripan', k.similarity * 100, 1, 100, 1, (v) => `${Math.round(v)}`, (v) => { k.similarity = v / 100; }),
+      tfSlider('Halus', k.blend * 100, 0, 100, 1, (v) => `${Math.round(v)}`, (v) => { k.blend = v / 100; }),
+    ) : '',
+  );
 }
 
 // ================= reverse: a reversed copy of the piece, made in 2-second chunks so memory stays small =================
