@@ -441,6 +441,7 @@ async function uniquePath(dir: string, base: string): Promise<string> {
 
 export async function enqueueExport(p: Project, opts: { outDir: string; encoder: Encoder; fontScale?: Record<string, number>; quality?: number; captionBreaks?: CaptionBreaks;
   range?: { inMs: number; outMs: number } | null;
+  fileName?: string;   // without .mp4; default: the project name
   /** Draws captions and text as frames with the app's own renderer (exactly like the preview); null = nothing to draw. */
   renderOverlay?: (dir: string) => Promise<{ list: string; x: number; y: number; dir: string } | null> }) {
   const tl: Timeline = structuredClone(p.timeline);
@@ -463,7 +464,7 @@ export async function enqueueExport(p: Project, opts: { outDir: string; encoder:
     const fs = opts.fontScale ?? {};
     await invoke('write_text', { path: assFile, content: buildAss(tl, (font, bold) => fs[`${font}|${bold ? 1 : 0}`] ?? 1, opts.captionBreaks) });
   }
-  const outPath = await uniquePath(opts.outDir, safeName(opts.range ? `${p.name} (bagian)` : p.name));
+  const outPath = await uniquePath(opts.outDir, safeName(opts.fileName || (opts.range ? `${p.name} (bagian)` : p.name)));
   const media = Object.fromEntries(p.media.map((m) => [m.id, m]));
   const quality = opts.quality ?? 0.75;
   const gradeLuts = await bakeGrades(tl, await projectDir(p.id), id);

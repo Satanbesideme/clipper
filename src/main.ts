@@ -3,11 +3,12 @@ import { gradeImage, drawVignette, isNeutral, gradeOf, registerLut, lutReady, LO
 import './styles.css';
 import { dialog, fileSrc, invoke, isTauri, onDrop, extName, join, baseName, dirName } from './tauri';
 import { qualityBitrate } from './ffmpeg';
+import { autoEmoji, clearEmoji } from './emoji';
 import {
   DEFAULT_CAPTION, DEFAULT_TEXT, clipDuration, clipStarts, locate, splitAt, timelineDuration,
   type CaptionLine, type ImageItem, type Watermark, type SoundItem, type TextItem, type TextStyle, type Trans, type VideoClip, type Word,
   transState, TRANS_IN_MS, textAnimState, unitOf, wordPulse, fadesOf, fadeGain, MUSIC_FADE_IN, MUSIC_FADE_OUT, wordScale, wordColor, lineAnimOf, SHOUT_COLOR, type WordFx, type TextAnim, type CapAnim, clipFx, removePauses, remapItems, invertRanges, DUCK_LEVEL,
-  type ClipTrans, type Duck, type MusicItem, type Range, type VideoLayer, type Crop, NO_CROP, cropSize, type Marker, youtubeChapters,
+  type ClipTrans, type Duck, type MusicItem, type Range, type VideoLayer, type Crop, NO_CROP, cropSize, type Marker, youtubeChapters, type Blend, BLENDS,
 } from './render';
 import {
   IMAGE_EXT, SOUND_EXT, VIDEO_MEME_EXT, addVideoMeme, categoriesOf, deleteMeme, deletePad, deleteVideoMeme, importFiles as importLibFiles, loadLibrary, move, saveLibrary, soundOf,
@@ -142,6 +143,58 @@ function captionTemplates(): HTMLElement {
     h('div', { class: 'muted small' }, cap.preset ? (CAP_TEMPLATES.find((x) => x.id === cap.preset)?.hint ?? '') : 'Pilih template, lalu ubah detailnya di bawah kalau perlu.'),
   );
 }
+
+
+/** One-click helpers for the whole subtitle: emojis from the words, and tidy word timing. */
+function captionTools(): HTMLElement {
+  const cap = tl().captions;
+  const has = cap.lines.some((l) => l.words.some((w) => w.emoji));
+  return h('div', { class: 'block' },
+    h('div', { class: 'label' }, 'Otomatis'),
+    h('div', { class: 'quick-grid' },
+      h('button', {
+        class: 'chip', title: 'Kata seperti "wkwk", "menang", "takut", "gas" dapat emoji 😂 🏆 😱 🔥 (maksimal 1 per baris)',
+        onclick: () => { snapshot(); const n = autoEmoji(cap.lines, 1); changed({ left: true }); toast(n ? `${n} emoji dipasang.` : 'Tidak ada kata yang cocok untuk emoji.'); },
+      }, '😀 Auto emoji'),
+      has ? h('button', { class: 'chip', onclick: () => { snapshot(); const n = clearEmoji(cap.lines); changed({ left: true }); toast(`${n} emoji dihapus.`); } }, 'Hapus emoji') : '',
+      h('button', {
+        class: 'chip', title: 'Membetulkan kata yang menyala terlalu cepat/lama: urutan waktu dirapikan dan tiap kata menyala minimal 0,12 detik',
+        onclick: () => { snapshot(); const n = tidyWordTiming(cap.lines); changed({ left: true }); toast(n ? `Timing ${n} kata dirapikan.` : 'Timing kata sudah rapi.'); },
+      }, '⏱ Rapikan timing kata'),
+    ),
+  );
+}
+
+/** Words in order, inside their line, each lit at least 120 ms; a word ends where the next one starts. */
+function tidyWordTiming(lines: CaptionLine[]): number {
+  let n = 0;
+  for (const l of lines) {
+    const ws = l.words;
+    if (!ws.length) continue;
+    const span = Math.max(1, l.endMs - l.startMs);
+    const min = Math.min(120, span / ws.length);
+    const chars = ws.map((w) => Math.max(1, w.text.length));
+    const total = chars.reduce((a, b) => a + b, 0);
+    let prev = l.startMs;
+    ws.forEach((w, i) => {
+      const before = `${w.startMs}|${w.endMs}`;
+      // where the word would start if time were shared by length: used when its own start is missing or out of order
+      const share = l.startMs + (span * chars.slice(0, i).reduce((a, b) => a + b, 0)) / total;
+      let st = Number.isFinite(w.startMs) ? w.startMs : share;
+      if (st < prev || st > l.endMs - min * (ws.length - i)) st = Math.max(prev, Math.min(share, l.endMs - min * (ws.length - i)));
+      w.startMs = Math.round(Math.max(l.startMs, st));
+      prev = w.startMs + min;
+      if (`${w.startMs}|${w.endMs}` !== before) n++;
+    });
+    ws.forEach((w, i) => {
+      const end = i + 1 < ws.length ? ws[i + 1].startMs : l.endMs;
+      if (w.endMs !== end) { w.endMs = end; n++; }
+    });
+  }
+  return n;
+}
+
+const capWordText = (w: Word, caps?: boolean) => `${caps ? w.text.toLocaleUpperCase('id-ID') : w.text}${w.emoji ? ` ${w.emoji}` : ''}`;
 
 // ================= state =================
 
@@ -1126,6 +1179,7 @@ function captionPanel(): Node[] {
       !hasClips ? h('div', { class: 'muted small' }, 'Tambahkan video ke timeline dulu.') : null,
     ),
     captionTemplates(),
+    captionTools(),
     h('div', { class: 'block' },
       h('div', { class: 'label' }, 'Gaya'),
       h('label', { class: 'check' }, h('input', {
@@ -1394,6 +1448,7 @@ function renderInspectorInner() {
       h('h3', {}, 'Gambar'),
       h('div', { class: 'muted small' }, img.name),
       h('div', { class: 'muted small mono' }, `${tc(img.startMs, true)} → ${tc(img.endMs, true)}`),
+      blendBlock(img),
       h('div', { class: 'block' },
         field(`Ukuran ${Math.round(img.scale * 100)}%`, h('input', {
           type: 'range', min: 10, max: 100, value: Math.round(img.scale * 100),
@@ -1721,6 +1776,10 @@ function selectionMenu(e: MouseEvent, atMs: number) {
     { label: 'Duplikat', icon: 'dup', keys: 'Ctrl+J', run: duplicateSelection },
   );
   if (one?.kind === 'clip') items.push({ label: 'Salin ke layer baru', icon: 'layers', run: () => { if (copySelection()) { pasteClipboard(); switchTab('transform'); } } });
+  if (one?.kind === 'clip') {
+    const c = tl().clips.find((x) => x.id === one.id);
+    if (c) items.push({ label: c.reversedFrom ? 'Putar normal lagi' : 'Putar mundur (reverse)', icon: 'back', run: () => void reverseClip(c) });
+  }
   if (video && one) {
     const obj = (listOf(one.kind) as (Gradable & { id: string })[]).find((x) => x.id === one.id);
     items.push('sep',
@@ -2120,7 +2179,9 @@ function renderFrameInner() {
     if (el.complete && el.naturalWidth) {
       const aw = w * an.scale, ah = hh * an.scale;
       ctx.globalAlpha = an.alpha;
+      ctx.globalCompositeOperation = blendCss(im.blend);
       drawGraded(ctx, el, im.grade, el.naturalWidth, el.naturalHeight, null, im.x * W - aw / 2, im.y * H - ah / 2 + an.dy * H, aw, ah);
+      ctx.globalCompositeOperation = 'source-over';
       ctx.globalAlpha = 1;
     }
     boxes.push({ kind: 'image', id: im.id, x, y, w, h: hh });
@@ -2159,7 +2220,7 @@ function overlayPlan(tt: number, W: number, H: number, k: number): OverlayPlan {
     let active = -1;
     line.words.forEach((w, i) => { if (tt >= w.startMs) active = i; });
     const segs: Seg[] = line.words.map((w, i) => ({
-      text: cap.caps ? w.text.toLocaleUpperCase('id-ID') : w.text,
+      text: capWordText(w, cap.caps),
       color: wordColor(w, i === active, cap),
       scale: wordScale(w.fx, anim, i === active, i <= active ? tt - Math.max(line.startMs, w.startMs) : -1),
       hidden: anim === 'word' && i > active,
@@ -2383,7 +2444,7 @@ function captionBreaks(line: CaptionLine): number[] {
   ctx.font = fontOf(cap.style, u);
   const space = ctx.measureText(' ').width;
   const anim = lineAnimOf(line, cap);
-  const widths = line.words.map((wd) => ctx.measureText(cap.caps ? wd.text.toLocaleUpperCase('id-ID') : wd.text).width);
+  const widths = line.words.map((wd) => ctx.measureText(capWordText(wd, cap.caps)).width);
   // leave room for the word that grows while it is said (bounce, pop, shout), so it stays inside the screen
   const grow = Math.max(0, ...line.words.map((wd, i) => { const p = wordPulse(wd.fx, anim); return (Math.max(p.peak, p.base) - 1) * widths[i]; }));
   const maxW = tl().width - 120 * u - grow;
@@ -4390,8 +4451,10 @@ function drawLayers(ctx: CanvasRenderingContext2D, W: number, H: number) {
     const bw = ly.box.w * W, bh = ly.box.h * H, bx = ly.box.x * W - bw / 2, by = ly.box.y * H - bh / 2;
     if (src) {
       ctx.globalAlpha = ly.opacity;
+      ctx.globalCompositeOperation = blendCss(ly.blend);
       drawGraded(ctx, src, ly.grade, sw, sh, [ly.crop.l * sw, ly.crop.t * sh, sw * (1 - ly.crop.l - ly.crop.r), sh * (1 - ly.crop.t - ly.crop.b)], bx, by, bw, bh);
       drawVignette(ctx, bx, by, bw, bh, vignetteOf(ly.grade));
+      ctx.globalCompositeOperation = 'source-over';
       ctx.globalAlpha = 1;
     } else {
       ctx.fillStyle = '#1b3150'; ctx.fillRect(bx, by, bw, bh);
@@ -4939,6 +5002,19 @@ function pctInput(label: string, value: number, onSet: (v: number) => void, min 
   }));
 }
 
+
+const blendCss = (b?: Blend): GlobalCompositeOperation => BLENDS.find((x) => x.id === b)?.css ?? 'source-over';
+/** Photoshop-style blending for a layer or picture. */
+function blendBlock(obj: { blend?: Blend }): HTMLElement {
+  return h('div', { class: 'block' },
+    h('div', { class: 'label' }, 'Blending'),
+    h('select', {
+      'aria-label': 'Mode blending',
+      onchange: (e: Event) => { snapshot(); const v = (e.target as HTMLSelectElement).value as Blend; obj.blend = v === 'normal' ? undefined : v; changed(); },
+    }, ...BLENDS.map((b) => h('option', { value: b.id, selected: (obj.blend ?? 'normal') === b.id }, b.name))),
+    h('div', { class: 'muted small' }, 'Multiply menggelapkan (bagus untuk latar putih), Screen/Add menerangkan (bagus untuk efek api, cahaya, latar hitam).'),
+  );
+}
 function layerInspector(ly: VideoLayer): Node[] {
   const set = (fn: () => void) => { snapshot(); fn(); changed(); };
   const src = srcSize(ly);
@@ -4948,6 +5024,7 @@ function layerInspector(ly: VideoLayer): Node[] {
       h('input', { class: 'layer-title', value: ly.name, 'aria-label': 'Nama layer', onchange: (e) => set(() => { ly.name = (e.target as HTMLInputElement).value.trim() || ly.name; }) }),
     ),
     h('div', { class: 'muted small' }, `${ly.source === 'main' ? 'Dari video utama (ikut potongan & hapus jeda)' : 'Video lain'} · ${tc(ly.startMs)} → ${tc(Math.min(ly.endMs, timelineDuration(tl())))}`),
+    blendBlock(ly),
     h('div', { class: 'block' },
       h('div', { class: 'seg' },
         h('button', { class: !cropMode ? 'on' : '', onclick: () => { cropMode = false; renderInspector(); renderFrame(); } }, 'Transform'),
@@ -5021,6 +5098,7 @@ function renderExport() {
     h('div', { class: 'row-between' }, h('h3', {}, 'Ekspor'), h('button', { class: 'icon-btn', 'aria-label': 'Tutup', onclick: toggleExport }, icon('x', 15))),
     h('div', { class: 'muted small' }, `${tl().width}×${tl().height} · ${tl().fps} fps · MP4 H.264 · ${tc(d, true)}`),
     d > 180000 ? h('div', { class: 'warn small' }, 'Lebih dari 3 menit: YouTube Shorts membatasi 3 menit. TikTok masih bisa.') : h('span'),
+    presetBlock(),
     qualityBlock(d),
     rangeNow() ? h('label', { class: 'switch-row' },
       h('input', { type: 'checkbox', checked: exportRangeOnly, onchange: (e: Event) => { exportRangeOnly = (e.target as HTMLInputElement).checked; } }),
@@ -5046,6 +5124,7 @@ function renderExport() {
           await enqueueExport(P!, {
             outDir: settings.outDir, encoder: settings.encoder || (await detectEncoder()), fontScale, quality: settings.quality ?? 0.75, captionBreaks,
             range: exportRangeOnly ? rangeNow() : null,
+            fileName: exportFileName(),
             renderOverlay: (dir) => renderOverlayTrack(dir, (f) => { btn.textContent = `Menyiapkan teks… ${Math.round(f * 100)}%`; }),
           }).finally(() => { btn.disabled = false; btn.textContent = 'Ekspor video'; });
         } catch (e) { toast((e as Error).message, 'error'); }
@@ -5057,6 +5136,67 @@ function renderExport() {
 }
 
 let exportRangeOnly = true;
+
+// ================= export presets & file names =================
+type ExportPreset = { id: string; name: string; hint: string; aspect: Aspect; short: number; fps?: 30 | 60; quality: number };
+const EXPORT_PRESETS: ExportPreset[] = [
+  { id: 'shorts', name: 'YouTube Shorts', hint: '9:16 · 1080p · 60 fps', aspect: '9:16', short: 1080, fps: 60, quality: 0.8 },
+  { id: 'tiktok', name: 'TikTok', hint: '9:16 · 1080p · 30 fps', aspect: '9:16', short: 1080, fps: 30, quality: 0.75 },
+  { id: 'reels', name: 'Instagram Reels', hint: '9:16 · 1080p · 30 fps', aspect: '9:16', short: 1080, fps: 30, quality: 0.75 },
+  { id: 'yt1080', name: 'YouTube 1080p', hint: '16:9 · FHD', aspect: '16:9', short: 1080, quality: 0.85 },
+  { id: 'yt2k', name: 'YouTube 2K', hint: '16:9 · 1440p', aspect: '16:9', short: 1440, quality: 0.85 },
+  { id: 'yt4k', name: 'YouTube 4K', hint: '16:9 · 2160p', aspect: '16:9', short: 2160, quality: 0.9 },
+  { id: 'feed45', name: 'Feed 4:5', hint: 'Instagram / Facebook', aspect: '4:5', short: 1080, quality: 0.75 },
+];
+const presetMatches = (pr: ExportPreset) => aspectOf(tl().width, tl().height) === pr.aspect && Math.min(tl().width, tl().height) === pr.short && (!pr.fps || tl().fps === pr.fps);
+function currentPreset(): ExportPreset | undefined {
+  const saved = EXPORT_PRESETS.find((x) => x.id === settings.exportPreset);
+  return saved && presetMatches(saved) ? saved : EXPORT_PRESETS.find(presetMatches);
+}
+function applyPreset(pr: ExportPreset) {
+  if (!presetMatches(pr)) setCanvas(pr.aspect, pr.short, pr.fps);
+  settings.exportPreset = pr.id;
+  settings.quality = pr.quality;
+  void saveSettings(settings);
+  renderExport();
+}
+const DEFAULT_NAME_PATTERN = '{tanggal} {judul} - {preset}';
+/** File name from a pattern: {judul} {tanggal} {jam} {preset} {ukuran} {durasi}. */
+function exportFileName(pattern = settings.namePattern || DEFAULT_NAME_PATTERN): string {
+  const now = new Date();
+  const pad = (n: number) => String(n).padStart(2, '0');
+  const r = exportRangeOnly ? rangeNow() : null;
+  const dur = Math.round((r ? r.outMs - r.inMs : timelineDuration(tl())) / 1000);
+  const vals: Record<string, string> = {
+    judul: (P?.name ?? 'video').trim(),
+    tanggal: `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`,
+    jam: `${pad(now.getHours())}.${pad(now.getMinutes())}`,
+    preset: currentPreset()?.name ?? `${tl().width}x${tl().height}`,
+    ukuran: `${tl().width}x${tl().height}`,
+    durasi: dur >= 60 ? `${Math.floor(dur / 60)}m${pad(dur % 60)}s` : `${dur}s`,
+  };
+  const name = pattern.replace(/\{(\w+)\}/g, (all, k: string) => vals[k.toLowerCase()] ?? all).replace(/[\\/:*?"<>|]+/g, '-').replace(/\s+/g, ' ').trim();
+  return name || vals.judul;
+}
+function presetBlock(): HTMLElement {
+  const cur = currentPreset();
+  const nameInput = h('input', {
+    value: settings.namePattern || DEFAULT_NAME_PATTERN, 'aria-label': 'Pola nama file',
+    title: 'Pakai {judul} {tanggal} {jam} {preset} {ukuran} {durasi}',
+    oninput: (e: Event) => { settings.namePattern = (e.target as HTMLInputElement).value; const pv = $('#name-preview'); if (pv) pv.textContent = `${exportFileName()}.mp4`; },
+    onchange: () => void saveSettings(settings),
+  });
+  return h('div', { class: 'quality' },
+    h('span', { class: 'label' }, 'Preset'),
+    h('div', { class: 'preset-row' }, ...EXPORT_PRESETS.map((pr) => h('button', {
+      class: `chip${cur?.id === pr.id ? ' on' : ''}`, title: `${pr.hint}\nMengubah ukuran kanvas kalau perlu`, onclick: () => applyPreset(pr),
+    }, pr.name))),
+    h('span', { class: 'label' }, 'Nama file'),
+    nameInput,
+    h('div', { class: 'muted small mono', id: 'name-preview' }, `${exportFileName()}.mp4`),
+  );
+}
+
 const QUALITY_STOPS: [number, string][] = [[0.5, 'Hemat'], [0.75, 'Shorts'], [1, 'Maksimal']];
 function qualityBlock(durMs: number): HTMLElement {
   const q = settings.quality ?? 0.75;
@@ -5140,6 +5280,71 @@ function renderQueue() {
   for (const j of done) { (j as { notified?: boolean }).notified = true; toast(`Selesai: ${j.outPath.split('\\').pop()}`); }
 }
 
+
+
+// ================= reverse: a reversed copy of the piece, made in 2-second chunks so memory stays small =================
+let reversing = false;
+async function reverseClip(c: VideoClip) {
+  if (!P || reversing) return;
+  if (c.reversedFrom) {
+    // back to the original footage, keeping any trim done while reversed (reversed time x = original out - x)
+    const r = c.reversedFrom;
+    snapshot();
+    const inMs = Math.max(r.inMs, r.outMs - c.outMs), outMs = Math.min(r.outMs, r.outMs - c.inMs);
+    c.mediaId = r.mediaId; c.inMs = inMs; c.outMs = outMs;
+    delete c.reversedFrom;
+    changed();
+    toast('Potongan diputar normal lagi.');
+    return;
+  }
+  const m = mediaOf(c.mediaId);
+  if (!m) return;
+  reversing = true;
+  pause();
+  const p = P;
+  const dir = join(await projectDir(p.id), `rev-${uid()}`);
+  await invoke('ensure_dir', { path: dir });
+  try {
+    const CH = 2000;
+    const parts: string[] = [];
+    const total = c.outMs - c.inMs;
+    for (let a = c.inMs, i = 0; a < c.outMs - 10; a += CH, i++) {
+      const d = Math.min(CH, c.outMs - a);
+      const out = join(dir, `p${String(i).padStart(4, '0')}.mp4`);
+      setBusy(`Membuat video mundur… ${Math.round(((a - c.inMs) / total) * 100)}%`);
+      await runTool('ffmpeg', [
+        '-hide_banner', '-y', '-nostats', '-progress', 'pipe:1', '-ss', (a / 1000).toFixed(3), '-t', (d / 1000).toFixed(3), '-i', m.playable,
+        '-map', '0:v:0', ...(m.hasAudio ? ['-map', '0:a:0', '-af', 'areverse', '-c:a', 'aac', '-b:a', '192k', '-ar', '48000', '-ac', '2'] : []),
+        '-vf', 'reverse', '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '15', '-pix_fmt', 'yuv420p', '-r', String(Math.round(m.fps) || 30), out,
+      ]);
+      parts.push(out);
+    }
+    const list = join(dir, 'list.txt');
+    await invoke('write_text', { path: list, content: parts.reverse().map((f) => `file '${f.replace(/\\/g, '/').replace(/'/g, "'\\''")}'`).join('\n') + '\n' });
+    const outFile = join(await projectDir(p.id), `${m.name.replace(/[^\w\- ]+/g, '').slice(0, 40) || 'video'} mundur ${uid().slice(0, 4)}.mp4`);
+    setBusy('Menyatukan video mundur…');
+    await runTool('ffmpeg', ['-hide_banner', '-y', '-nostats', '-progress', 'pipe:1', '-f', 'concat', '-safe', '0', '-i', list, '-c', 'copy', '-movflags', '+faststart', outFile]);
+    const m2 = await importMedia(outFile, setBusy);
+    m2.name = `${m.name} (mundur)`;
+    p.media.push(m2);
+    snapshot();
+    c.reversedFrom = { mediaId: c.mediaId, inMs: c.inMs, outMs: c.outMs };
+    c.mediaId = m2.id; c.inMs = 0; c.outMs = Math.min(m2.durationMs, total);
+    changed({ left: true });
+    toast('Potongan sekarang diputar mundur. Klik kanan → Putar normal lagi untuk membatalkan.');
+    setBusy('Membuat thumbnail…');
+    await buildThumbs(p, m2);
+    await saveProject(p);
+    await loadSheets(m2);
+    drawTimeline();
+  } catch (e) {
+    toast(`Gagal membuat video mundur: ${(e as Error).message}`, 'error');
+  } finally {
+    await invoke('remove_path', { path: dir }).catch(() => undefined);
+    setBusy('');
+    reversing = false;
+  }
+}
 
 // ================= tooltips: every icon says what it does =================
 function setupTooltips() {

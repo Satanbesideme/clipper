@@ -989,3 +989,9 @@ body.col-dragging .workspace { transition: none; }
 .mt-btn:hover { background: var(--accent); color: var(--on-accent); }
 .mt-name { font-size: 12px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mt-meta { font-size: 10.5px; color: var(--faint); margin-top: -3px; }
+
+/* export presets */
+.preset-row { display: flex; flex-wrap: wrap; gap: 5px; }
+.preset-row .chip { padding: 4px 9px; font-size: 11.5px; }
+#name-preview { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--faint); }
+.export-pop { max-height: calc(100vh - 70px); overflow-y: auto; top: 56px; width: 360px; }

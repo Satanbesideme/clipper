@@ -99,7 +99,7 @@ export function chunkPlan(durMs: number, len = 10000, overlap = 1500): { startMs
 }
 
 export function safeName(s: string): string {
-  const cleaned = s.replace(/[<>:"/\\|?*\x00-\x1f]/g, '').replace(/\s+/g, ' ').trim().slice(0, 60);
+  const cleaned = s.replace(/[<>:"/\\|?*\x00-\x1f]/g, '').replace(/\s+/g, ' ').trim().slice(0, 120);
   return cleaned || 'video';
 }
 

@@ -20,6 +20,7 @@ export type Fit = 'fill' | 'fit';
 /** A piece of the main (magnetic) video track. */
 export interface VideoClip {
   id: string;
+  reversedFrom?: { mediaId: string; inMs: number; outMs: number };  // set when this piece plays a reversed copy
   mediaId: string;
   inMs: number;   // source time
   outMs: number;  // source time
@@ -141,7 +142,7 @@ export function textAnimState(anim: TextAnim | undefined, lt: number, durMs: num
 }
 
 /** fx/color: a style for just this word (e.g. when shouting), on top of the line's animation. */
-export interface Word { text: string; startMs: number; endMs: number; fx?: WordFx; color?: string }
+export interface Word { text: string; startMs: number; endMs: number; fx?: WordFx; color?: string; emoji?: string }
 /** anim: this line's own animation; empty = the general one from the Subtitle panel. */
 export interface CaptionLine { id: string; startMs: number; endMs: number; words: Word[]; anim?: CapAnim }
 
@@ -209,6 +210,7 @@ export const TRANS_OUT_MS = 250;
 /** A picture (meme) over the video. */
 export interface ImageItem {
   id: string;
+  blend?: Blend;
   file: string;
   name: string;
   startMs: number;
@@ -271,6 +273,20 @@ export interface Timeline {
   range?: { inMs: number; outMs: number } | null;  // In/Out points (I / O)
 }
 
+/** How a layer or picture mixes with what is under it (like Photoshop's blend modes). */
+export type Blend = 'normal' | 'multiply' | 'screen' | 'overlay' | 'softlight' | 'add' | 'darken' | 'lighten' | 'difference';
+export const BLENDS: { id: Blend; name: string; css: GlobalCompositeOperation }[] = [
+  { id: 'normal', name: 'Normal', css: 'source-over' }, { id: 'multiply', name: 'Multiply', css: 'multiply' },
+  { id: 'screen', name: 'Screen', css: 'screen' }, { id: 'overlay', name: 'Overlay', css: 'overlay' },
+  { id: 'softlight', name: 'Soft Light', css: 'soft-light' }, { id: 'add', name: 'Add', css: 'lighter' },
+  { id: 'darken', name: 'Darken', css: 'darken' }, { id: 'lighten', name: 'Lighten', css: 'lighten' },
+  { id: 'difference', name: 'Difference', css: 'difference' },
+];
+const BLEND_FF: Record<Exclude<Blend, 'normal'>, [string, string]> = {
+  multiply: ['multiply', 'white'], darken: ['darken', 'white'], screen: ['screen', 'black'], add: ['addition', 'black'],
+  lighten: ['lighten', 'black'], difference: ['difference', 'black'], overlay: ['overlay', '0x808080'], softlight: ['softlight', '0x808080'],
+};
+
 /** A named point on the timeline. */
 export interface Marker { id: string; ms: number; label: string; color: string }
 
@@ -299,6 +315,7 @@ export interface Box { x: number; y: number; w: number; h: number }
  */
 export interface VideoLayer {
   id: string;
+  blend?: Blend;
   name: string;
   source: 'main' | 'media';
   mediaId?: string;   // media layers
@@ -621,6 +638,20 @@ export function atempoChain(speed: number): string[] {
   return out;
 }
 
+/**
+ * Blends a picture (with alpha) over `base`: the picture is first laid on a full canvas of the mode's neutral
+ * colour (white for multiply, black for screen, ...), so outside the picture and where it is transparent the
+ * blend changes nothing; opacity becomes a mix towards that neutral colour.
+ */
+function blendOnto(f: string[], base: string, src: string, x: string, y: string, st: string, en: string, mode: Exclude<Blend, 'normal'>, out: string, W: number, H: number, F: number, total: number): string {
+  const [ff, neutral] = BLEND_FF[mode];
+  f.push(`color=c=${neutral}:s=${W}x${H}:r=${F}:d=${(total / 1000).toFixed(3)},format=rgba[${out}n]`);
+  f.push(`[${out}n][${src}]overlay=x=${x}:y=${y}:eof_action=pass:format=auto,format=gbrp[${out}t]`);
+  f.push(`[${base}]format=gbrp[${out}b]`);
+  f.push(`[${out}b][${out}t]blend=all_mode=${ff}:enable='between(t,${st},${en})',format=yuv420p[${out}]`);
+  return out;
+}
+
 export function renderArgs(spec: RenderSpec): string[] {
   const { tl } = spec;
   const W = tl.width, H = tl.height, F = tl.fps;
@@ -741,8 +772,11 @@ export function renderArgs(spec: RenderSpec): string[] {
       }
       input++;
     }
-    f.push(`[${v}][ly${k}]overlay=x=${x}:y=${y}:enable='between(t,${st},${en})':eof_action=pass:format=auto[lv${k}]`);
-    v = `lv${k}`;
+    if (l.blend && l.blend !== 'normal') v = blendOnto(f, v, `ly${k}`, `${x}`, `${y}`, st, en, l.blend, `lv${k}`, W, H, F, total);
+    else {
+      f.push(`[${v}][ly${k}]overlay=x=${x}:y=${y}:enable='between(t,${st},${en})':eof_action=pass:format=auto[lv${k}]`);
+      v = `lv${k}`;
+    }
   });
 
   // meme pictures over the video, each only while it is on the timeline
@@ -778,8 +812,12 @@ export function renderArgs(spec: RenderSpec): string[] {
     let dy = '0';
     if (tin === 'slide') dy += `+if(lt(${lt},${ti}),${H * 0.5}*pow(1-${lt}/${ti},3),0)`;
     if (tout === 'slide') dy += `+if(gt(${lt},${(D - to).toFixed(3)}),${H * 0.5}*pow((${lt}-${(D - to).toFixed(3)})/${to},2),0)`;
-    f.push(`[${v}][im${k}]overlay=x='${cx}-overlay_w/2':y='${cy}-overlay_h/2${dy === '0' ? '' : `+(${dy})`}':enable='between(t,${st},${en})':eof_action=pass:format=auto[ov${k}]`);
-    v = `ov${k}`;
+    const ix = `'${cx}-overlay_w/2'`, iy = `'${cy}-overlay_h/2${dy === '0' ? '' : `+(${dy})`}'`;
+    if (im.blend && im.blend !== 'normal') v = blendOnto(f, v, `im${k}`, ix, iy, st, en, im.blend, `ov${k}`, W, H, F, total);
+    else {
+      f.push(`[${v}][im${k}]overlay=x=${ix}:y=${iy}:enable='between(t,${st},${en})':eof_action=pass:format=auto[ov${k}]`);
+      v = `ov${k}`;
+    }
     input++;
   });
   const wm = tl.watermark;

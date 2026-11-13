@@ -122,6 +122,13 @@ const scenarios: [string, (tl: Timeline) => void][] = [
   }]),
   ['teks dengan kotak', (tl) => { tl.texts = [{ id: 't', startMs: 0, endMs: 3000, text: 'MOMEN', x: 0.5, y: 0.2, style: { ...DEFAULT_TEXT, font, box: true } }]; }],
 ];
+scenarios.push(['blending: layer multiply + meme screen', (tl) => {
+  tl.layers = [{ id: 'o', name: 'O', source: 'media', mediaId: 'm', inMs: 2000, startMs: 1000, endMs: 4000, crop: { l: 0, t: 0, r: 0, b: 0.5 }, box: { x: 0.5, y: 0.5, w: 0.8, h: 0.4 }, opacity: 0.8, volume: 0, blend: 'multiply' }];
+  tl.images = [{ ...meme('i', `${dir}/meme.png`, 500, 2500, 'pop', 'fade'), blend: 'screen' }];
+}]);
+scenarios.push(['blending: overlay/add/difference', (tl) => {
+  tl.images = [{ ...meme('a', `${dir}/meme.png`, 0, 1500, 'none', 'none'), blend: 'overlay' }, { ...meme('b', `${dir}/anim.gif`, 1000, 3000, 'fade', 'pop', true), blend: 'add' }, { ...meme('c', `${dir}/meme.png`, 2000, 5000, 'slide', 'none'), blend: 'difference' }];
+}]);
 // extra export options a scenario can set (In/Out range, captions drawn by the app as PNG frames)
 let extra: Partial<RenderSpec> = {};
 let expectSec = 0;

@@ -21,7 +21,7 @@ export interface Project {
 export interface ProjectSummary { id: string; name: string; durationMs: number; clips: number; updatedAt: string; version?: number }
 
 export type ModelSize = 'base' | 'small';
-export interface Settings { outDir: string; encoder: Encoder | ''; model: ModelSize; watermark?: Watermark | null; fontScale?: Record<string, number>; quality?: number; sttTracks?: 'all' | number; sttCareful?: boolean; insertVolume?: number; leftW?: number; rightW?: number; leftHidden?: boolean; rightHidden?: boolean }
+export interface Settings { outDir: string; encoder: Encoder | ''; model: ModelSize; watermark?: Watermark | null; fontScale?: Record<string, number>; quality?: number; sttTracks?: 'all' | number; sttCareful?: boolean; insertVolume?: number; leftW?: number; rightW?: number; leftHidden?: boolean; rightHidden?: boolean; exportPreset?: string; namePattern?: string }
 
 let dataDirCache = '';
 export async function dataDir(): Promise<string> {
