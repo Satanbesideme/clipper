@@ -834,7 +834,7 @@ async function stingerPath() {
  * Puts the GALSURKU stinger before the first clip. Everything placed on the timeline moves along by the
  * stinger's length, so captions, memes and sounds stay on the moments they belong to.
  */
-async function addStinger() {
+async function addStinger(atEnd = false) {
   if (!P) return;
   const path = await stingerPath();
   if (!(await invoke<boolean>('exists', { path }))) { toast('File stinger tidak ditemukan di folder aplikasi.', 'error'); return; }
@@ -842,6 +842,14 @@ async function addStinger() {
   try {
     let m = P.media.find((x) => x.path === path);
     if (!m) { m = await importMedia(path, setBusy); P.media.push(m); void buildThumbs(P, m).then(() => saveProject(P!)).then(() => loadSheets(m!)); }
+    if (atEnd) {
+      if (tl().clips[tl().clips.length - 1]?.mediaId === m.id) { toast('Stinger sudah ada di akhir video.'); return; }
+      snapshot();
+      tl().clips.push({ id: uid(), mediaId: m.id, inMs: 0, outMs: m.durationMs, speed: 1, volume: 0.8, fit: 'fill', trans: 'fade' });
+      changed({ left: true }); fitZoom();
+      toast('Stinger dipasang di akhir sebagai penutup.');
+      return;
+    }
     if (tl().clips[0]?.mediaId === m.id) { toast('Stinger sudah ada di awal video.'); return; }
     snapshot();
     const d = Math.round(m.durationMs);
@@ -885,6 +893,7 @@ function stingerCard(): HTMLElement {
       h('div', { class: 'muted small' }, '1,9 dtk · 1080×1920 · dengan suara. Arahkan mouse untuk melihat.'),
       h('div', { class: 'stinger-actions' },
         h('button', { class: 'primary small-btn', disabled: has, onclick: () => void addStinger() }, has ? 'Sudah di awal' : 'Pasang di awal'),
+        h('button', { class: 'secondary small-btn', title: 'Sebagai penutup video; subtitle dan lainnya tidak bergeser', onclick: () => void addStinger(true) }, 'Pasang di akhir'),
         h('button', { class: 'ghost small', title: 'Simpan file MP4-nya ke folder ekspor', onclick: () => void saveStingerCopy() }, 'Simpan file'),
       ),
     ),
@@ -1257,6 +1266,10 @@ function groupInspector(): Node[] {
     h('div', { class: 'block' },
       h('div', { class: 'label' }, 'Geser bersamaan'),
       h('div', { class: 'sync' }, ...([-1000, -100, 100, 1000] as const).map((ms) => h('button', { class: 'chip', onclick: () => nudge(ms) }, `${ms > 0 ? '+' : '−'}${Math.abs(ms / 1000).toFixed(ms % 1000 ? 1 : 0)} dtk`))),
+      h('div', { class: 'sync' },
+        h('input', { type: 'number', step: 0.1, placeholder: '-1.9', class: 'cat-input', style: 'width:80px', id: 'group-shift', 'aria-label': 'Geser berapa detik' }),
+        h('button', { class: 'chip', onclick: () => { const v = Number(($('#group-shift') as HTMLInputElement).value); if (Number.isFinite(v) && v) nudge(Math.round(v * 1000)); } }, 'Geser dtk'),
+      ),
       h('div', { class: 'muted small' }, 'Atau tarik salah satu item yang dipilih di timeline. Ctrl/Shift + klik untuk menambah atau mengurangi pilihan, Esc untuk batal.'),
     ),
     h('button', { class: 'danger-ghost wide', onclick: deleteSelected }, `Hapus ${multi.size} item`),
@@ -1289,7 +1302,7 @@ function renderInspectorInner() {
         field(`Kecepatan ${clip.speed}×`, h('input', {
           type: 'range', min: 0, max: 8, step: 1, value: [0.25, 0.5, 0.75, 1, 1.25, 1.5, 2, 3, 4].indexOf(clip.speed),
           oninput: (e) => { const v = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 2, 3, 4][Number((e.target as HTMLInputElement).value)]; ((e.target as HTMLElement).previousElementSibling as HTMLElement).textContent = `Kecepatan ${v}×`; },
-          onchange: (e) => set({ speed: [0.25, 0.5, 0.75, 1, 1.25, 1.5, 2, 3, 4][Number((e.target as HTMLInputElement).value)] }),
+          onchange: (e) => { const before = clipMap(); snapshot(); clip.speed = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 2, 3, 4][Number((e.target as HTMLInputElement).value)]; followMainTrack(before); changed(); },
         })),
         field(`Volume ${Math.round(clip.volume * 100)}%`, h('input', {
           type: 'range', min: 0, max: 200, step: 5, value: Math.round(clip.volume * 100),
@@ -1480,6 +1493,52 @@ function renderInspectorInner() {
 }
 
 // ================= editing actions =================
+
+// ================= keep everything on its footage when the main track changes =================
+type ClipMap = { id: string; start: number; end: number; inMs: number; speed: number }[];
+function clipMap(): ClipMap {
+  const starts = clipStarts(tl().clips);
+  return tl().clips.map((c, i) => ({ id: c.id, start: starts[i], end: starts[i] + clipDuration(c), inMs: c.inMs, speed: c.speed }));
+}
+/**
+ * After the main track was reordered, trimmed, sped up or had a clip removed, moves subtitles, text, memes,
+ * sounds, music and layers so each stays on the same moment of the footage it was placed on.
+ */
+function followMainTrack(before: ClipMap) {
+  if (!P || !before.length) return;
+  const now = new Map(clipMap().map((c) => [c.id, c]));
+  const oldTotal = before[before.length - 1].end, newTotal = timelineDuration(tl());
+  const delta = (t: number): number => {
+    let k = before.findIndex((b) => t >= b.start && t < b.end);
+    if (k < 0) return t >= oldTotal ? newTotal - oldTotal : 0;
+    const b = before[k], n = now.get(b.id);
+    if (n) {
+      const src = b.inMs + (t - b.start) * b.speed;
+      const nt = clamp(n.start + (src - n.inMs) / n.speed, n.start, n.end);
+      return nt - t;
+    }
+    // its clip was removed: move along with the next clip that is still there
+    for (k++; k < before.length; k++) { const nx = now.get(before[k].id); if (nx) return nx.start - before[k].start; }
+    return newTotal - oldTotal;
+  };
+  const sh = (x: { startMs: number; endMs?: number }) => {
+    const d = Math.round(delta(x.startMs));
+    if (!d) return;
+    x.startMs = Math.max(0, x.startMs + d);
+    if (typeof x.endMs === 'number' && x.endMs < UNTIL_END) x.endMs = Math.max(x.startMs + 50, x.endMs + d);
+    return d;
+  };
+  tl().texts.forEach(sh); images().forEach(sh); sounds().forEach(sh); music().forEach(sh);
+  layers().forEach((ly) => { if (ly.source === 'media' || ly.endMs < UNTIL_END) sh(ly); });
+  for (const l of tl().captions.lines) {
+    const d = Math.round(delta(l.startMs));
+    if (!d) continue;
+    l.startMs = Math.max(0, l.startMs + d); l.endMs = Math.max(l.startMs + 50, l.endMs + d);
+    l.words = l.words.map((w) => ({ ...w, startMs: Math.max(0, w.startMs + d), endMs: Math.max(0, w.endMs + d) }));
+  }
+  tl().captions.lines.sort((a, b) => a.startMs - b.startMs);
+}
+let clipMapAtDown: ClipMap | null = null;
 
 // ================= clipboard =================
 type ClipEntry = { kind: SelKind; data: unknown; start: number };
@@ -1728,7 +1787,7 @@ function deleteSelected() {
   }
   if (!P || !sel) { toast('Pilih dulu potongan, teks, atau subtitle di timeline.'); return; }
   snapshot();
-  if (sel.kind === 'clip') tl().clips = tl().clips.filter((c) => c.id !== sel!.id);
+  if (sel.kind === 'clip') { const before = clipMap(); tl().clips = tl().clips.filter((c) => c.id !== sel!.id); followMainTrack(before); }
   else if (sel.kind === 'text') tl().texts = tl().texts.filter((x) => x.id !== sel!.id);
   else if (sel.kind === 'sound') tl().sounds = sounds().filter((x) => x.id !== sel!.id);
   else if (sel.kind === 'image') tl().images = images().filter((x) => x.id !== sel!.id);
@@ -3027,6 +3086,7 @@ function setupTimeline() {
     }
     if (hit.kind === 'clip') {
       const c = tl().clips.find((q) => q.id === hit.id)!;
+      clipMapAtDown = clipMap();
       drag = hit.edge ? { mode: 'trim-clip', id: c.id, edge: hit.edge, start: { ...c }, sx: x } : { mode: 'move-clip', id: c.id, sx: x, moved: false };
       if (!hit.edge) {
         const i = tl().clips.indexOf(c);
@@ -3165,6 +3225,8 @@ function setupTimeline() {
       }
       dropX = null;
     }
+    if ((drag.mode === 'move-clip' || drag.mode === 'trim-clip') && clipMapAtDown) followMainTrack(clipMapAtDown);
+    clipMapAtDown = null;
     const wasEdit = drag.mode !== 'scrub';
     drag = null;
     if (wasEdit) changed({ left: tab === 'captions' });
