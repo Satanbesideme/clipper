@@ -446,7 +446,8 @@ export async function enqueueExport(p: Project, opts: { outDir: string; encoder:
   renderOverlay?: (dir: string) => Promise<{ list: string; x: number; y: number; dir: string } | null> }) {
   const tl: Timeline = structuredClone(p.timeline);
   if (!timelineDuration(tl)) throw new Error('Timeline masih kosong. Tambahkan video, layer, teks, atau musik dulu.');
-  tl.texts = tl.texts.map((t) => ({ ...t, text: stripEmoji(t.text) })).filter((t) => t.text);
+  tl.texts = tl.texts.filter((t) => !t.hidden).map((t) => ({ ...t, text: stripEmoji(t.text) })).filter((t) => t.text);
+  if (tl.captions.hidden) tl.captions.lines = [];
   tl.captions.lines = tl.captions.lines.map((l) => ({ ...l, words: l.words.map((w) => ({ ...w, text: stripEmoji(w.text) })).filter((w) => w.text) })).filter((l) => l.words.length);
   await invoke('ensure_dir', { path: opts.outDir });
   const id = uid();

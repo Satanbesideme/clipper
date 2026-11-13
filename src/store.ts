@@ -1,4 +1,5 @@
 // Projects live as JSON files in the app data folder. Nothing leaves the PC.
+import type { TextStyle } from './render';
 import { invoke, join } from './tauri';
 import type { Encoder } from './ffmpeg';
 import { DEFAULT_CAPTION, timelineDuration, type Media, type Range, type Timeline, type Watermark } from './render';
@@ -21,7 +22,7 @@ export interface Project {
 export interface ProjectSummary { id: string; name: string; durationMs: number; clips: number; updatedAt: string; version?: number }
 
 export type ModelSize = 'base' | 'small';
-export interface Settings { outDir: string; encoder: Encoder | ''; model: ModelSize; watermark?: Watermark | null; fontScale?: Record<string, number>; quality?: number; sttTracks?: 'all' | number; sttCareful?: boolean; insertVolume?: number; leftW?: number; rightW?: number; leftHidden?: boolean; rightHidden?: boolean; exportPreset?: string; namePattern?: string }
+export interface Settings { outDir: string; encoder: Encoder | ''; model: ModelSize; watermark?: Watermark | null; fontScale?: Record<string, number>; quality?: number; sttTracks?: 'all' | number; sttCareful?: boolean; insertVolume?: number; leftW?: number; rightW?: number; leftHidden?: boolean; rightHidden?: boolean; exportPreset?: string; namePattern?: string; textPresets?: { name: string; style: TextStyle }[] }
 
 let dataDirCache = '';
 export async function dataDir(): Promise<string> {

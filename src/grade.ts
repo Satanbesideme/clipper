@@ -17,6 +17,126 @@ export interface Grade {
   lut?: string;        // absolute path of a .cube file
   lutAmount?: number;  // 0..1
   look?: string;       // name of the look it started from
+  // Photoshop-style adjustments, applied after the sliders above and before the LUT
+  levels?: Levels | null;
+  curves?: Curves | null;
+  hsl?: Hsl | null;
+  balance?: Balance | null;
+}
+export interface Levels { inB: number; inW: number; gamma: number; outB: number; outW: number }   // 0..1, gamma 0.1..10
+export type CurvePts = [number, number][];
+export interface Curves { m?: CurvePts; r?: CurvePts; g?: CurvePts; b?: CurvePts }
+export interface Hsl { hue: number; sat: number; light: number }   // degrees -180..180, -1..1, -1..1
+export type Rgb3 = [number, number, number];
+export interface Balance { sh: Rgb3; mid: Rgb3; hi: Rgb3 }   // per tone range: red, green, blue push, -1..1
+export const LEVELS0: Levels = { inB: 0, inW: 1, gamma: 1, outB: 0, outW: 1 };
+export const HSL0: Hsl = { hue: 0, sat: 0, light: 0 };
+export const BALANCE0: Balance = { sh: [0, 0, 0], mid: [0, 0, 0], hi: [0, 0, 0] };
+
+const curveOn = (p?: CurvePts) => !!p && p.length >= 2 && p.some(([x, y]) => Math.abs(x - y) > 0.004);
+/** True when levels/curves/hue-sat/colour balance change anything. */
+export function hasAdvanced(g: Partial<Grade>): boolean {
+  const l = g.levels, h = g.hsl, b = g.balance, c = g.curves;
+  return (!!l && (l.inB > 0.002 || l.inW < 0.998 || Math.abs(l.gamma - 1) > 0.005 || l.outB > 0.002 || l.outW < 0.998)) ||
+    (!!c && (curveOn(c.m) || curveOn(c.r) || curveOn(c.g) || curveOn(c.b))) ||
+    (!!h && (Math.abs(h.hue) > 0.5 || Math.abs(h.sat) > 0.005 || Math.abs(h.light) > 0.005)) ||
+    (!!b && [...b.sh, ...b.mid, ...b.hi].some((v) => Math.abs(v) > 0.005));
+}
+
+/** Smooth curve through the points (monotone cubic), as 256 values. */
+const curveCache = new Map<string, Float32Array>();
+export function curveTable(pts: CurvePts): Float32Array {
+  const key = JSON.stringify(pts);
+  const hit = curveCache.get(key);
+  if (hit) return hit;
+  const p = [...pts].sort((a, b) => a[0] - b[0]);
+  if (p[0][0] > 0) p.unshift([0, p[0][1]]);
+  if (p[p.length - 1][0] < 1) p.push([1, p[p.length - 1][1]]);
+  const n = p.length, d: number[] = [], m: number[] = new Array(n).fill(0);
+  for (let i = 0; i < n - 1; i++) d.push((p[i + 1][1] - p[i][1]) / Math.max(1e-6, p[i + 1][0] - p[i][0]));
+  m[0] = d[0]; m[n - 1] = d[n - 2];
+  for (let i = 1; i < n - 1; i++) m[i] = d[i - 1] * d[i] <= 0 ? 0 : (d[i - 1] + d[i]) / 2;
+  for (let i = 0; i < n - 1; i++) {
+    if (Math.abs(d[i]) < 1e-9) { m[i] = 0; m[i + 1] = 0; continue; }
+    const a = m[i] / d[i], b = m[i + 1] / d[i], s = a * a + b * b;
+    if (s > 9) { const t = 3 / Math.sqrt(s); m[i] = t * a * d[i]; m[i + 1] = t * b * d[i]; }
+  }
+  const out = new Float32Array(256);
+  let k = 0;
+  for (let i = 0; i < 256; i++) {
+    const x = i / 255;
+    while (k < n - 2 && x > p[k + 1][0]) k++;
+    const h = Math.max(1e-6, p[k + 1][0] - p[k][0]), t = Math.min(1, Math.max(0, (x - p[k][0]) / h));
+    const t2 = t * t, t3 = t2 * t;
+    out[i] = Math.min(1, Math.max(0, (2 * t3 - 3 * t2 + 1) * p[k][1] + (t3 - 2 * t2 + t) * h * m[k] + (-2 * t3 + 3 * t2) * p[k + 1][1] + (t3 - t2) * h * m[k + 1]));
+  }
+  curveCache.set(key, out);
+  if (curveCache.size > 64) curveCache.delete(curveCache.keys().next().value!);
+  return out;
+}
+const curveAt = (tab: Float32Array, v: number) => { const f = Math.min(1, Math.max(0, v)) * 255, i = Math.floor(f), j = Math.min(255, i + 1); return tab[i] + (tab[j] - tab[i]) * (f - i); };
+
+/** Levels, curves, colour balance and hue/saturation on one pixel (0..1). */
+export function advancedRgb(r: number, g: number, b: number, x: Partial<Grade>): [number, number, number] {
+  const L0 = x.levels;
+  if (L0) {
+    const lv = (v: number) => { const t = Math.min(1, Math.max(0, (v - L0.inB) / Math.max(1e-4, L0.inW - L0.inB))); return L0.outB + Math.pow(t, 1 / Math.max(0.05, L0.gamma)) * (L0.outW - L0.outB); };
+    r = lv(r); g = lv(g); b = lv(b);
+  }
+  const c = x.curves;
+  if (c) {
+    if (curveOn(c.m)) { const tb = curveTable(c.m!); r = curveAt(tb, r); g = curveAt(tb, g); b = curveAt(tb, b); }
+    if (curveOn(c.r)) r = curveAt(curveTable(c.r!), r);
+    if (curveOn(c.g)) g = curveAt(curveTable(c.g!), g);
+    if (curveOn(c.b)) b = curveAt(curveTable(c.b!), b);
+  }
+  const bal = x.balance;
+  if (bal) {
+    const L = Math.min(1, Math.max(0, 0.2126 * r + 0.7152 * g + 0.0722 * b));
+    const ws = Math.pow(1 - L, 2), wh = L * L, wm = Math.max(0, 1 - 4 * (L - 0.5) * (L - 0.5));
+    r += 0.25 * (ws * bal.sh[0] + wm * bal.mid[0] + wh * bal.hi[0]);
+    g += 0.25 * (ws * bal.sh[1] + wm * bal.mid[1] + wh * bal.hi[1]);
+    b += 0.25 * (ws * bal.sh[2] + wm * bal.mid[2] + wh * bal.hi[2]);
+    r = clamp01(r); g = clamp01(g); b = clamp01(b);
+  }
+  const hs = x.hsl;
+  if (hs && (hs.hue || hs.sat || hs.light)) {
+    const mx = Math.max(r, g, b), mn = Math.min(r, g, b);
+    let H = 0, S = 0;
+    const Lh = (mx + mn) / 2;
+    if (mx !== mn) {
+      const dd = mx - mn;
+      S = Lh > 0.5 ? dd / (2 - mx - mn) : dd / (mx + mn);
+      H = mx === r ? (g - b) / dd + (g < b ? 6 : 0) : mx === g ? (b - r) / dd + 2 : (r - g) / dd + 4;
+      H /= 6;
+    }
+    H = (((H + hs.hue / 360) % 1) + 1) % 1;
+    S = clamp01(S * (1 + hs.sat));
+    const L2 = clamp01(hs.light > 0 ? Lh + (1 - Lh) * hs.light : Lh * (1 + hs.light));
+    const q = L2 < 0.5 ? L2 * (1 + S) : L2 + S - L2 * S, pp = 2 * L2 - q;
+    const hue = (t: number) => { t = ((t % 1) + 1) % 1; return t < 1 / 6 ? pp + (q - pp) * 6 * t : t < 1 / 2 ? q : t < 2 / 3 ? pp + (q - pp) * (2 / 3 - t) * 6 : pp; };
+    if (S === 0) { r = g = b = L2; } else { r = hue(H + 1 / 3); g = hue(H); b = hue(H - 1 / 3); }
+  }
+  return [clamp01(r), clamp01(g), clamp01(b)];
+}
+
+/** Levels/curves/hue-sat/balance alone as a cube, for the preview shader. Cached per setting. */
+const advCache = new Map<string, Cube>();
+export function advancedCube(x: Partial<Grade>, size = 33): Cube {
+  const key = JSON.stringify([x.levels, x.curves, x.hsl, x.balance]);
+  const hit = advCache.get(key);
+  if (hit) return hit;
+  const data = new Float32Array(size * size * size * 3);
+  const n = size - 1;
+  let o = 0;
+  for (let bi = 0; bi < size; bi++) for (let gi = 0; gi < size; gi++) for (let ri = 0; ri < size; ri++) {
+    const [r, g, b] = advancedRgb(ri / n, gi / n, bi / n, x);
+    data[o++] = r; data[o++] = g; data[o++] = b;
+  }
+  const cube = { size, data };
+  advCache.set(key, cube);
+  if (advCache.size > 16) advCache.delete(advCache.keys().next().value!);
+  return cube;
 }
 
 export const NEUTRAL: Grade = { exposure: 0, contrast: 0, highlights: 0, shadows: 0, fade: 0, temperature: 0, tint: 0, saturation: 0, vibrance: 0, sharpen: 0, vignette: 0 };
@@ -44,7 +164,7 @@ export function isNeutral(g?: Partial<Grade> | null): boolean {
 export function hasColour(g: Grade): boolean {
   return Math.abs(g.exposure) > 0.005 || Math.abs(g.contrast) > 0.005 || Math.abs(g.highlights) > 0.005 || Math.abs(g.shadows) > 0.005 ||
     g.fade > 0.005 || Math.abs(g.temperature) > 0.005 || Math.abs(g.tint) > 0.005 || Math.abs(g.saturation) > 0.005 ||
-    Math.abs(g.vibrance) > 0.005 || (!!g.lut && (g.lutAmount ?? 1) > 0.005);
+    Math.abs(g.vibrance) > 0.005 || (!!g.lut && (g.lutAmount ?? 1) > 0.005) || hasAdvanced(g);
 }
 
 // ---------- the colour maths (keep in step with the shader below) ----------
@@ -76,6 +196,7 @@ export function gradeRgb(r: number, g: number, b: number, x: Grade): [number, nu
   // fade: lift the blacks
   const f = 0.14 * x.fade;
   r = f + r * (1 - f); g = f + g * (1 - f); b = f + b * (1 - f);
+  if (hasAdvanced(x)) return advancedRgb(clamp01(r), clamp01(g), clamp01(b), x);
   return [clamp01(r), clamp01(g), clamp01(b)];
 }
 
@@ -209,6 +330,7 @@ const FS = `#version 300 es
 precision highp float; precision highp sampler3D;
 in vec2 uv; out vec4 o;
 uniform sampler2D src; uniform sampler3D lut; uniform float lutAmt; uniform float lutN;
+uniform sampler3D adv; uniform float advOn; uniform float advN;
 uniform vec2 texel; uniform float sharpen;
 uniform float exposure, contrast, highlights, shadows, fade, temperature, tint, saturation, vibrance;
 vec3 grade(vec3 c) {
@@ -237,6 +359,7 @@ void main() {
     c = clamp(c + (c - n * 0.25) * sharpen * 1.6, 0.0, 1.0);
   }
   c = grade(c);
+  if (advOn > 0.5) c = texture(adv, c * ((advN - 1.0) / advN) + 0.5 / advN).rgb;
   if (lutAmt > 0.0) {
     vec3 q = c * ((lutN - 1.0) / lutN) + 0.5 / lutN;
     c = mix(c, texture(lut, q).rgb, lutAmt);
@@ -251,6 +374,7 @@ let srcTex: WebGLTexture | null = null;
 let failed = false;
 const lutTex = new Map<string, { tex: WebGLTexture; size: number }>();
 let emptyLut: WebGLTexture | null = null;
+const advTex = new Map<Cube, WebGLTexture>();
 const uni = new Map<string, WebGLUniformLocation | null>();
 
 function setup(): boolean {
@@ -277,8 +401,8 @@ function setup(): boolean {
     gl.bindTexture(gl.TEXTURE_2D, srcTex);
     for (const [k, v] of [[gl.TEXTURE_MIN_FILTER, gl.LINEAR], [gl.TEXTURE_MAG_FILTER, gl.LINEAR], [gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE], [gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE]]) gl.texParameteri(gl.TEXTURE_2D, k, v);
     emptyLut = makeLut({ size: 2, data: new Float32Array([0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 1, 0, 0, 0, 1, 1, 0, 1, 0, 1, 1, 1, 1, 1]) });
-    for (const n of ['src', 'lut', 'lutAmt', 'lutN', 'texel', 'sharpen', 'exposure', 'contrast', 'highlights', 'shadows', 'fade', 'temperature', 'tint', 'saturation', 'vibrance']) uni.set(n, gl.getUniformLocation(prog, n));
-    gl.uniform1i(uni.get('src')!, 0); gl.uniform1i(uni.get('lut')!, 1);
+    for (const n of ['adv', 'advOn', 'advN', 'src', 'lut', 'lutAmt', 'lutN', 'texel', 'sharpen', 'exposure', 'contrast', 'highlights', 'shadows', 'fade', 'temperature', 'tint', 'saturation', 'vibrance']) uni.set(n, gl.getUniformLocation(prog, n));
+    gl.uniform1i(uni.get('src')!, 0); gl.uniform1i(uni.get('lut')!, 1); gl.uniform1i(uni.get('adv')!, 2);
     return true;
   } catch {
     failed = true; gl = null;
@@ -286,10 +410,10 @@ function setup(): boolean {
   }
 }
 
-function makeLut(cube: Cube): WebGLTexture {
+function makeLut(cube: Cube, unit = 1): WebGLTexture {
   const g = gl!;
   const tex = g.createTexture()!;
-  g.activeTexture(g.TEXTURE1);
+  g.activeTexture(unit === 2 ? g.TEXTURE2 : g.TEXTURE1);
   g.bindTexture(g.TEXTURE_3D, tex);
   const n = cube.size;
   const bytes = new Uint8Array(n * n * n * 3);
@@ -327,6 +451,15 @@ export function gradeImage(src: TexImageSource, w: number, h: number, x: Grade):
   g.activeTexture(g.TEXTURE1);
   g.bindTexture(g.TEXTURE_3D, lt?.tex ?? emptyLut);
   g.activeTexture(g.TEXTURE0);
+  const adv = hasAdvanced(x);
+  if (adv) {
+    const cube = advancedCube(x);
+    let at = advTex.get(cube);
+    if (!at) { at = makeLut(cube, 2); advTex.set(cube, at); if (advTex.size > 8) { const [k0, t0] = advTex.entries().next().value!; g.deleteTexture(t0); advTex.delete(k0); } }
+    g.activeTexture(g.TEXTURE2); g.bindTexture(g.TEXTURE_3D, at); g.activeTexture(g.TEXTURE0);
+  } else { g.activeTexture(g.TEXTURE2); g.bindTexture(g.TEXTURE_3D, emptyLut); g.activeTexture(g.TEXTURE0); }
+  g.uniform1f(uni.get('advOn')!, adv ? 1 : 0);
+  g.uniform1f(uni.get('advN')!, 33);
   g.uniform1f(uni.get('lutAmt')!, lt ? clamp01(x.lutAmount ?? 1) : 0);
   g.uniform1f(uni.get('lutN')!, lt?.size ?? 2);
   g.uniform2f(uni.get('texel')!, 1 / w, 1 / h);

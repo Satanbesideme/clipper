@@ -81,6 +81,13 @@ export interface TextStyle {
   outline: number;    // px
   bold: boolean;
   box: boolean;       // dark box behind text
+  // typography studio (drawn by the app's canvas renderer; the plain .ass fallback ignores them)
+  spacing?: number;      // letter spacing in px at 1080
+  lineHeight?: number;   // multiple of the size, default 1.18
+  outlineColor?: string; // default black
+  shadow?: { color: string; blur: number; x: number; y: number } | null;
+  gradient?: { from: string; to: string } | null;   // vertical, replaces the fill colour
+  italic?: boolean;
 }
 
 export interface TextItem {
@@ -92,6 +99,10 @@ export interface TextItem {
   y: number;        // 0..1
   style: TextStyle;
   anim?: TextAnim;
+  hidden?: boolean;
+  locked?: boolean;
+  group?: string;
+  rot?: number;     // degrees, clockwise
 }
 
 export type TextAnim = 'none' | 'pop' | 'fade' | 'rise' | 'type' | 'shake';
@@ -182,6 +193,8 @@ export interface Captions {
   anim?: CapAnim;
   caps?: boolean;      // show every word in capitals
   preset?: string;     // name of the template last applied
+  hidden?: boolean;
+  locked?: boolean;
 }
 
 /** Caption animation: how each line enters (pop/fade/rise/shake), or word by word (word/bounce). */
@@ -223,6 +236,10 @@ export interface ImageItem {
   transIn?: Trans;
   transOut?: Trans;
   grade?: Grade;   // colour only (LUT), no sharpness/vignette
+  hidden?: boolean;
+  locked?: boolean;
+  group?: string;
+  tf?: Tf;
 }
 
 /** Channel logo shown for the whole video. */
@@ -255,6 +272,8 @@ export function transState(im: Pick<ImageItem, 'transIn' | 'transOut' | 'startMs
 }
 const easeOutBack = (x: number) => 1 + 2.70158 * Math.pow(x - 1, 3) + 1.70158 * Math.pow(x - 1, 2);
 
+export interface LayerGroup { id: string; name: string; collapsed?: boolean }
+
 export interface Timeline {
   width: number;   // canvas size: 1080x1920 for shorts, also 16:9, 1:1, 4:5 up to 4K
   height: number;
@@ -270,6 +289,7 @@ export interface Timeline {
   hideMain?: boolean;      // show only the layers (black behind them)
   background?: string;     // blank canvas: colour behind everything (#rrggbb); also fills 'fit' bars
   markers?: Marker[];      // named points on the timeline (M); also YouTube chapters
+  groups?: LayerGroup[];   // layer panel groups
   range?: { inMs: number; outMs: number } | null;  // In/Out points (I / O)
 }
 
@@ -317,7 +337,7 @@ export interface VideoLayer {
   id: string;
   blend?: Blend;
   name: string;
-  source: 'main' | 'media';
+  source: 'main' | 'media' | 'adjust';   // adjust: an adjustment layer, grades everything below it
   mediaId?: string;   // media layers
   inMs: number;       // media layers: where in the file it starts
   startMs: number;    // timeline time
@@ -330,6 +350,23 @@ export interface VideoLayer {
   fadeInMs?: number;  // media layers: audio fade
   fadeOutMs?: number;
   grade?: Grade;
+  locked?: boolean;
+  group?: string;
+  tf?: Tf;
+}
+
+/**
+ * Advanced transform of a layer or picture. rot: degrees clockwise; flip: mirror; anchor: the point (0..1 of the
+ * box) it turns around; pins: corner offsets for distort/perspective, as shares of the box (tl, tr, br, bl).
+ */
+export interface Tf { rot?: number; flipH?: boolean; flipV?: boolean; anchor?: [number, number]; pins?: [number, number][] | null }
+export const tfActive = (tf?: Tf) => !!tf && (!!tf.rot || !!tf.flipH || !!tf.flipV || !!tf.pins?.some(([a, b]) => a || b));
+/** Centre of a box after turning it around its anchor (all in pixels). */
+export function anchoredCentre(cx: number, cy: number, w: number, h: number, tf?: Tf): [number, number] {
+  if (!tf?.rot || !tf.anchor) return [cx, cy];
+  const ax = cx + (tf.anchor[0] - 0.5) * w, ay = cy + (tf.anchor[1] - 0.5) * h;
+  const a = (tf.rot * Math.PI) / 180, dx = cx - ax, dy = cy - ay;
+  return [ax + dx * Math.cos(a) - dy * Math.sin(a), ay + dx * Math.sin(a) + dy * Math.cos(a)];
 }
 
 /**
@@ -638,6 +675,27 @@ export function atempoChain(speed: number): string[] {
   return out;
 }
 
+/** ffmpeg filters for flip, distort (corner pins) and rotation of a w x h picture with alpha. */
+export function tfFilters(tf: Tf | undefined, w: number, h: number): string[] {
+  if (!tfActive(tf)) return [];
+  const out: string[] = [];
+  if (tf!.flipH) out.push('hflip');
+  if (tf!.flipV) out.push('vflip');
+  const pins = tf!.pins;
+  if (pins?.some(([a, b]) => a || b)) {
+    const m = Math.ceil((Math.max(...pins.flat().map(Math.abs)) * Math.max(w, h)) / 2) * 2 + 2;
+    const pt = (i: number, bx: number, by: number) => [Math.round(m + bx * w + pins[i][0] * w), Math.round(m + by * h + pins[i][1] * h)];
+    const [x0, y0] = pt(0, 0, 0), [x1, y1] = pt(1, 1, 0), [x3, y3] = pt(2, 1, 1), [x2, y2] = pt(3, 0, 1);
+    out.push(`pad=${w + 2 * m}:${h + 2 * m}:${m}:${m}:color=black@0`, 'format=yuva444p',
+      `perspective=x0=${x0}:y0=${y0}:x1=${x1}:y1=${y1}:x2=${x2}:y2=${y2}:x3=${x3}:y3=${y3}:sense=destination:interpolation=linear`, 'format=rgba');
+  }
+  if (tf!.rot) {
+    const r = Number(((tf!.rot * Math.PI) / 180).toFixed(6));
+    out.push(`rotate=${r}:ow='rotw(${r})':oh='roth(${r})':c=none`);
+  }
+  return out;
+}
+
 /**
  * Blends a picture (with alpha) over `base`: the picture is first laid on a full canvas of the mode's neutral
  * colour (white for multiply, black for screen, ...), so outside the picture and where it is transparent the
@@ -731,7 +789,7 @@ export function renderArgs(spec: RenderSpec): string[] {
 
   // video layers: crop, scale and place; `main` layers crop the main track's picture itself
   const layerAudio: string[] = [];
-  const layers = (tl.layers ?? []).filter((l) => !l.hidden && l.endMs > l.startMs && l.startMs < total && (l.source === 'main' || (l.mediaId && spec.media[l.mediaId])));
+  const layers = (tl.layers ?? []).filter((l) => !l.hidden && l.endMs > l.startMs && l.startMs < total && (l.source === 'main' || l.source === 'adjust' || (l.mediaId && spec.media[l.mediaId])));
   const linked = layers.filter((l) => l.source === 'main');
   if (linked.length || tl.hideMain) {
     const need = linked.length + (tl.hideMain ? 0 : 1);
@@ -748,13 +806,26 @@ export function renderArgs(spec: RenderSpec): string[] {
   layers.forEach((l, k) => {
     const a = Math.max(0, l.startMs), b = Math.min(total, l.endMs);
     const st = (a / 1000).toFixed(3), en = (b / 1000).toFixed(3);
+    if (l.source === 'adjust') {
+      // adjustment layer: grade everything composed so far, for its time, at its opacity
+      const chain = [lutFilter(spec, l.id, l.grade), ...(isNeutral(l.grade) ? [] : spatialFilters(gradeOf(l.grade)))].filter(Boolean);
+      if (!chain.length) return;
+      f.push(`[${v}]split[aj${k}a][aj${k}b]`);
+      f.push(`[aj${k}b]${chain.join(',')},format=rgba${l.opacity < 0.999 ? `,colorchannelmixer=aa=${num(l.opacity)}` : ''}[aj${k}g]`);
+      if (l.blend && l.blend !== 'normal') v = blendOnto(f, `aj${k}a`, `aj${k}g`, '0', '0', st, en, l.blend, `lv${k}`, W, H, F, total);
+      else { f.push(`[aj${k}a][aj${k}g]overlay=x=0:y=0:enable='between(t,${st},${en})':format=auto[lv${k}]`); v = `lv${k}`; }
+      return;
+    }
     const bw = even(l.box.w * W), bh = even(l.box.h * H);
     const x = Math.round(l.box.x * W - bw / 2), y = Math.round(l.box.y * H - bh / 2);
     const fw = num(1 - l.crop.l - l.crop.r), fh = num(1 - l.crop.t - l.crop.b);
     const crop = `crop=w=trunc(iw*${fw}/2)*2:h=trunc(ih*${fh}/2)*2:x=trunc(iw*${num(l.crop.l)}):y=trunc(ih*${num(l.crop.t)})`;
     const llut = lutFilter(spec, l.id, l.grade);
     const lsp = isNeutral(l.grade) ? [] : spatialFilters(gradeOf(l.grade));
-    const look = `${crop}${llut ? `,${llut}` : ''},scale=${bw}:${bh}:flags=lanczos,setsar=1${lsp.length ? `,${lsp.join(',')}` : ''},format=rgba${l.opacity < 0.999 ? `,colorchannelmixer=aa=${num(l.opacity)}` : ''}`;
+    const ltf = tfFilters(l.tf, bw, bh);
+    const look = `${crop}${llut ? `,${llut}` : ''},scale=${bw}:${bh}:flags=lanczos,setsar=1${lsp.length ? `,${lsp.join(',')}` : ''},format=rgba${l.opacity < 0.999 ? `,colorchannelmixer=aa=${num(l.opacity)}` : ''}${ltf.length ? `,${ltf.join(',')}` : ''}`;
+    const [lcx, lcy] = anchoredCentre(l.box.x * W, l.box.y * H, bw, bh, l.tf);
+    const lx = ltf.length ? `'${Math.round(lcx)}-overlay_w/2'` : `${x}`, lyy = ltf.length ? `'${Math.round(lcy)}-overlay_h/2'` : `${y}`;
     let src: string;
     if (l.source === 'main') {
       src = `[mc${copy++}]`;
@@ -772,9 +843,9 @@ export function renderArgs(spec: RenderSpec): string[] {
       }
       input++;
     }
-    if (l.blend && l.blend !== 'normal') v = blendOnto(f, v, `ly${k}`, `${x}`, `${y}`, st, en, l.blend, `lv${k}`, W, H, F, total);
+    if (l.blend && l.blend !== 'normal') v = blendOnto(f, v, `ly${k}`, lx, lyy, st, en, l.blend, `lv${k}`, W, H, F, total);
     else {
-      f.push(`[${v}][ly${k}]overlay=x=${x}:y=${y}:enable='between(t,${st},${en})':eof_action=pass:format=auto[lv${k}]`);
+      f.push(`[${v}][ly${k}]overlay=x=${lx}:y=${lyy}:enable='between(t,${st},${en})':eof_action=pass:format=auto[lv${k}]`);
       v = `lv${k}`;
     }
   });
@@ -782,12 +853,13 @@ export function renderArgs(spec: RenderSpec): string[] {
   // meme pictures over the video, each only while it is on the timeline
   (tl.images ?? []).forEach((im, k) => {
     const a = Math.max(0, im.startMs), b = Math.min(total, im.endMs);
-    if (b <= a) return;
+    if (b <= a || im.hidden) return;
     const dur = ((b - a) / 1000).toFixed(3);
     if (im.animated) args.push('-ignore_loop', '0', '-t', dur, '-i', im.file);
     else args.push('-loop', '1', '-t', dur, '-framerate', String(F), '-i', im.file);
     const w = Math.max(2, Math.round((W * im.scale) / 2) * 2);
-    const cx = Math.round(im.x * W), cy = Math.round(im.y * H);
+    const [icx, icy] = anchoredCentre(im.x * W, im.y * H, w, w / im.aspect, im.tf);
+    const cx = Math.round(icx), cy = Math.round(icy);
     const st = (a / 1000).toFixed(3), en = (b / 1000).toFixed(3);
     const D = (b - a) / 1000;
     const ti = Math.min(TRANS_IN_MS / 1000, D / 2), to = Math.min(TRANS_OUT_MS / 1000, D / 2);
@@ -795,6 +867,7 @@ export function renderArgs(spec: RenderSpec): string[] {
     const chain = [`scale=${w}:-2:flags=lanczos`, 'format=rgba'];
     const ilut = spec.gradeLuts?.[im.id];
     if (ilut && im.grade && hasColour(gradeOf(im.grade))) chain.push(`lut3d=file='${filterPath(ilut)}':interp=tetrahedral`, 'format=rgba');
+    chain.push(...tfFilters(im.tf, w, Math.max(2, Math.round(w / im.aspect / 2) * 2)));
     // fades run first, on the fixed-size picture: newer ffmpeg stops when a frame changes size
     // before a filter that is not set up for it (the pop below changes the size every frame)
     if (tin === 'fade') chain.push(`fade=t=in:st=0:d=${ti}:alpha=1`);

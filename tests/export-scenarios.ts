@@ -129,6 +129,15 @@ scenarios.push(['blending: layer multiply + meme screen', (tl) => {
 scenarios.push(['blending: overlay/add/difference', (tl) => {
   tl.images = [{ ...meme('a', `${dir}/meme.png`, 0, 1500, 'none', 'none'), blend: 'overlay' }, { ...meme('b', `${dir}/anim.gif`, 1000, 3000, 'fade', 'pop', true), blend: 'add' }, { ...meme('c', `${dir}/meme.png`, 2000, 5000, 'slide', 'none'), blend: 'difference' }];
 }]);
+scenarios.push(['adjustment layer (curves, levels, hue, balance)', (tl) => {
+  tl.layers = [{ id: 'adj', name: 'Adj', source: 'adjust', inMs: 0, startMs: 1000, endMs: 5000, crop: { l: 0, t: 0, r: 0, b: 0 }, box: { x: 0.5, y: 0.5, w: 1, h: 1 }, opacity: 0.8, volume: 0,
+    grade: gradeOf({ contrast: 0.2, vignette: 0.3, levels: { inB: 0.05, inW: 0.9, gamma: 1.2, outB: 0, outW: 1 }, curves: { m: [[0, 0], [0.5, 0.62], [1, 1]] }, hsl: { hue: 30, sat: 0.2, light: 0 }, balance: { sh: [0, 0, 0.3], mid: [0.1, 0, 0], hi: [0, 0, 0] } }) }];
+}]);
+scenarios.push(['transform: rotasi, flip, anchor, distort', (tl) => {
+  tl.layers = [{ id: 'o', name: 'O', source: 'media', mediaId: 'm', inMs: 2000, startMs: 1000, endMs: 4000, crop: { l: 0, t: 0, r: 0, b: 0.5 }, box: { x: 0.5, y: 0.5, w: 0.6, h: 0.3 }, opacity: 1, volume: 0,
+    tf: { rot: 20, flipH: true, anchor: [0, 0], pins: [[0.1, 0], [0, 0.05], [-0.1, 0], [0, -0.05]] } }];
+  tl.images = [{ ...meme('i', `${dir}/meme.png`, 500, 2500, 'pop', 'fade'), tf: { rot: -30, flipV: true } }, { ...meme('g', `${dir}/anim.gif`, 1000, 3000, 'none', 'none', true), tf: { pins: [[0.2, 0.1], [0, 0], [0, 0], [0, 0]] }, blend: 'screen' }];
+}]);
 // extra export options a scenario can set (In/Out range, captions drawn by the app as PNG frames)
 let extra: Partial<RenderSpec> = {};
 let expectSec = 0;

@@ -1,5 +1,5 @@
 import { icon, drawIcon, type IconName } from './icons';
-import { gradeImage, drawVignette, isNeutral, gradeOf, registerLut, lutReady, LOOKS, NEUTRAL, hasColour, parseLut, cssFilterOf, LUT_EXT, type Grade } from './grade';
+import { gradeImage, drawVignette, isNeutral, gradeOf, registerLut, lutReady, LOOKS, NEUTRAL, hasColour, parseLut, cssFilterOf, LUT_EXT, type Grade, hasAdvanced, curveTable, LEVELS0, HSL0, BALANCE0, type Levels } from './grade';
 import './styles.css';
 import { dialog, fileSrc, invoke, isTauri, onDrop, extName, join, baseName, dirName } from './tauri';
 import { qualityBitrate } from './ffmpeg';
@@ -8,7 +8,7 @@ import {
   DEFAULT_CAPTION, DEFAULT_TEXT, clipDuration, clipStarts, locate, splitAt, timelineDuration,
   type CaptionLine, type ImageItem, type Watermark, type SoundItem, type TextItem, type TextStyle, type Trans, type VideoClip, type Word,
   transState, TRANS_IN_MS, textAnimState, unitOf, wordPulse, fadesOf, fadeGain, MUSIC_FADE_IN, MUSIC_FADE_OUT, wordScale, wordColor, lineAnimOf, SHOUT_COLOR, type WordFx, type TextAnim, type CapAnim, clipFx, removePauses, remapItems, invertRanges, DUCK_LEVEL,
-  type ClipTrans, type Duck, type MusicItem, type Range, type VideoLayer, type Crop, NO_CROP, cropSize, type Marker, youtubeChapters, type Blend, BLENDS,
+  type ClipTrans, type Duck, type MusicItem, type Range, type VideoLayer, type Crop, NO_CROP, cropSize, type Marker, youtubeChapters, type Blend, BLENDS, type LayerGroup, type Tf, tfActive, anchoredCentre,
 } from './render';
 import {
   IMAGE_EXT, SOUND_EXT, VIDEO_MEME_EXT, addVideoMeme, categoriesOf, deleteMeme, deletePad, deleteVideoMeme, importFiles as importLibFiles, loadLibrary, move, saveLibrary, soundOf,
@@ -998,13 +998,17 @@ const TEXT_PRESETS: { name: string; style: Partial<TextStyle> }[] = [
   { name: 'Kotak gelap', style: { color: '#ffffff', box: true, font: 'Segoe UI', bold: true } },
   { name: 'Kuning', style: { color: '#ffd400', outline: 6, box: false, font: 'Bahnschrift', bold: true } },
   { name: 'Impact', style: { color: '#ffffff', outline: 7, box: false, font: 'Impact', bold: false, size: 96 } },
+  { name: 'Api', style: { color: '#ffffff', outline: 5, outlineColor: '#3a0a00', box: false, font: 'Impact', bold: false, size: 104, gradient: { from: '#ffe259', to: '#ff5f00' }, shadow: { color: '#ff3c00aa', blur: 24, x: 0, y: 0 } } },
+  { name: 'Neon', style: { color: '#7df9ff', outline: 0, box: false, font: 'Bahnschrift', bold: true, size: 90, spacing: 4, shadow: { color: '#00e5ffee', blur: 28, x: 0, y: 0 } } },
+  { name: 'Elegan', style: { color: '#ffffff', outline: 0, box: false, font: 'Georgia', bold: false, italic: true, size: 80, spacing: 2, shadow: { color: '#000000aa', blur: 16, x: 0, y: 4 } } },
+  { name: 'Komik', style: { color: '#ffd400', outline: 8, outlineColor: '#1a1a1a', box: false, font: 'Comic Sans MS', bold: true, size: 96, shadow: { color: '#000000ff', blur: 0, x: 6, y: 6 } } },
 ];
 
 function textPanel(): Node[] {
   return [
     h('p', { class: 'muted small hint-p' }, 'Teks muncul di posisi playhead selama 3 detik. Geser di preview untuk memindahkan.'),
     h('div', { class: 'preset-grid' },
-      ...TEXT_PRESETS.map((pr) => {
+      ...[...TEXT_PRESETS, ...(settings.textPresets ?? [])].map((pr) => {
         const st = { ...DEFAULT_TEXT, ...pr.style };
         return h('button', {
           class: 'preset', style: `font-family:"${st.font}";font-weight:${st.bold ? 700 : 400};color:${st.color};${st.box ? 'background:rgba(0,0,0,.6);' : `-webkit-text-stroke:1px #000;`}`,
@@ -1299,8 +1303,43 @@ function styleControls(st: TextStyle, set: (p: Partial<TextStyle>) => void, show
       h('button', { class: !st.box ? 'on' : '', onclick: () => set({ box: false }) }, 'Garis tepi'),
       h('button', { class: st.box ? 'on' : '', onclick: () => set({ box: true }) }, 'Kotak gelap'),
     ),
-    h('label', { class: 'check' }, h('input', { type: 'checkbox', checked: st.bold, onchange: (e) => set({ bold: (e.target as HTMLInputElement).checked }) }), 'Tebal'),
+    h('div', { class: 'row2' },
+      h('label', { class: 'check' }, h('input', { type: 'checkbox', checked: st.bold, onchange: (e) => set({ bold: (e.target as HTMLInputElement).checked }) }), 'Tebal'),
+      h('label', { class: 'check' }, h('input', { type: 'checkbox', checked: !!st.italic, onchange: (e) => set({ italic: (e.target as HTMLInputElement).checked || undefined }) }), 'Miring'),
+    ),
+    typographyBlock(st, set),
   ];
+}
+
+/** Typography studio: spacing, line height, stroke colour, shadow, gradient. */
+const typoOpen = { v: false };
+function typographyBlock(st: TextStyle, set: (p: Partial<TextStyle>) => void): HTMLElement {
+  const num = (label: string, v: number, min: number, max: number, step: number, fmt: (x: number) => string, on: (x: number) => void) =>
+    field(`${label} ${fmt(v)}`, h('input', { type: 'range', min, max, step, value: v, oninput: (e) => { const x = Number((e.target as HTMLInputElement).value); ((e.target as HTMLElement).previousElementSibling as HTMLElement).textContent = `${label} ${fmt(x)}`; }, onchange: (e) => on(Number((e.target as HTMLInputElement).value)) }));
+  const sh = st.shadow, gr = st.gradient;
+  const d = h('details', { class: 'adv typo', ontoggle: (e: Event) => { typoOpen.v = (e.target as HTMLDetailsElement).open; } },
+    h('summary', {}, h('span', { class: 'label' }, 'Typography studio')),
+    num('Spasi huruf', st.spacing ?? 0, -6, 40, 0.5, (x) => `${x}`, (x) => set({ spacing: x || undefined })),
+    num('Tinggi baris', st.lineHeight ?? 1.18, 0.8, 2.2, 0.02, (x) => x.toFixed(2), (x) => set({ lineHeight: Math.abs(x - 1.18) < 0.005 ? undefined : x })),
+    h('div', { class: 'row2' },
+      field('Tebal garis tepi', h('input', { type: 'number', min: 0, max: 30, value: st.outline, onchange: (e) => set({ outline: Math.max(0, Number((e.target as HTMLInputElement).value) || 0) }) })),
+      field('Warna garis tepi', h('input', { type: 'color', value: st.outlineColor ?? '#000000', onchange: (e) => set({ outlineColor: (e.target as HTMLInputElement).value }) })),
+    ),
+    h('label', { class: 'check' }, h('input', { type: 'checkbox', checked: !!sh, onchange: (e) => set({ shadow: (e.target as HTMLInputElement).checked ? { color: '#000000cc', blur: 12, x: 0, y: 6 } : null }) }), 'Bayangan'),
+    sh ? h('div', { class: 'row2' },
+      field('Warna', h('input', { type: 'color', value: sh.color.slice(0, 7), onchange: (e) => set({ shadow: { ...sh, color: `${(e.target as HTMLInputElement).value}cc` } }) })),
+      field(`Blur ${sh.blur}`, h('input', { type: 'range', min: 0, max: 60, value: sh.blur, onchange: (e) => set({ shadow: { ...sh, blur: Number((e.target as HTMLInputElement).value) } }) })),
+      field(`Geser X ${sh.x}`, h('input', { type: 'range', min: -30, max: 30, value: sh.x, onchange: (e) => set({ shadow: { ...sh, x: Number((e.target as HTMLInputElement).value) } }) })),
+      field(`Geser Y ${sh.y}`, h('input', { type: 'range', min: -30, max: 30, value: sh.y, onchange: (e) => set({ shadow: { ...sh, y: Number((e.target as HTMLInputElement).value) } }) })),
+    ) : '',
+    h('label', { class: 'check' }, h('input', { type: 'checkbox', checked: !!gr, onchange: (e) => set({ gradient: (e.target as HTMLInputElement).checked ? { from: '#ffe259', to: '#ff7a00' } : null }) }), 'Teks gradasi'),
+    gr ? h('div', { class: 'row2' },
+      field('Atas', h('input', { type: 'color', value: gr.from, onchange: (e) => set({ gradient: { ...gr, from: (e.target as HTMLInputElement).value } }) })),
+      field('Bawah', h('input', { type: 'color', value: gr.to, onchange: (e) => set({ gradient: { ...gr, to: (e.target as HTMLInputElement).value } }) })),
+    ) : '',
+  ) as HTMLDetailsElement;
+  d.open = typoOpen.v;
+  return d;
 }
 
 function renderInspector() {
@@ -1494,7 +1533,15 @@ function renderInspectorInner() {
           onclick: () => { snapshot(); text.anim = a; changed(); seek(text.startMs); if (a !== 'none') { play(); setTimeout(() => pause(), 1100); } },
         }, ANIM_NAME[a]))),
       ),
-      h('div', { class: 'block' }, ...styleControls(text.style, set, false)),
+      h('div', { class: 'block' }, ...styleControls(text.style, set, false),
+        h('button', { class: 'ghost small', onclick: () => {
+          void askText(window.innerWidth / 2 - 140, 160, 'Nama preset teks', `Preset ${(settings.textPresets?.length ?? 0) + 1}`).then((n) => {
+            if (!n) return;
+            (settings.textPresets ??= []).push({ name: n.trim(), style: structuredClone(text.style) });
+            void saveSettings(settings);
+            toast(`Preset "${n.trim()}" disimpan. Ada di tab Teks.`);
+          });
+        } }, '+ Simpan gaya ini sebagai preset')),
       h('div', { class: 'block' },
         h('div', { class: 'muted small mono' }, `${tc(text.startMs, true)} → ${tc(text.endMs, true)}`),
         h('div', { class: 'muted small' }, 'Atur durasi dengan menarik ujung kotak teks di timeline.'),
@@ -1754,6 +1801,7 @@ function selectionMenu(e: MouseEvent, atMs: number) {
       ...paste, 'sep',
       { label: 'Pilih semua item', icon: 'select', keys: 'Ctrl+A', run: () => { multi.clear(); for (const r of itemRects()) multi.add(mkey(r.kind, r.id)); sel = null; renderInspector(); drawTimeline(); } },
       { label: 'Layer dari seluruh video utama', icon: 'layers', run: () => { snapshot(); const ly = addMainLayer(); if (ly) { sel = { kind: 'layer', id: ly.id }; changed({ left: true }); switchTab('transform'); } } },
+      { label: 'Adjustment layer baru', icon: 'color', run: () => void addAdjustmentLayer() },
       { label: 'Ukuran kanvas…', icon: 'fit', keys: 'Ctrl+Alt+C', run: toggleCanvasPop },
     ]);
     return;
@@ -2171,7 +2219,7 @@ function renderFrameInner() {
   drawLayers(ctx, W, H);
   const k = (W / tl().width) * unitOf(tl());
   for (const im of images()) {
-    if (t < im.startMs || t >= im.endMs) continue;
+    if (t < im.startMs || t >= im.endMs || im.hidden) continue;
     const el = imageEl(im.file);
     const w = im.scale * W, hh = w / im.aspect;
     const x = im.x * W - w / 2, y = im.y * H - hh / 2;
@@ -2180,7 +2228,7 @@ function renderFrameInner() {
       const aw = w * an.scale, ah = hh * an.scale;
       ctx.globalAlpha = an.alpha;
       ctx.globalCompositeOperation = blendCss(im.blend);
-      drawGraded(ctx, el, im.grade, el.naturalWidth, el.naturalHeight, null, im.x * W - aw / 2, im.y * H - ah / 2 + an.dy * H, aw, ah);
+      drawTf(ctx, im.tf, im.x * W, im.y * H + an.dy * H, aw, ah, (c, x, y, w, hh) => drawGraded(c, el, im.grade, el.naturalWidth, el.naturalHeight, null, x, y, w, hh));
       ctx.globalCompositeOperation = 'source-over';
       ctx.globalAlpha = 1;
     }
@@ -2202,19 +2250,20 @@ function renderFrameInner() {
   }
   drawOverlays(ctx, overlayPlan(t, W, H, k), k, true);
   drawSafeGuide(ctx, W, H);
+  drawDistortHandles(ctx);
 }
 
 type AnimSt = ReturnType<typeof textAnimState>;
 /** What the captions and text look like at one moment: plain data, so the export can tell when a frame changes. */
 type OverlayPlan = {
   cap?: { id: string; lines: Seg[][]; cx: number; cy: number; dy: number; style: TextStyle; an: AnimSt };
-  texts: { id: string; full: Seg[][]; shown: Seg[][] | null; cx: number; cy: number; dy: number; style: TextStyle; an: AnimSt }[];
+  texts: { id: string; full: Seg[][]; shown: Seg[][] | null; cx: number; cy: number; dy: number; style: TextStyle; an: AnimSt; rot?: number }[];
 };
 
 function overlayPlan(tt: number, W: number, H: number, k: number): OverlayPlan {
   const plan: OverlayPlan = { texts: [] };
   const cap = tl().captions;
-  const line = cap.lines.find((l) => tt >= l.startMs && tt < l.endMs);
+  const line = cap.hidden ? undefined : cap.lines.find((l) => tt >= l.startMs && tt < l.endMs);
   if (line) {
     const anim: CapAnim = lineAnimOf(line, cap);
     let active = -1;
@@ -2233,7 +2282,7 @@ function overlayPlan(tt: number, W: number, H: number, k: number): OverlayPlan {
   measureCtx ??= document.createElement('canvas').getContext('2d');
   const mctx = measureCtx!;
   for (const x of tl().texts) {
-    if (tt < x.startMs || tt >= x.endMs || !x.text.trim()) continue;
+    if (tt < x.startMs || tt >= x.endMs || !x.text.trim() || x.hidden) continue;
     const full = x.text.split('\n').flatMap((l) => wrapSegs(mctx, l.split(/\s+/).filter(Boolean).map((w) => ({ text: w, color: x.style.color })), x.style, k, W - 120 * k));
     const total = [...x.text].filter((c) => c !== '\n').length;
     const an = textAnimState(x.anim, tt - x.startMs, x.endMs - x.startMs, total);
@@ -2247,7 +2296,7 @@ function overlayPlan(tt: number, W: number, H: number, k: number): OverlayPlan {
         return { ...seg, text: seg.text.slice(0, take) };
       }));
     }
-    plan.texts.push({ id: x.id, full, shown, cx: x.x * W, cy: x.y * H, dy: an.dy * k, style: x.style, an });
+    plan.texts.push({ id: x.id, full, shown, cx: x.x * W, cy: x.y * H, dy: an.dy * k, style: x.style, an, rot: x.rot });
   }
   return plan;
 }
@@ -2279,6 +2328,7 @@ function drawOverlays(ctx: CanvasRenderingContext2D, plan: OverlayPlan, k: numbe
       ctx.globalAlpha = x.an.alpha;
       const cx = x.cx, cy = x.cy + x.dy;
       ctx.translate(cx, cy);
+      if (x.rot) ctx.rotate((x.rot * Math.PI) / 180);
       if (x.an.rot) ctx.rotate((-x.an.rot * Math.PI) / 180);
       ctx.scale(x.an.scale, x.an.scale);
       ctx.translate(-cx, -cy);
@@ -2305,19 +2355,21 @@ function drawOverlays(ctx: CanvasRenderingContext2D, plan: OverlayPlan, k: numbe
 /** Rough area a plan can paint (scaled words, outline, box and animation included), for cropping export frames. */
 function planBounds(ctx: CanvasRenderingContext2D, plan: OverlayPlan, k: number): { x0: number; y0: number; x1: number; y1: number } | null {
   let r: { x0: number; y0: number; x1: number; y1: number } | null = null;
-  const add = (lines: Seg[][], cx: number, cy: number, dy: number, st: TextStyle, an: AnimSt) => {
+  const add = (lines: Seg[][], cx: number, cy: number, dy: number, st: TextStyle, an: AnimSt, rot = 0) => {
     const b = drawText(ctx, lines, cx, cy, st, k);
     const segMax = Math.max(1, ...lines.flat().map((s) => s.scale ?? 1));
     const sc = Math.max(1, an.scale) * segMax * (an.rot ? 1.25 : 1);
     const pad = (st.outline * 2 + (st.box ? 24 : 0) + 12) * k;
-    const hw = (b.w / 2) * sc + pad, hh = (b.h / 2) * sc * 1.25 + pad;
+    const sp = (st.spacing ?? 0) * k * 30 + (st.shadow ? (st.shadow.blur + Math.max(Math.abs(st.shadow.x), Math.abs(st.shadow.y))) * k * 2 : 0);
+    let hw = (b.w / 2) * sc + pad + sp, hh = (b.h / 2) * sc * 1.25 * Math.max(1, (st.lineHeight ?? 1.18) / 1.18) + pad + sp;
+    if (rot) { const d = Math.hypot(hw, hh); hw = d; hh = d; }
     const bx = b.x + b.w / 2, by = b.y + b.h / 2 + dy;
     const q = { x0: bx - hw, y0: by - hh, x1: bx + hw, y1: by + hh };
     r = r ? { x0: Math.min(r.x0, q.x0), y0: Math.min(r.y0, q.y0), x1: Math.max(r.x1, q.x1), y1: Math.max(r.y1, q.y1) } : q;
   };
   ctx.save(); ctx.globalAlpha = 0;
   if (plan.cap) add(plan.cap.lines, plan.cap.cx, plan.cap.cy, plan.cap.dy, plan.cap.style, plan.cap.an);
-  for (const x of plan.texts) add(x.full, x.cx, x.cy, x.dy, x.style, x.an);
+  for (const x of plan.texts) add(x.full, x.cx, x.cy, x.dy, x.style, x.an, x.rot);
   ctx.restore();
   return r;
 }
@@ -2428,7 +2480,29 @@ function drawSafeGuide(ctx: CanvasRenderingContext2D, W: number, H: number) {
 }
 
 type Seg = { text: string; color: string; scale?: number; hidden?: boolean };
-const fontOf = (st: TextStyle, k: number) => `${st.bold ? 700 : 400} ${st.size * k}px "${st.font}", "Segoe UI", sans-serif`;
+const fontOf = (st: TextStyle, k: number) => `${st.italic ? 'italic ' : ''}${st.bold ? 700 : 400} ${st.size * k}px "${st.font}", "Segoe UI", sans-serif`;
+/** Font and letter spacing of a style, at scale k. */
+function setFont(ctx: CanvasRenderingContext2D, st: TextStyle, k: number) {
+  ctx.font = fontOf(st, k);
+  (ctx as CanvasRenderingContext2D & { letterSpacing: string }).letterSpacing = `${(st.spacing ?? 0) * k}px`;
+}
+const lineH = (st: TextStyle, k: number) => st.size * k * (st.lineHeight ?? 1.18);
+/** One word with outline, shadow and solid or gradient fill. */
+function paintSeg(ctx: CanvasRenderingContext2D, text: string, x: number, y: number, st: TextStyle, k: number, color: string, lh: number) {
+  const sh = st.shadow;
+  const withShadow = (fn: () => void) => {
+    if (!sh) { fn(); return; }
+    ctx.save(); ctx.shadowColor = sh.color; ctx.shadowBlur = sh.blur * k; ctx.shadowOffsetX = sh.x * k; ctx.shadowOffsetY = sh.y * k; fn(); ctx.restore();
+  };
+  const outline = !st.box && st.outline > 0;
+  if (outline) withShadow(() => { ctx.lineJoin = 'round'; ctx.lineWidth = st.outline * 2 * k; ctx.strokeStyle = st.outlineColor ?? '#000'; ctx.strokeText(text, x, y); });
+  if (st.gradient && color === st.color) {
+    const gr = ctx.createLinearGradient(0, y - lh * 0.42, 0, y + lh * 0.42);
+    gr.addColorStop(0, st.gradient.from); gr.addColorStop(1, st.gradient.to);
+    ctx.fillStyle = gr;
+  } else ctx.fillStyle = color;
+  if (outline) ctx.fillText(text, x, y); else withShadow(() => ctx.fillText(text, x, y));
+}
 
 /**
  * Rows of a caption line, measured once with the real font at canvas size and normal word size, so the
@@ -2441,7 +2515,7 @@ function captionBreaks(line: CaptionLine): number[] {
   measureCtx ??= document.createElement('canvas').getContext('2d');
   const ctx = measureCtx!;
   const u = unitOf(tl());
-  ctx.font = fontOf(cap.style, u);
+  setFont(ctx, cap.style, u);
   const space = ctx.measureText(' ').width;
   const anim = lineAnimOf(line, cap);
   const widths = line.words.map((wd) => ctx.measureText(capWordText(wd, cap.caps)).width);
@@ -2466,7 +2540,7 @@ function rowsByBreaks<T>(items: T[], breaks: number[]): T[][] {
 }
 
 function wrapSegs(ctx: CanvasRenderingContext2D, segs: Seg[], st: TextStyle, k: number, maxW: number): Seg[][] {
-  ctx.font = fontOf(st, k);
+  setFont(ctx, st, k);
   const space = ctx.measureText(' ').width;
   const lines: Seg[][] = [];
   let cur: Seg[] = [], w = 0;
@@ -2482,11 +2556,11 @@ function wrapSegs(ctx: CanvasRenderingContext2D, segs: Seg[], st: TextStyle, k: 
 
 /** Draws `shown` (a prefix of `full`) at the positions `full` would have, so typing does not shift the text. */
 function drawTextFixed(ctx: CanvasRenderingContext2D, full: Seg[][], shown: Seg[][], cx: number, cy: number, st: TextStyle, k: number) {
-  ctx.font = fontOf(st, k);
+  setFont(ctx, st, k);
   ctx.textBaseline = 'middle';
   ctx.textAlign = 'left';
   const space = ctx.measureText(' ').width;
-  const lh = st.size * k * 1.18;
+  const lh = lineH(st, k);
   const widths = full.map((l) => l.reduce((s, x, i) => s + ctx.measureText(x.text).width + (i ? space : 0), 0));
   const top = cy - (lh * full.length) / 2;
   full.forEach((l, li) => {
@@ -2496,9 +2570,7 @@ function drawTextFixed(ctx: CanvasRenderingContext2D, full: Seg[][], shown: Seg[
       const part = shown[li]?.[si]?.text ?? '';
       if (part) {
         if (st.box) { ctx.fillStyle = 'rgba(0,0,0,.62)'; ctx.fillRect(x - 4 * k, y - lh / 2, ctx.measureText(part).width + 8 * k, lh); }
-        if (!st.box && st.outline > 0) { ctx.lineJoin = 'round'; ctx.lineWidth = st.outline * 2 * k; ctx.strokeStyle = '#000'; ctx.strokeText(part, x, y); }
-        ctx.fillStyle = seg.color;
-        ctx.fillText(part, x, y);
+        paintSeg(ctx, part, x, y, st, k, seg.color, lh);
       }
       x += ctx.measureText(seg.text).width + space;
     });
@@ -2506,11 +2578,11 @@ function drawTextFixed(ctx: CanvasRenderingContext2D, full: Seg[][], shown: Seg[
 }
 
 function drawText(ctx: CanvasRenderingContext2D, lines: Seg[][], cx: number, cy: number, st: TextStyle, k: number) {
-  ctx.font = fontOf(st, k);
+  setFont(ctx, st, k);
   ctx.textBaseline = 'middle';
   ctx.textAlign = 'left';
   const space = ctx.measureText(' ').width;
-  const lh = st.size * k * 1.18;
+  const lh = lineH(st, k);
   // a scaled word (bounce) takes its scaled width, so the words beside it make room, as in the export
   const segW = (x: Seg) => ctx.measureText(x.text).width * (x.hidden ? 1 : (x.scale ?? 1));
   const widths = lines.map((l) => l.reduce((s, x, i) => s + segW(x) + (i ? space : 0), 0));
@@ -2530,14 +2602,7 @@ function drawText(ctx: CanvasRenderingContext2D, lines: Seg[][], cx: number, cy:
       if (!s.hidden) {
         const sc = s.scale ?? 1;
         if (sc !== 1) { ctx.save(); ctx.translate(x, y); ctx.scale(sc, sc); ctx.translate(-x, -y); }
-        if (!st.box && st.outline > 0) {
-          ctx.lineJoin = 'round';
-          ctx.lineWidth = st.outline * 2 * k;
-          ctx.strokeStyle = '#000';
-          ctx.strokeText(s.text, x, y);
-        }
-        ctx.fillStyle = s.color;
-        ctx.fillText(s.text, x, y);
+        paintSeg(ctx, s.text, x, y, st, k, s.color, lh);
         if (sc !== 1) ctx.restore();
       }
       x += sw + space;
@@ -2555,9 +2620,12 @@ function setupPreviewDrag() {
     const r = preview.getBoundingClientRect();
     return { x: ((e.clientX - r.left) / r.width) * preview.width, y: ((e.clientY - r.top) / r.height) * preview.height };
   };
+  let distortDrag: ((q: { x: number; y: number }) => void) | null = null;
   preview.addEventListener('pointerdown', (e) => {
     if (e.button === 2) return;
     const p = toCanvas(e);
+    distortDrag = distortPointerDown(p);
+    if (distortDrag) { preview.setPointerCapture(e.pointerId); return; }
     if (layerPointerDown(p, e)) { preview.setPointerCapture(e.pointerId); return; }
     const hit = [...boxes].reverse().find((b) => b.kind !== 'layer' && p.x >= b.x - 10 && p.x <= b.x + b.w + 10 && p.y >= b.y - 10 && p.y <= b.y + b.h + 10)
       ?? [...boxes].reverse().find((b) => b.kind === 'layer' && p.x >= b.x && p.x <= b.x + b.w && p.y >= b.y && p.y <= b.y + b.h);
@@ -2582,6 +2650,12 @@ function setupPreviewDrag() {
       if (sel?.kind === 'text' || sel?.kind === 'image') { sel = null; renderInspector(); renderFrame(); drawTimeline(); }
       return;
     }
+    if (isLocked(hit.kind === 'captions' ? 'line' : hit.kind, hit.id)) {
+      sel = { kind: hit.kind === 'captions' ? 'line' : hit.kind as SelKind, id: hit.id };
+      renderInspector(); drawTimeline(); renderFrame();
+      lockedToast();
+      return;
+    }
     snapshot();
     if (hit.kind === 'text') {
       const x = tl().texts.find((q) => q.id === hit.id)!;
@@ -2600,6 +2674,7 @@ function setupPreviewDrag() {
     preview.setPointerCapture(e.pointerId);
   });
   preview.addEventListener('pointermove', (e) => {
+    if (distortDrag) { distortDrag(toCanvas(e)); return; }
     const p = toCanvas(e);
     if (layerPointerMove(p, e)) return;
     if (pan) {
@@ -2625,7 +2700,7 @@ function setupPreviewDrag() {
     }
     renderFrame();
   });
-  const end = () => { if (layerPointerUp()) return; if (drag || pan) { void saveProject(P!); drag = null; pan = null; } };
+  const end = () => { if (distortDrag) { distortDrag = null; changed(); return; } if (layerPointerUp()) return; if (drag || pan) { void saveProject(P!); drag = null; pan = null; } };
   preview.addEventListener('pointerup', end);
   preview.addEventListener('pointercancel', end);
   preview.addEventListener('wheel', (e) => {
@@ -3009,7 +3084,7 @@ function drawTimelineInner() {
     if (!ln) continue;
     const xx = msToX(ly.startMs), w = ((Math.min(ly.endMs, timelineDuration(tl())) - ly.startMs) / 1000) * pxPerSec;
     if (xx + w < 0 || xx > W) continue;
-    capsule(ctx, 'layer', xx, ln.y, w, ln.h, isSelected('layer', ly.id), `${ly.name}${ly.source === 'main' ? ' · video utama' : ''}${ly.hidden ? ' · disembunyikan' : ''}`, !!ly.hidden);
+    capsule(ctx, 'layer', xx, ln.y, w, ln.h, isSelected('layer', ly.id), `${ly.source === 'adjust' ? '◐ ' : ''}${ly.name}${ly.source === 'main' ? ' · video utama' : ly.source === 'adjust' ? ' · adjustment' : ''}${ly.hidden ? ' · disembunyikan' : ''}`, !!ly.hidden);
     if (ly.source === 'media' && ly.volume > 0.001) drawFades(ctx, 'layer', ly.id, xx, ln.y, w, ln.h, isSelected('layer', ly.id) && !multi.size);
   }
 
@@ -3272,6 +3347,7 @@ function setupTimeline() {
     }
     multi.clear();
     sel = { kind: hit.kind, id: hit.id };
+    if (!hit.marker && isLocked(hit.kind, hit.id)) { renderInspector(); drawTimeline(); renderFrame(); lockedToast(); drag = null; return; }
     snapshot();
     if (hit.marker) {
       const c = tl().clips.find((q) => q.id === hit.id)!;
@@ -4434,6 +4510,7 @@ function syncLayers() {
   }
 }
 
+let adjCopy: HTMLCanvasElement | null = null;
 /** Draws the layers over the main picture (which is copied first so `main` layers can crop from it). */
 function drawLayers(ctx: CanvasRenderingContext2D, W: number, H: number) {
   const active = layers().filter((l) => !l.hidden && t >= l.startMs && t < l.endMs);
@@ -4445,6 +4522,21 @@ function drawLayers(ctx: CanvasRenderingContext2D, W: number, H: number) {
   }
   if (tl().hideMain) { ctx.fillStyle = tl().background ?? '#000'; ctx.fillRect(0, 0, W, H); }
   for (const ly of active) {
+    if (ly.source === 'adjust') {
+      // adjustment layer: grade what has been drawn so far
+      if (isNeutral(ly.grade)) continue;
+      adjCopy ??= document.createElement('canvas');
+      if (adjCopy.width !== W || adjCopy.height !== H) { adjCopy.width = W; adjCopy.height = H; }
+      const ac = adjCopy.getContext('2d')!;
+      ac.clearRect(0, 0, W, H); ac.drawImage(preview, 0, 0);
+      ctx.globalAlpha = ly.opacity;
+      ctx.globalCompositeOperation = blendCss(ly.blend);
+      drawGraded(ctx, adjCopy, ly.grade, W, H, null, 0, 0, W, H);
+      drawVignette(ctx, 0, 0, W, H, vignetteOf(ly.grade));
+      ctx.globalCompositeOperation = 'source-over';
+      ctx.globalAlpha = 1;
+      continue;
+    }
     let src: CanvasImageSource | null = null, sw = 0, sh = 0;
     if (ly.source === 'main') { src = mainCopy; sw = W; sh = H; }
     else { const v = layerVideo(ly); if (v && v.readyState >= 2 && v.videoWidth) { src = v; sw = v.videoWidth; sh = v.videoHeight; } }
@@ -4452,7 +4544,9 @@ function drawLayers(ctx: CanvasRenderingContext2D, W: number, H: number) {
     if (src) {
       ctx.globalAlpha = ly.opacity;
       ctx.globalCompositeOperation = blendCss(ly.blend);
-      drawGraded(ctx, src, ly.grade, sw, sh, [ly.crop.l * sw, ly.crop.t * sh, sw * (1 - ly.crop.l - ly.crop.r), sh * (1 - ly.crop.t - ly.crop.b)], bx, by, bw, bh);
+      const crop: [number, number, number, number] = [ly.crop.l * sw, ly.crop.t * sh, sw * (1 - ly.crop.l - ly.crop.r), sh * (1 - ly.crop.t - ly.crop.b)];
+      const s0 = src;
+      drawTf(ctx, ly.tf, bx + bw / 2, by + bh / 2, bw, bh, (c, x, y, w, hh) => drawGraded(c, s0, ly.grade, sw, sh, crop, x, y, w, hh));
       drawVignette(ctx, bx, by, bw, bh, vignetteOf(ly.grade));
       ctx.globalCompositeOperation = 'source-over';
       ctx.globalAlpha = 1;
@@ -4462,7 +4556,7 @@ function drawLayers(ctx: CanvasRenderingContext2D, W: number, H: number) {
     boxes.push({ kind: 'layer', id: ly.id, x: bx, y: by, w: bw, h: bh });
   }
   const s = selected('layer');
-  if (s && !s.hidden && t >= s.startMs && t < s.endMs) drawTransformFrame(ctx, s, W, H);
+  if (s && !s.hidden && s.source !== 'adjust' && t >= s.startMs && t < s.endMs) drawTransformFrame(ctx, s, W, H);
 }
 
 const HANDLE = 7;
@@ -4535,7 +4629,7 @@ function hitHandle(ly: VideoLayer, p: { x: number; y: number }): Handle | null {
 
 function layerPointerDown(p: { x: number; y: number }, e: PointerEvent): boolean {
   const ly = selected('layer');
-  if (!ly || ly.hidden || t < ly.startMs || t >= ly.endMs) return false;
+  if (!ly || ly.hidden || ly.locked || ly.source === 'adjust' || t < ly.startMs || t >= ly.endMs) return false;
   const hd = hitHandle(ly, p);
   if (!hd) return false;
   snapshot();
@@ -4656,6 +4750,7 @@ function transformBody(): Node[] {
     const ratio = () => { const cs = cropSize(ly.crop, src.w, src.h); return (cs.h / cs.w) * (tl().width / tl().height); };
     return [
       tfHeader('Layer video', ly.name),
+      ...(ly.source === 'adjust' ? [] : [tfAdvancedBlock(ly)]),
       h('div', { class: 'block' },
         h('div', { class: 'label' }, 'Posisi cepat'),
         h('div', { class: 'quick-grid' },
@@ -4711,6 +4806,7 @@ function transformBody(): Node[] {
   if (im) {
     return [
       tfHeader('Meme', im.name),
+      tfAdvancedBlock(im),
       h('div', { class: 'block' },
         h('div', { class: 'label' }, 'Posisi cepat'),
         h('div', { class: 'quick-grid' },
@@ -4728,6 +4824,10 @@ function transformBody(): Node[] {
   if (tx) {
     return [
       tfHeader('Teks', tx.text.split('\n')[0]),
+      h('div', { class: 'block' },
+        h('div', { class: 'label' }, 'Rotasi'),
+        tfSlider('Putar', tx.rot ?? 0, -180, 180, 1, (v) => `${Math.round(v)}°`, (v) => { tx.rot = Math.round(v) || undefined; }),
+      ),
       h('div', { class: 'block' },
         h('div', { class: 'quick-grid' },
           h('button', { class: 'chip', onclick: () => set(() => { tx.x = 0.5; tx.y = 0.18; }) }, 'Atas'),
@@ -4803,7 +4903,7 @@ function lookThumb(look: Partial<Grade>, w: number, h: number): HTMLCanvasElemen
 function h_canvas(w: number, hgt: number) { const c = document.createElement('canvas'); c.width = w; c.height = hgt; return c; }
 
 function colorPanel(): Node[] {
-  if (!P || !tl().clips.length) return [h('div', { class: 'empty-drop' }, h('div', { class: 'empty-title' }, 'Belum ada video'), h('div', { class: 'muted small' }, 'Tambahkan video dulu, lalu atur warnanya di sini.'))];
+  if (!P || (!tl().clips.length && !selected('layer') && !selected('image'))) return [h('div', { class: 'empty-drop' }, h('div', { class: 'empty-title' }, 'Belum ada video'), h('div', { class: 'muted small' }, 'Tambahkan video dulu, lalu atur warnanya di sini.'))];
   if (lutLib === null) void loadLutLib();
   const T = gradeTargets();
   const first = gradeOf(T.items[0]?.grade);
@@ -4843,6 +4943,7 @@ function colorPanel(): Node[] {
       sl('Sharpness', 'sharpen', 0, 100, (v) => `${Math.round(v)}`),
       sl('Vignette', 'vignette', 0, 100, (v) => `${Math.round(v)}`),
     ),
+    ...advancedColorBlocks(T.items, first),
     h('div', { class: 'block' },
       h('div', { class: 'row-between' }, h('div', { class: 'label' }, 'LUT'), lutName ? h('span', { class: 'muted small' }, lutName) : h('span')),
       first.lut ? tfSlider('Kekuatan', (first.lutAmount ?? 1) * 100, 0, 100, 1, (v) => `${Math.round(v)}%`, live((g, v) => { g.lutAmount = v / 100; })) : h('span'),
@@ -4870,6 +4971,105 @@ function colorPanel(): Node[] {
       },
     }, 'Terapkan ke semua potongan video') : h('span'),
   ];
+}
+
+
+// ---------- Photoshop adjustments: Levels, Curves, Hue/Saturation, Color Balance ----------
+const advOpen = new Set<string>();
+let curveCh: 'm' | 'r' | 'g' | 'b' = 'm';
+let balanceTone: 'sh' | 'mid' | 'hi' = 'mid';
+function advSection(id: string, title: string, on: boolean, reset: () => void, ...body: Node[]): HTMLElement {
+  const d = h('details', { class: 'block adv', ontoggle: (e: Event) => { if ((e.target as HTMLDetailsElement).open) advOpen.add(id); else advOpen.delete(id); } },
+    h('summary', {}, h('span', { class: 'label' }, title), on ? h('span', { class: 'adv-dot', title: 'Aktif' }) : '', h('span', { class: 'spacer' }),
+      on ? h('button', { class: 'ghost small', onclick: (e: Event) => { e.preventDefault(); snapshot(); reset(); changed(); } }, 'Reset') : ''),
+    ...body) as HTMLDetailsElement;
+  d.open = advOpen.has(id);
+  return d;
+}
+function advancedColorBlocks(items: Gradable[], first: Grade): Node[] {
+  const lv = first.levels ?? LEVELS0, hs = first.hsl ?? HSL0, bal = first.balance ?? BALANCE0;
+  const signed = (v: number) => `${v > 0 ? '+' : ''}${Math.round(v)}`;
+  const levelsOn = !!first.levels && hasAdvanced({ levels: first.levels });
+  const hslOn = !!first.hsl && hasAdvanced({ hsl: first.hsl });
+  const balOn = !!first.balance && hasAdvanced({ balance: first.balance });
+  const curvesOn = !!first.curves && hasAdvanced({ curves: first.curves });
+  const lvl = (k: keyof Levels, v: number) => (g: Grade) => { g.levels = { ...(g.levels ?? LEVELS0), [k]: v }; };
+  const tone = bal[balanceTone];
+  const balSlider = (label: string, i: 0 | 1 | 2) => tfSlider(label, tone[i] * 100, -100, 100, 1, signed, (v) => editGrade(items, (g) => {
+    const b = structuredClone(g.balance ?? BALANCE0); b[balanceTone][i] = v / 100; g.balance = b; g.look = undefined;
+  }));
+  return [
+    advSection('levels', 'Levels', levelsOn, () => editGrade(items, (g) => { g.levels = null; }),
+      tfSlider('Input hitam', lv.inB * 255, 0, 250, 1, (v) => `${Math.round(v)}`, (v) => editGrade(items, lvl('inB', v / 255))),
+      tfSlider('Input putih', lv.inW * 255, 5, 255, 1, (v) => `${Math.round(v)}`, (v) => editGrade(items, lvl('inW', v / 255))),
+      tfSlider('Gamma', lv.gamma, 0.2, 3, 0.01, (v) => v.toFixed(2), (v) => editGrade(items, lvl('gamma', v))),
+      tfSlider('Output hitam', lv.outB * 255, 0, 250, 1, (v) => `${Math.round(v)}`, (v) => editGrade(items, lvl('outB', v / 255))),
+      tfSlider('Output putih', lv.outW * 255, 5, 255, 1, (v) => `${Math.round(v)}`, (v) => editGrade(items, lvl('outW', v / 255))),
+    ),
+    advSection('curves', 'Curves', curvesOn, () => editGrade(items, (g) => { g.curves = null; }),
+      h('div', { class: 'seg' }, ...(['m', 'r', 'g', 'b'] as const).map((c) => h('button', { class: curveCh === c ? 'on' : '', onclick: () => { curveCh = c; renderLeft(); } }, c === 'm' ? 'RGB' : c.toUpperCase()))),
+      curveEditor(items, first),
+      h('div', { class: 'muted small' }, 'Klik untuk menambah titik, geser untuk mengubah, klik dua kali titik untuk menghapus.'),
+    ),
+    advSection('hsl', 'Hue / Saturation', hslOn, () => editGrade(items, (g) => { g.hsl = null; }),
+      tfSlider('Hue', hs.hue, -180, 180, 1, (v) => `${Math.round(v)}°`, (v) => editGrade(items, (g) => { g.hsl = { ...(g.hsl ?? HSL0), hue: v }; g.look = undefined; })),
+      tfSlider('Saturation', hs.sat * 100, -100, 100, 1, signed, (v) => editGrade(items, (g) => { g.hsl = { ...(g.hsl ?? HSL0), sat: v / 100 }; g.look = undefined; })),
+      tfSlider('Lightness', hs.light * 100, -100, 100, 1, signed, (v) => editGrade(items, (g) => { g.hsl = { ...(g.hsl ?? HSL0), light: v / 100 }; g.look = undefined; })),
+    ),
+    advSection('balance', 'Color Balance', balOn, () => editGrade(items, (g) => { g.balance = null; }),
+      h('div', { class: 'seg' }, ...([['sh', 'Shadow'], ['mid', 'Midtone'], ['hi', 'Highlight']] as const).map(([k, n]) => h('button', { class: balanceTone === k ? 'on' : '', onclick: () => { balanceTone = k; renderLeft(); } }, n))),
+      balSlider('Cyan ↔ Red', 0), balSlider('Magenta ↔ Green', 1), balSlider('Yellow ↔ Blue', 2),
+    ),
+  ];
+}
+
+function curveEditor(items: Gradable[], first: Grade): HTMLElement {
+  const S = 236, D = window.devicePixelRatio || 1;
+  const cv = h('canvas', { class: 'curve-cv', width: S * D, height: S * D, style: `width:${S}px;height:${S}px`, 'aria-label': 'Editor curves' }) as HTMLCanvasElement;
+  let pts: [number, number][] = (first.curves?.[curveCh] ?? [[0, 0], [1, 1]]).map(([a, b]) => [a, b]);
+  const col = { m: '#e7edf1', r: '#ff6b6b', g: '#5fd08f', b: '#5aa9ff' }[curveCh];
+  const draw = () => {
+    const c = cv.getContext('2d')!;
+    c.setTransform(D, 0, 0, D, 0, 0);
+    c.clearRect(0, 0, S, S);
+    c.fillStyle = '#0c1217'; c.fillRect(0, 0, S, S);
+    c.strokeStyle = 'rgba(255,255,255,.07)'; c.lineWidth = 1;
+    for (let i = 1; i < 4; i++) { c.beginPath(); c.moveTo((S * i) / 4, 0); c.lineTo((S * i) / 4, S); c.moveTo(0, (S * i) / 4); c.lineTo(S, (S * i) / 4); c.stroke(); }
+    c.strokeStyle = 'rgba(255,255,255,.15)'; c.beginPath(); c.moveTo(0, S); c.lineTo(S, 0); c.stroke();
+    const tab = curveTable(pts);
+    c.strokeStyle = col; c.lineWidth = 2; c.beginPath();
+    for (let i = 0; i < 256; i++) { const x = (i / 255) * S, y = S - tab[i] * S; if (i) c.lineTo(x, y); else c.moveTo(x, y); }
+    c.stroke();
+    for (const [x, y] of pts) { c.fillStyle = '#0c1217'; c.strokeStyle = col; c.lineWidth = 2; c.beginPath(); c.arc(x * S, S - y * S, 4.5, 0, Math.PI * 2); c.fill(); c.stroke(); }
+  };
+  const apply = () => { const p = pts.map(([a, b]) => [a, b] as [number, number]); editGrade(items, (g) => { g.curves = { ...(g.curves ?? {}), [curveCh]: p }; g.look = undefined; }); renderFrame(); draw(); };
+  const at = (e: PointerEvent | MouseEvent) => { const r = cv.getBoundingClientRect(); return [clamp((e.clientX - r.left) / r.width, 0, 1), clamp(1 - (e.clientY - r.top) / r.height, 0, 1)] as [number, number]; };
+  const near = (p: [number, number]) => pts.findIndex(([x, y]) => Math.hypot((x - p[0]) * S, (y - p[1]) * S) < 9);
+  let drag = -1;
+  cv.addEventListener('pointerdown', (e) => {
+    const p = at(e);
+    snapshot();
+    drag = near(p);
+    if (drag < 0) { pts.push([p[0], curveTable(pts)[Math.round(p[0] * 255)]]); pts.sort((a, b) => a[0] - b[0]); drag = near([p[0], curveTable(pts)[Math.round(p[0] * 255)]]); if (drag < 0) drag = pts.findIndex(([x]) => x === p[0]); }
+    cv.setPointerCapture(e.pointerId);
+    apply();
+  });
+  cv.addEventListener('pointermove', (e) => {
+    if (drag < 0) return;
+    const [x, y] = at(e);
+    const lo = drag > 0 ? pts[drag - 1][0] + 0.01 : 0, hi = drag < pts.length - 1 ? pts[drag + 1][0] - 0.01 : 1;
+    pts[drag] = [drag === 0 && pts[0][0] === 0 ? 0 : drag === pts.length - 1 && pts[drag][0] === 1 ? 1 : clamp(x, lo, hi), y];
+    apply();
+  });
+  const up = () => { if (drag >= 0) { drag = -1; changed(); } };
+  cv.addEventListener('pointerup', up);
+  cv.addEventListener('pointercancel', up);
+  cv.addEventListener('dblclick', (e) => {
+    const i = near(at(e));
+    if (i > 0 && i < pts.length - 1) { snapshot(); pts.splice(i, 1); apply(); changed(); }
+  });
+  draw();
+  return cv;
 }
 
 /** Trims a crop around its centre to an aspect ratio (w/h of the result in pixels). */
@@ -4954,44 +5154,175 @@ function cropBody(): Node[] {
   return tfEmpty('video atau layer');
 }
 
+type LRow = { kind: 'text' | 'image' | 'layer' | 'captions' | 'main'; id: string };
+type LObj = { hidden?: boolean; locked?: boolean; group?: string; name?: string };
+function rowObj(r: LRow): LObj | null {
+  if (r.kind === 'text') return tl().texts.find((x) => x.id === r.id) ?? null;
+  if (r.kind === 'image') return images().find((x) => x.id === r.id) ?? null;
+  if (r.kind === 'layer') return layers().find((x) => x.id === r.id) ?? null;
+  if (r.kind === 'captions') return tl().captions as LObj;
+  return null;
+}
+const rowSel = (r: LRow): SelKind | null => (r.kind === 'captions' || r.kind === 'main' ? null : r.kind);
+function isLocked(kind: SelKind, id: string): boolean {
+  if (kind === 'line') return !!tl().captions.locked;
+  if (kind === 'text' || kind === 'image' || kind === 'layer') return !!rowObj({ kind, id })?.locked || groupOf(rowObj({ kind, id })?.group)?.locked === true;
+  return false;
+}
+let lockedToastAt = 0;
+function lockedToast() { if (Date.now() - lockedToastAt > 2500) { lockedToastAt = Date.now(); toast('Terkunci 🔒. Buka kunci di panel Layer.'); } }
+type GroupX = LayerGroup & { locked?: boolean; hidden?: boolean };
+const groupsOf = () => (tl().groups ??= []) as GroupX[];
+const groupOf = (id?: string) => (id ? groupsOf().find((g) => g.id === id) : undefined);
+function rowName(r: LRow): string {
+  if (r.kind === 'text') { const x = tl().texts.find((q) => q.id === r.id)!; return (x as LObj).name || x.text.split('\n')[0] || 'Teks'; }
+  if (r.kind === 'image') return images().find((q) => q.id === r.id)?.name ?? 'Gambar';
+  if (r.kind === 'layer') return layers().find((q) => q.id === r.id)?.name ?? 'Layer';
+  if (r.kind === 'captions') return `Subtitle (${tl().captions.lines.length} baris)`;
+  return 'Video utama';
+}
+function rowIcon(r: LRow): IconName {
+  if (r.kind === 'layer') return layers().find((q) => q.id === r.id)?.source === 'adjust' ? 'color' : 'layers';
+  return ({ text: 'text', image: 'image', captions: 'captions', main: 'video' } as const)[r.kind];
+}
+function selectRow(r: LRow, e?: MouseEvent) {
+  const k = rowSel(r);
+  if (!k) { if (r.kind === 'captions' && tl().captions.lines.length) { const l = tl().captions.lines.find((x) => x.endMs > t) ?? tl().captions.lines[0]; sel = { kind: 'line', id: l.id }; multi.clear(); renderInspector(); renderLeft(); drawTimeline(); renderFrame(); } return; }
+  if (e && (e.ctrlKey || e.metaKey || e.shiftKey)) {
+    if (sel && !multi.size) multi.add(mkey(sel.kind, sel.id));
+    const key = mkey(k, r.id);
+    if (multi.has(key)) multi.delete(key); else multi.add(key);
+    sel = null;
+  } else {
+    multi.clear();
+    sel = { kind: k, id: r.id };
+    const sp = span(k, r.id);
+    if (sp && (t < sp.a || t >= sp.b)) seek(sp.a);
+  }
+  renderInspector(); renderLeft(); drawTimeline(); renderFrame();
+}
+function pickedRows(): LRow[] {
+  const keys = multi.size ? [...multi] : sel ? [mkey(sel.kind, sel.id)] : [];
+  return keys.map((k) => { const [kind, id] = k.split(':'); return { kind, id } as LRow; }).filter((r) => r.kind === 'text' || r.kind === 'image' || r.kind === 'layer');
+}
+function groupSelection() {
+  const rows = pickedRows();
+  if (rows.length < 2) { toast('Pilih 2 item atau lebih dulu (Ctrl+klik di panel Layer atau timeline), lalu Ctrl+G.'); return; }
+  snapshot();
+  const g: GroupX = { id: uid(), name: `Grup ${groupsOf().length + 1}` };
+  groupsOf().push(g);
+  for (const r of rows) { const o = rowObj(r); if (o) o.group = g.id; }
+  changed({ left: true });
+  toast(`${rows.length} item jadi ${g.name}. Klik nama grup untuk memilih semuanya.`);
+}
+function ungroup(id?: string) {
+  const gid = id ?? pickedRows().map((r) => rowObj(r)?.group).find(Boolean);
+  if (!gid) return;
+  snapshot();
+  for (const o of [...tl().texts, ...images(), ...layers()] as LObj[]) if (o.group === gid) delete o.group;
+  tl().groups = groupsOf().filter((g) => g.id !== gid);
+  changed({ left: true });
+}
+function renameInline(el: HTMLElement, value: string, done: (v: string) => void) {
+  const inp = h('input', { class: 'lp-rename', value }) as HTMLInputElement;
+  el.replaceWith(inp);
+  inp.focus(); inp.select();
+  let ok = false;
+  const fin = (save: boolean) => { if (ok) return; ok = true; if (save && inp.value.trim() && inp.value.trim() !== value) done(inp.value.trim()); else renderLeft(); };
+  inp.addEventListener('keydown', (e) => { e.stopPropagation(); if (e.key === 'Enter') fin(true); if (e.key === 'Escape') fin(false); });
+  inp.addEventListener('blur', () => fin(true));
+}
+let dragRow: LRow | null = null;
+function layerRow(r: LRow, depth = 0): HTMLElement {
+  const o = rowObj(r);
+  const isMain = r.kind === 'main';
+  const hidden = isMain ? !!tl().hideMain : !!o?.hidden;
+  const locked = !!o?.locked;
+  const k = rowSel(r);
+  const on = !!k && ((sel?.kind === k && sel.id === r.id) || multi.has(mkey(k, r.id)));
+  const reorderable = r.kind === 'text' || r.kind === 'image' || r.kind === 'layer';
+  const nameEl = h('span', { class: 'lp-name', title: 'Klik dua kali untuk ganti nama' }, rowName(r));
+  if (o && r.kind !== 'captions') nameEl.addEventListener('dblclick', (e) => { e.stopPropagation(); renameInline(nameEl, rowName(r), (v) => { snapshot(); o.name = v; changed({ left: true }); }); });
+  const row = h('div', {
+    class: `lp-row${on ? ' on' : ''}${hidden ? ' off' : ''}`, style: `padding-left:${8 + depth * 16}px`, draggable: reorderable ? 'true' : undefined,
+    onclick: (e: Event) => selectRow(r, e as MouseEvent),
+  },
+    h('button', {
+      class: 'lp-btn', 'aria-label': hidden ? 'Tampilkan' : 'Sembunyikan', title: hidden ? 'Tampilkan' : 'Sembunyikan',
+      onclick: (e: Event) => { e.stopPropagation(); snapshot(); if (isMain) tl().hideMain = !tl().hideMain; else if (o) o.hidden = !o.hidden; changed({ left: true }); },
+    }, icon(hidden ? 'eyeOff' : 'eye', 15)),
+    isMain ? h('span', { class: 'lp-btn ghosted' }) : h('button', {
+      class: `lp-btn${locked ? ' lit' : ''}`, 'aria-label': locked ? 'Buka kunci' : 'Kunci', title: locked ? 'Buka kunci' : 'Kunci (tidak bisa digeser)',
+      onclick: (e: Event) => { e.stopPropagation(); if (!o) return; snapshot(); o.locked = !o.locked; changed({ left: true }); },
+    }, icon(locked ? 'lock' : 'unlock', 14)),
+    h('span', { class: 'lp-ico' }, icon(rowIcon(r), 15)),
+    nameEl,
+    reorderable ? h('span', { class: 'lp-tools' },
+      h('button', { class: 'lp-btn', 'aria-label': 'Duplikat', title: 'Duplikat (Ctrl+J)', onclick: (e: Event) => { e.stopPropagation(); selectRow(r); duplicateSelection(); } }, icon('dup', 14)),
+      h('button', { class: 'lp-btn', 'aria-label': 'Hapus', title: 'Hapus', onclick: (e: Event) => { e.stopPropagation(); selectRow(r); deleteSelected(); } }, icon('trash', 14)),
+    ) : '',
+  );
+  if (reorderable) {
+    row.addEventListener('dragstart', (e) => { dragRow = r; e.dataTransfer?.setData('text/plain', r.id); row.classList.add('dragging'); });
+    row.addEventListener('dragend', () => { dragRow = null; row.classList.remove('dragging'); });
+    row.addEventListener('dragover', (e) => { if (dragRow && dragRow.kind === r.kind && dragRow.id !== r.id) { e.preventDefault(); row.classList.add('drop'); } });
+    row.addEventListener('dragleave', () => row.classList.remove('drop'));
+    row.addEventListener('drop', (e) => {
+      e.preventDefault(); row.classList.remove('drop');
+      if (!dragRow || dragRow.kind !== r.kind) return;
+      const arr = (r.kind === 'text' ? tl().texts : r.kind === 'image' ? images() : layers()) as { id: string }[];
+      const from = arr.findIndex((x) => x.id === dragRow!.id), to = arr.findIndex((x) => x.id === r.id);
+      if (from < 0 || to < 0) return;
+      snapshot();
+      const [it] = arr.splice(from, 1);
+      arr.splice(to, 0, it);   // the panel lists top first, so dropping on a row puts it just in front of or behind it
+      changed({ left: true });
+    });
+  }
+  return row;
+}
 function layerPanel(): Node[] {
-  const list = [...layers()].reverse();  // top first
+  const grouped = new Map<string, LRow[]>();
+  const loose = (rows: LRow[]) => rows.filter((r) => { const g = rowObj(r)?.group; if (g && groupOf(g)) { grouped.set(g, [...(grouped.get(g) ?? []), r]); return false; } return true; });
+  const texts = loose([...tl().texts].reverse().map((x) => ({ kind: 'text', id: x.id }) as LRow));
+  const imgs = loose([...images()].reverse().map((x) => ({ kind: 'image', id: x.id }) as LRow));
+  const lys = loose([...layers()].reverse().map((x) => ({ kind: 'layer', id: x.id }) as LRow));
+  const section = (title: string, rows: Node[]) => rows.length ? [h('div', { class: 'lp-sec' }, title), ...rows] : [];
+  const groupRows = groupsOf().filter((g) => grouped.has(g.id)).flatMap((g) => {
+    const members = grouped.get(g.id)!;
+    const allOn = members.every((r) => { const k = rowSel(r)!; return multi.has(mkey(k, r.id)) || (sel?.kind === k && sel.id === r.id); });
+    const nameEl = h('span', { class: 'lp-name', title: 'Klik: pilih semua isi grup. Klik dua kali: ganti nama' }, g.name);
+    nameEl.addEventListener('dblclick', (e) => { e.stopPropagation(); renameInline(nameEl, g.name, (v) => { snapshot(); g.name = v; changed({ left: true }); }); });
+    const hiddenAll = members.every((r) => rowObj(r)?.hidden);
+    const head = h('div', {
+      class: `lp-row lp-group${allOn ? ' on' : ''}`,
+      onclick: () => { multi.clear(); sel = null; for (const r of members) multi.add(mkey(rowSel(r)!, r.id)); renderInspector(); renderLeft(); drawTimeline(); renderFrame(); },
+    },
+      h('button', { class: 'lp-btn', 'aria-label': hiddenAll ? 'Tampilkan grup' : 'Sembunyikan grup', onclick: (e: Event) => { e.stopPropagation(); snapshot(); for (const r of members) { const o = rowObj(r); if (o) o.hidden = !hiddenAll; } changed({ left: true }); } }, icon(hiddenAll ? 'eyeOff' : 'eye', 15)),
+      h('button', { class: `lp-btn${g.locked ? ' lit' : ''}`, 'aria-label': g.locked ? 'Buka kunci grup' : 'Kunci grup', onclick: (e: Event) => { e.stopPropagation(); snapshot(); g.locked = !g.locked; changed({ left: true }); } }, icon(g.locked ? 'lock' : 'unlock', 14)),
+      h('button', { class: 'lp-btn', 'aria-label': g.collapsed ? 'Buka grup' : 'Tutup grup', onclick: (e: Event) => { e.stopPropagation(); g.collapsed = !g.collapsed; renderLeft(); } }, icon(g.collapsed ? 'chevRight' : 'chevDown', 14)),
+      h('span', { class: 'lp-ico' }, icon('folder', 15)),
+      nameEl,
+      h('span', { class: 'lp-tools' }, h('button', { class: 'lp-btn', 'aria-label': 'Lepas grup', title: 'Lepas grup (Ctrl+Shift+G)', onclick: (e: Event) => { e.stopPropagation(); ungroup(g.id); } }, icon('x', 14))),
+    );
+    return [head, ...(g.collapsed ? [] : members.map((r) => layerRow(r, 1)))];
+  });
+  const many = pickedRows().length >= 2;
   return [
-    h('p', { class: 'muted small hint-p' }, 'Mau video yang sama di dua tempat? Klik video di timeline, Ctrl+C lalu Ctrl+V (atau klik kanan → Salin ke layer baru), lalu atur lewat tab Transform dan Crop. Layer paling atas tampil paling depan.'),
-    h('div', { class: 'stack' },
-      h('button', { class: 'secondary wide', onclick: () => { snapshot(); const ly = addMainLayer(); if (ly) { sel = { kind: 'layer', id: ly.id }; cropMode = true; changed({ left: true }); } } }, '+ Layer dari video utama'),
-      h('button', {
-        class: 'secondary wide', onclick: async () => {
-          const f = await dialog().open({ title: 'Pilih video untuk layer', filters: [{ name: 'Video', extensions: VIDEO_EXT }] });
-          if (typeof f !== 'string' || !P) return;
-          setBusy('Menambahkan video…');
-          try {
-            const m = await importMedia(f, setBusy);
-            P.media.push(m);
-            await saveProject(P);
-            addMediaLayer(m);
-            void buildThumbs(P, m).then(() => saveProject(P!)).then(() => loadSheets(m));
-          } catch (e) { toast((e as Error).message, 'error'); } finally { setBusy(''); }
-        },
-      }, '+ Layer dari video lain'),
+    h('div', { class: 'lp-bar' },
+      h('button', { class: 'lp-act', title: 'Adjustment layer: atur warna semua yang di bawahnya', onclick: () => void addAdjustmentLayer() }, icon('color', 15), 'Adjustment'),
+      h('button', { class: 'lp-act', disabled: !many, title: 'Gabungkan item yang dipilih jadi satu grup (Ctrl+G)', onclick: groupSelection }, icon('folder', 15), 'Grup'),
+      h('button', { class: 'lp-act', title: 'Layer baru dari video utama', onclick: () => { snapshot(); const ly = addMainLayer(); if (ly) { sel = { kind: 'layer', id: ly.id }; cropMode = true; changed({ left: true }); } } }, icon('plus', 15), 'Layer'),
     ),
-    h('label', { class: 'check layer-main-toggle' }, h('input', {
-      type: 'checkbox', checked: !tl().hideMain,
-      onchange: (e) => { snapshot(); tl().hideMain = !(e.target as HTMLInputElement).checked; changed({ left: true }); },
-    }), 'Tampilkan video utama di belakang layer'),
-    list.length ? h('ol', { class: 'layer-list' }, ...list.map((ly) => {
-      const i = layers().indexOf(ly);
-      return h('li', { class: sel?.kind === 'layer' && sel.id === ly.id ? 'sel' : '' },
-        h('button', {
-          class: 'icon-btn', title: ly.hidden ? 'Tampilkan' : 'Sembunyikan', 'aria-label': ly.hidden ? `Tampilkan ${ly.name}` : `Sembunyikan ${ly.name}`,
-          onclick: () => { snapshot(); ly.hidden = !ly.hidden; changed({ left: true }); },
-        }, ly.hidden ? '◌' : '●'),
-        h('button', { class: 'layer-name', onclick: () => { sel = { kind: 'layer', id: ly.id }; if (t < ly.startMs || t >= ly.endMs) seek(ly.startMs); renderInspector(); renderLeft(); drawTimeline(); renderFrame(); } },
-          h('span', {}, ly.name), h('span', { class: 'muted small' }, ly.source === 'main' ? 'video utama' : 'video lain')),
-        h('button', { class: 'icon-btn', 'aria-label': 'Naikkan', title: 'Ke depan', disabled: i === layers().length - 1, onclick: () => { snapshot(); const a = layers(); [a[i], a[i + 1]] = [a[i + 1], a[i]]; changed({ left: true }); } }, icon('up', 15)),
-        h('button', { class: 'icon-btn', 'aria-label': 'Turunkan', title: 'Ke belakang', disabled: i === 0, onclick: () => { snapshot(); const a = layers(); [a[i], a[i - 1]] = [a[i - 1], a[i]]; changed({ left: true }); } }, icon('down', 15)),
-      );
-    })) : h('p', { class: 'muted small' }, 'Belum ada layer.'),
+    h('div', { class: 'lp-list', role: 'list' },
+      ...groupRows,
+      ...section('Teks', texts.map((r) => layerRow(r))),
+      ...(tl().captions.lines.length ? section('Subtitle', [layerRow({ kind: 'captions', id: 'captions' })]) : []),
+      ...section('Meme & gambar', imgs.map((r) => layerRow(r))),
+      ...section('Layer video', lys.map((r) => layerRow(r))),
+      ...section('Dasar', [layerRow({ kind: 'main', id: 'main' })]),
+    ),
+    h('p', { class: 'muted small hint-p' }, 'Atas = paling depan. Seret baris untuk mengubah urutan. Ctrl+klik untuk memilih beberapa, Ctrl+G untuk grup. Klik dua kali nama untuk ganti nama.'),
   ];
 }
 
@@ -5003,6 +5334,36 @@ function pctInput(label: string, value: number, onSet: (v: number) => void, min 
 }
 
 
+
+/** A new adjustment layer over the whole timeline, on top of the other layers. */
+function addAdjustmentLayer(): VideoLayer | null {
+  if (!P) return null;
+  snapshot();
+  const n = layers().filter((l) => l.source === 'adjust').length + 1;
+  const ly: VideoLayer = {
+    id: uid(), name: `Adjustment ${n}`, source: 'adjust', inMs: 0, startMs: 0, endMs: Math.max(1000, timelineDuration(tl())),
+    crop: { ...NO_CROP }, box: { x: 0.5, y: 0.5, w: 1, h: 1 }, opacity: 1, volume: 0, grade: { ...NEUTRAL },
+  };
+  (tl().layers ??= []).push(ly);
+  sel = { kind: 'layer', id: ly.id };
+  multi.clear();
+  changed({ left: true });
+  switchTab('color');
+  toast('Adjustment layer dibuat: warna yang diatur di sini kena ke video dan layer di bawahnya. Geser ujungnya di timeline untuk membatasi waktunya.');
+  return ly;
+}
+function adjustInspector(ly: VideoLayer): Node[] {
+  return [
+    h('div', { class: 'row-between' },
+      h('input', { class: 'layer-title', value: ly.name, 'aria-label': 'Nama layer', onchange: (e: Event) => { snapshot(); ly.name = (e.target as HTMLInputElement).value.trim() || ly.name; changed(); } })),
+    h('div', { class: 'muted small' }, `Adjustment layer · ${tc(ly.startMs)} → ${tc(Math.min(ly.endMs, timelineDuration(tl())))}. Mengubah warna semua yang ada di bawahnya.`),
+    h('div', { class: 'block' },
+      tfSlider('Kekuatan', ly.opacity * 100, 0, 100, 1, pct, (v) => { ly.opacity = v / 100; }),
+      h('button', { class: 'secondary wide with-ico', onclick: () => switchTab('color') }, icon('color', 15), 'Atur warna (Ctrl+U)'),
+    ),
+    blendBlock(ly),
+  ];
+}
 const blendCss = (b?: Blend): GlobalCompositeOperation => BLENDS.find((x) => x.id === b)?.css ?? 'source-over';
 /** Photoshop-style blending for a layer or picture. */
 function blendBlock(obj: { blend?: Blend }): HTMLElement {
@@ -5017,6 +5378,7 @@ function blendBlock(obj: { blend?: Blend }): HTMLElement {
 }
 function layerInspector(ly: VideoLayer): Node[] {
   const set = (fn: () => void) => { snapshot(); fn(); changed(); };
+  if (ly.source === 'adjust') return adjustInspector(ly);
   const src = srcSize(ly);
   const keepRatioBox = (w: number) => boxFor(ly.crop, src, w, ly.box.x, ly.box.y);
   return [
@@ -5281,6 +5643,161 @@ function renderQueue() {
 }
 
 
+
+
+// ================= advanced transform: rotate, flip, anchor point, distort =================
+let distortMode = false;
+type TfTarget = { tf?: Tf; locked?: boolean };
+function tfAdvancedBlock(obj: TfTarget): HTMLElement {
+  const tf = obj.tf ?? {};
+  const set = (fn: (t: Tf) => void) => { snapshot(); const n: Tf = { ...(obj.tf ?? {}) }; fn(n); obj.tf = tfActive(n) || n.anchor ? n : undefined; changed(); };
+  const live = (fn: (t: Tf) => void) => (v: number) => { const n: Tf = { ...(obj.tf ?? {}) }; fn(n); void v; obj.tf = n; };
+  const anc = tf.anchor ?? [0.5, 0.5];
+  const pinsOn = !!tf.pins?.some(([a, b]) => a || b);
+  return h('div', { class: 'block' },
+    h('div', { class: 'label' }, 'Transform lanjutan'),
+    tfSlider('Rotasi', tf.rot ?? 0, -180, 180, 1, (v) => `${Math.round(v)}°`, (v) => live((n) => { n.rot = Math.round(v) || undefined; })(v)),
+    h('div', { class: 'quick-grid' },
+      h('button', { class: 'chip with-ico', title: 'Putar 90° ke kiri', onclick: () => set((n) => { n.rot = (((n.rot ?? 0) - 90 + 540) % 360) - 180 || undefined; }) }, icon('rotate', 14), '−90°'),
+      h('button', { class: 'chip with-ico', title: 'Putar 90° ke kanan', onclick: () => set((n) => { n.rot = (((n.rot ?? 0) + 90 + 540) % 360) - 180 || undefined; }) }, icon('rotate', 14), '+90°'),
+      h('button', { class: `chip with-ico${tf.flipH ? ' on' : ''}`, title: 'Cermin kiri-kanan', onclick: () => set((n) => { n.flipH = !n.flipH || undefined; }) }, icon('flipH', 14), 'Flip H'),
+      h('button', { class: `chip with-ico${tf.flipV ? ' on' : ''}`, title: 'Cermin atas-bawah', onclick: () => set((n) => { n.flipV = !n.flipV || undefined; }) }, icon('flipV', 14), 'Flip V'),
+    ),
+    h('div', { class: 'tf-row anchor-row' },
+      h('span', { class: 'tf-label' }, 'Anchor'),
+      h('div', { class: 'anchor-grid', role: 'group', 'aria-label': 'Titik putar' }, ...[0, 0.5, 1].flatMap((y) => [0, 0.5, 1].map((x) => h('button', {
+        class: anc[0] === x && anc[1] === y ? 'on' : '', 'aria-label': `Anchor ${x},${y}`, title: 'Titik tumpu saat diputar',
+        onclick: () => set((n) => { n.anchor = x === 0.5 && y === 0.5 ? undefined : [x, y]; }),
+      })))),
+      h('span', { class: 'muted small' }, 'Titik tumpu saat diputar'),
+    ),
+    h('div', { class: 'quick-grid' },
+      h('button', {
+        class: `chip${distortMode ? ' on' : ''}`, title: 'Tarik 4 sudut di preview untuk efek perspektif / distort',
+        onclick: () => { distortMode = !distortMode; if (distortMode && !obj.tf?.pins) { const n: Tf = { ...(obj.tf ?? {}) }; n.pins = [[0, 0], [0, 0], [0, 0], [0, 0]]; obj.tf = n; } renderLeft(); renderFrame(); },
+      }, distortMode ? 'Selesai distort' : 'Distort / perspektif'),
+      pinsOn ? h('button', { class: 'chip', onclick: () => set((n) => { n.pins = null; }) }, 'Reset distort') : '',
+      tfActive(tf) ? h('button', { class: 'chip', onclick: () => { snapshot(); obj.tf = undefined; distortMode = false; changed(); } }, 'Reset semua') : '',
+    ),
+  );
+}
+
+/** Homography from the unit square to a quad (tl, tr, br, bl). */
+function quadMap(q: [number, number][]): (u: number, v: number) => [number, number] {
+  const [p0, p1, p2, p3] = q;
+  const sx = p0[0] - p1[0] + p2[0] - p3[0], sy = p0[1] - p1[1] + p2[1] - p3[1];
+  let g = 0, hh = 0;
+  if (Math.abs(sx) > 1e-9 || Math.abs(sy) > 1e-9) {
+    const dx1 = p1[0] - p2[0], dx2 = p3[0] - p2[0], dy1 = p1[1] - p2[1], dy2 = p3[1] - p2[1];
+    const den = dx1 * dy2 - dx2 * dy1 || 1e-9;
+    g = (sx * dy2 - dx2 * sy) / den; hh = (dx1 * sy - sx * dy1) / den;
+  }
+  const a = p1[0] - p0[0] + g * p1[0], b = p3[0] - p0[0] + hh * p3[0], c = p0[0];
+  const d = p1[1] - p0[1] + g * p1[1], e = p3[1] - p0[1] + hh * p3[1], f = p0[1];
+  return (u, v) => { const w = g * u + hh * v + 1; return [(a * u + b * v + c) / w, (d * u + e * v + f) / w]; };
+}
+/** Draws `img` (w x h) into a quad, in small triangles so it looks like true perspective. */
+function drawQuad(ctx: CanvasRenderingContext2D, img: CanvasImageSource, w: number, h: number, q: [number, number][]) {
+  const map = quadMap(q), N = 12;
+  const tri = (s: [number, number][], d: [number, number][]) => {
+    const [[x0, y0], [x1, y1], [x2, y2]] = s, [[u0, v0], [u1, v1], [u2, v2]] = d;
+    const den = (x1 - x0) * (y2 - y0) - (x2 - x0) * (y1 - y0);
+    if (Math.abs(den) < 1e-9) return;
+    const a = ((u1 - u0) * (y2 - y0) - (u2 - u0) * (y1 - y0)) / den, c = ((u2 - u0) * (x1 - x0) - (u1 - u0) * (x2 - x0)) / den;
+    const b = ((v1 - v0) * (y2 - y0) - (v2 - v0) * (y1 - y0)) / den, dd = ((v2 - v0) * (x1 - x0) - (v1 - v0) * (x2 - x0)) / den;
+    const e = u0 - a * x0 - c * y0, f = v0 - b * x0 - dd * y0;
+    // grow the clip a little so neighbouring triangles overlap and no seams show
+    const cx = (u0 + u1 + u2) / 3, cy = (v0 + v1 + v2) / 3, gr = (p: [number, number]) => [p[0] + Math.sign(p[0] - cx) * 0.6, p[1] + Math.sign(p[1] - cy) * 0.6];
+    ctx.save();
+    ctx.beginPath(); const g0 = gr(d[0]), g1 = gr(d[1]), g2 = gr(d[2]); ctx.moveTo(g0[0], g0[1]); ctx.lineTo(g1[0], g1[1]); ctx.lineTo(g2[0], g2[1]); ctx.closePath(); ctx.clip();
+    ctx.transform(a, b, c, dd, e, f);
+    ctx.drawImage(img, 0, 0, w, h);
+    ctx.restore();
+  };
+  for (let i = 0; i < N; i++) for (let j = 0; j < N; j++) {
+    const u0 = i / N, u1 = (i + 1) / N, v0 = j / N, v1 = (j + 1) / N;
+    const s00: [number, number] = [u0 * w, v0 * h], s10: [number, number] = [u1 * w, v0 * h], s01: [number, number] = [u0 * w, v1 * h], s11: [number, number] = [u1 * w, v1 * h];
+    const d00 = map(u0, v0), d10 = map(u1, v0), d01 = map(u0, v1), d11 = map(u1, v1);
+    tri([s00, s10, s11], [d00, d10, d11]);
+    tri([s00, s11, s01], [d00, d11, d01]);
+  }
+}
+/** Corners of a box after its pins, relative to its centre, before rotation (tl, tr, br, bl). */
+function pinnedCorners(tf: Tf | undefined, w: number, h: number): [number, number][] {
+  const p = tf?.pins ?? [[0, 0], [0, 0], [0, 0], [0, 0]];
+  const base: [number, number][] = [[-w / 2, -h / 2], [w / 2, -h / 2], [w / 2, h / 2], [-w / 2, h / 2]];
+  return base.map(([x, y], i) => [x + p[i][0] * w, y + p[i][1] * h]);
+}
+let tfOff: HTMLCanvasElement | null = null;
+/** Paints something w x h centred at (cx, cy) with its transform (flip, distort, rotation around the anchor). */
+function drawTf(ctx: CanvasRenderingContext2D, tf: Tf | undefined, cx: number, cy: number, w: number, h: number, paint: (c: CanvasRenderingContext2D, x: number, y: number, w: number, h: number) => void) {
+  if (!tfActive(tf)) { paint(ctx, cx - w / 2, cy - h / 2, w, h); return; }
+  const [ax, ay] = anchoredCentre(cx, cy, w, h, tf);
+  const pins = tf!.pins?.some(([a, b]) => a || b);
+  ctx.save();
+  ctx.translate(ax, ay);
+  if (tf!.rot) ctx.rotate((tf!.rot * Math.PI) / 180);
+  if (pins) {
+    tfOff ??= document.createElement('canvas');
+    const ow = Math.max(2, Math.round(w)), oh = Math.max(2, Math.round(h));
+    if (tfOff.width !== ow || tfOff.height !== oh) { tfOff.width = ow; tfOff.height = oh; }
+    const oc = tfOff.getContext('2d')!;
+    oc.setTransform(1, 0, 0, 1, 0, 0); oc.clearRect(0, 0, ow, oh);
+    oc.globalAlpha = 1;
+    if (tf!.flipH || tf!.flipV) { oc.translate(tf!.flipH ? ow : 0, tf!.flipV ? oh : 0); oc.scale(tf!.flipH ? -1 : 1, tf!.flipV ? -1 : 1); }
+    paint(oc, 0, 0, ow, oh);
+    drawQuad(ctx, tfOff, ow, oh, pinnedCorners(tf, w, h));
+  } else {
+    ctx.scale(tf!.flipH ? -1 : 1, tf!.flipV ? -1 : 1);
+    paint(ctx, -w / 2, -h / 2, w, h);
+  }
+  ctx.restore();
+}
+/** Distort handles of the selected layer or picture in preview pixels (tl, tr, br, bl). */
+function distortHandles(): { obj: TfTarget; pts: [number, number][]; w: number; h: number; cx: number; cy: number } | null {
+  if (!distortMode || !P) return null;
+  const W = preview.width, H = preview.height;
+  const ly = selected('layer'), im = selected('image');
+  let obj: TfTarget | null = null, cx = 0, cy = 0, w = 0, h = 0;
+  if (ly && ly.source !== 'adjust') { obj = ly; w = ly.box.w * W; h = ly.box.h * H; cx = ly.box.x * W; cy = ly.box.y * H; }
+  else if (im) { obj = im; w = im.scale * W; h = w / im.aspect; cx = im.x * W; cy = im.y * H; }
+  if (!obj) return null;
+  const tf = obj.tf;
+  const [ax, ay] = anchoredCentre(cx, cy, w, h, tf);
+  const r = ((tf?.rot ?? 0) * Math.PI) / 180;
+  const pts = pinnedCorners(tf, w, h).map(([x, y]) => [ax + x * Math.cos(r) - y * Math.sin(r), ay + x * Math.sin(r) + y * Math.cos(r)] as [number, number]);
+  return { obj, pts, w, h, cx: ax, cy: ay };
+}
+function drawDistortHandles(ctx: CanvasRenderingContext2D) {
+  const d = distortHandles();
+  if (!d) return;
+  ctx.save();
+  ctx.strokeStyle = '#ffd400'; ctx.lineWidth = 1.5; ctx.setLineDash([5, 4]);
+  ctx.beginPath(); d.pts.forEach(([x, y], i) => (i ? ctx.lineTo(x, y) : ctx.moveTo(x, y))); ctx.closePath(); ctx.stroke();
+  ctx.setLineDash([]);
+  for (const [x, y] of d.pts) { ctx.fillStyle = '#ffd400'; ctx.strokeStyle = '#121212'; ctx.beginPath(); ctx.arc(x, y, 7, 0, Math.PI * 2); ctx.fill(); ctx.stroke(); }
+  ctx.restore();
+}
+/** Starts dragging a distort corner; returns the drag or null. */
+function distortPointerDown(p: { x: number; y: number }): ((q: { x: number; y: number }) => void) | null {
+  const d = distortHandles();
+  if (!d || d.obj.locked) return null;
+  const i = d.pts.findIndex(([x, y]) => Math.hypot(x - p.x, y - p.y) < 14);
+  if (i < 0) return null;
+  snapshot();
+  const r = -((d.obj.tf?.rot ?? 0) * Math.PI) / 180;
+  const base: [number, number][] = [[-0.5, -0.5], [0.5, -0.5], [0.5, 0.5], [-0.5, 0.5]];
+  return (q) => {
+    const dx = q.x - d.cx, dy = q.y - d.cy;
+    const lx = dx * Math.cos(r) - dy * Math.sin(r), ly = dx * Math.sin(r) + dy * Math.cos(r);
+    const tf: Tf = { ...(d.obj.tf ?? {}) };
+    const pins = (tf.pins ?? [[0, 0], [0, 0], [0, 0], [0, 0]]).map((x) => [...x] as [number, number]);
+    pins[i] = [Number((lx / d.w - base[i][0]).toFixed(4)), Number((ly / d.h - base[i][1]).toFixed(4))];
+    tf.pins = pins;
+    d.obj.tf = tf;
+    renderFrame();
+  };
+}
 
 // ================= reverse: a reversed copy of the piece, made in 2-second chunks so memory stays small =================
 let reversing = false;
@@ -5638,6 +6155,7 @@ function onKey(e: KeyboardEvent) {
   if (ctrl && e.key.toLowerCase() === 'x') { e.preventDefault(); copySelection(true); return; }
   if (ctrl && e.key.toLowerCase() === 'v') { e.preventDefault(); pasteClipboard(e.shiftKey && clipboard ? clipboard.base : undefined); return; }
   if (ctrl && e.key.toLowerCase() === 'd') { e.preventDefault(); duplicateSelection(); return; }
+  if (ctrl && e.key.toLowerCase() === 'g') { e.preventDefault(); if (e.shiftKey) ungroup(); else groupSelection(); return; }
   // Photoshop habits
   if (ctrl && e.key.toLowerCase() === 'j') { e.preventDefault(); duplicateSelection(); return; }
   if (ctrl && e.key.toLowerCase() === 't') { e.preventDefault(); startTransform('transform'); return; }
