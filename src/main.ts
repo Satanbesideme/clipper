@@ -297,6 +297,7 @@ async function boot() {
   setInterval(() => { void autoSnapshot('auto'); }, 180_000);
   window.addEventListener('keydown', onKey);
   window.addEventListener('paste', onPaste);
+  void loadFonts();
   setupTooltips();
   window.addEventListener('resize', () => { layoutPreview(); sizeTimeline(); });
   await renderHome();
@@ -1416,8 +1417,7 @@ function field(label: string, control: HTMLElement) {
 
 function styleControls(st: TextStyle, set: (p: Partial<TextStyle>) => void, showHighlight: boolean): HTMLElement[] {
   return [
-    field('Font', h('select', { onchange: (e) => set({ font: (e.target as HTMLSelectElement).value }) },
-      ...FONTS.map((f) => { const o = h('option', { value: f, style: `font-family:"${f}"` }, f); o.selected = f === st.font; return o; }))),
+    field('Font', fontPicker(st.font, (f) => set({ font: f }))),
     field(`Ukuran ${st.size}`, h('input', { type: 'range', min: 32, max: 160, value: st.size, onchange: (e) => set({ size: Number((e.target as HTMLInputElement).value) }) })),
     h('div', { class: 'row2' },
       field('Warna', h('input', { type: 'color', value: st.color, onchange: (e) => set({ color: (e.target as HTMLInputElement).value }) })),
@@ -6588,6 +6588,116 @@ async function reverseClip(c: VideoClip) {
   }
 }
 
+
+
+// ================= fonts: every installed font, plus fonts imported into the app =================
+let fontNames: string[] = [...FONTS];
+let fontsLoaded = false;
+const importedFontNames = () => new Set((settings.importedFonts ?? []).map((f) => f.name));
+async function registerFontFile(name: string, file: string) {
+  try {
+    const ff = new FontFace(name, `url("${fileSrc(file)}")`);
+    await ff.load();
+    document.fonts.add(ff);
+    return true;
+  } catch { return false; }
+}
+async function loadFonts() {
+  for (const f of settings.importedFonts ?? []) await registerFontFile(f.name, f.file);
+  const sys = await invoke<string[]>('system_fonts').catch(() => [] as string[]);
+  const seen = new Set<string>();
+  fontNames = [...(settings.importedFonts ?? []).map((f) => f.name), ...FONTS, ...sys].filter((f) => { const k = f.toLowerCase(); if (seen.has(k)) return false; seen.add(k); return true; });
+  fontsLoaded = true;
+}
+/** Copies font files into the app and makes them usable right away (preview and export). */
+async function importFonts(): Promise<string | null> {
+  const files = await dialog().open({ multiple: true, title: 'Impor font', filters: [{ name: 'Font (.ttf, .otf, .woff, .woff2)', extensions: ['ttf', 'otf', 'woff', 'woff2', 'TTF', 'OTF'] }] });
+  const arr = typeof files === 'string' ? [files] : files ?? [];
+  if (!arr.length) return null;
+  const dir = join(await dataDir(), 'fonts');
+  await invoke('ensure_dir', { path: dir });
+  let last: string | null = null, ok = 0;
+  for (const f of arr) {
+    // "Bangers-Regular.ttf" -> "Bangers"; "Montserrat-BoldItalic.ttf" -> "Montserrat BoldItalic"
+    const name = baseName(f).replace(/\.[^.]+$/, '').replace(/[-_ ]?(Regular|Normal|Book|Roman)$/i, '').replace(/[-_]+/g, ' ').trim() || 'Font';
+    const dest = join(dir, baseName(f));
+    try {
+      await invoke('copy_file', { src: f, dest });
+      if (!(await registerFontFile(name, dest))) { toast(`${baseName(f)} bukan font yang bisa dibaca.`, 'error'); continue; }
+      settings.importedFonts = [...(settings.importedFonts ?? []).filter((x) => x.name !== name), { name, file: dest }];
+      fontNames = [name, ...fontNames.filter((x) => x !== name)];
+      last = name; ok++;
+    } catch (e) { toast(`${baseName(f)}: ${(e as Error).message}`, 'error'); }
+  }
+  await saveSettings(settings);
+  if (ok) toast(ok === 1 ? `Font "${last}" siap dipakai.` : `${ok} font siap dipakai.`);
+  return last;
+}
+function removeImportedFont(name: string) {
+  settings.importedFonts = (settings.importedFonts ?? []).filter((x) => x.name !== name);
+  fontNames = fontNames.filter((x) => x !== name);
+  void saveSettings(settings);
+}
+
+/** Font button: opens a searchable list where every font is shown in its own letters. */
+function fontPicker(current: string, onPick: (f: string) => void): HTMLElement {
+  const btn = h('button', { class: 'font-btn', type: 'button', style: `font-family:"${current}", "Segoe UI", sans-serif` },
+    h('span', {}, current), icon('chevDown', 14)) as HTMLButtonElement;
+  btn.addEventListener('click', (e) => { e.preventDefault(); openFontPop(btn, current, onPick); });
+  return btn;
+}
+function openFontPop(anchor: HTMLElement, current: string, onPick: (f: string) => void) {
+  document.querySelector('.font-pop')?.remove();
+  const favs = new Set(settings.favFonts ?? []);
+  const list = h('div', { class: 'fp-list', role: 'listbox' });
+  const search = h('input', { class: 'fp-q', placeholder: `Cari di ${fontNames.length} font…`, 'aria-label': 'Cari font' }) as HTMLInputElement;
+  const close = () => { pop.remove(); window.removeEventListener('pointerdown', away, true); window.removeEventListener('keydown', esc, true); };
+  const pick = (f: string) => { close(); onPick(f); };
+  const row = (f: string) => {
+    const imp = importedFontNames().has(f), fav = favs.has(f);
+    return h('div', { class: `fp-item${f === current ? ' on' : ''}`, role: 'option', title: f, onclick: () => pick(f) },
+      h('span', { class: 'fp-sample', style: `font-family:"${f}", "Segoe UI", sans-serif` }, f),
+      imp ? h('span', { class: 'fp-tag' }, 'impor') : '',
+      h('button', {
+        class: `fp-fav${fav ? ' on' : ''}`, 'aria-label': fav ? 'Hapus dari favorit' : 'Favorit', title: fav ? 'Hapus dari favorit' : 'Favoritkan',
+        onclick: (e: Event) => { e.stopPropagation(); if (fav) favs.delete(f); else favs.add(f); settings.favFonts = [...favs]; void saveSettings(settings); fill(); },
+      }, icon('star', 13)),
+      imp ? h('button', { class: 'fp-fav', 'aria-label': 'Hapus font impor', title: 'Hapus dari daftar', onclick: (e: Event) => { e.stopPropagation(); removeImportedFont(f); fill(); } }, icon('x', 13)) : '',
+    );
+  };
+  const fill = () => {
+    const q = search.value.trim().toLowerCase();
+    const match = fontNames.filter((f) => !q || f.toLowerCase().includes(q));
+    const top = match.filter((f) => favs.has(f) || importedFontNames().has(f));
+    const rest = match.filter((f) => !favs.has(f) && !importedFontNames().has(f));
+    list.replaceChildren(
+      ...(top.length ? [h('div', { class: 'fp-sec' }, 'Favorit & impor'), ...top.map(row)] : []),
+      h('div', { class: 'fp-sec' }, q ? `${match.length} hasil` : 'Semua font'),
+      ...rest.slice(0, 400).map(row),
+      match.length ? '' : h('div', { class: 'muted small fp-none' }, 'Tidak ada font dengan nama itu. Impor file font-nya?'),
+    );
+    if (!fontsLoaded) list.prepend(h('div', { class: 'muted small fp-none' }, h('span', { class: 'spinner' }), ' Membaca font di PC…'));
+  };
+  search.addEventListener('input', fill);
+  search.addEventListener('keydown', (e) => { e.stopPropagation(); if (e.key === 'Enter') { const first = list.querySelector('.fp-item') as HTMLElement | null; first?.click(); } });
+  const pop = h('div', { class: 'font-pop' },
+    h('div', { class: 'fp-top' }, search,
+      h('button', { class: 'secondary small with-ico', title: 'Tambah file .ttf / .otf', onclick: async () => { const n = await importFonts(); if (n) pick(n); } }, icon('plus', 14), 'Impor font')),
+    list,
+  );
+  document.body.append(pop);
+  const r = anchor.getBoundingClientRect();
+  const ph = Math.min(460, window.innerHeight - 24);
+  pop.style.left = `${Math.min(r.left, window.innerWidth - 340)}px`;
+  pop.style.top = `${r.bottom + 6 + ph > window.innerHeight ? Math.max(12, r.top - ph - 6) : r.bottom + 6}px`;
+  pop.style.maxHeight = `${ph}px`;
+  const away = (e: Event) => { if (!(e.target as HTMLElement).closest?.('.font-pop') && e.target !== anchor && !anchor.contains(e.target as Node)) close(); };
+  const esc = (e: KeyboardEvent) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } };
+  setTimeout(() => { window.addEventListener('pointerdown', away, true); window.addEventListener('keydown', esc, true); search.focus(); }, 0);
+  if (!fontsLoaded) void loadFonts().then(fill);
+  fill();
+  list.querySelector('.fp-item.on')?.scrollIntoView({ block: 'center' });
+}
 
 // ================= paste pictures from the web (Ctrl+V) =================
 let pendingPaste = 0;

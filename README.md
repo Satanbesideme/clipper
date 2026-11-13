@@ -84,6 +84,7 @@ Tab **AI** di rel kiri. Unduh model sekali (Super ±5 GB untuk kartu grafis 8 GB
 - **Typography studio**: spasi huruf, tinggi baris, warna & tebal garis tepi, bayangan, teks gradasi, miring, dan preset teks sendiri.
 
 ## Lain-lain
+- **Semua font di PC** bisa dipakai untuk subtitle dan teks (daftar bisa dicari, tiap font tampil dengan hurufnya sendiri, bisa difavoritkan). **Impor font** .ttf / .otf / .woff dari tombol di daftar font: langsung bisa dipakai di preview dan hasil ekspor, tanpa install ke Windows.
 - **Tempel gambar dari web**: di browser klik kanan gambar → Copy image (atau salin link .gif/.png), lalu di aplikasi tekan Ctrl+V. Gambar/GIF dipasang di playhead dan disimpan di library Meme (kategori Tempel). Bisa juga lewat klik kanan timeline → Tempel gambar dari web.
 - **GIF bergerak** di preview, dan berulang terus selama tampil di hasil ekspor (juga GIF yang aslinya cuma main sekali).
 - Reverse video (klik kanan potongan → Putar mundur).

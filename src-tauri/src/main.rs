@@ -2,8 +2,9 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader, Read};
-use std::path::PathBuf;
+use std::fs::File;
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 
@@ -423,13 +424,104 @@ fn reveal(path: String) {
     }
 }
 
+// ---------- installed fonts ----------
+
+fn font_rd(f: &mut File, at: u64, n: usize) -> Option<Vec<u8>> {
+    f.seek(SeekFrom::Start(at)).ok()?;
+    let mut b = vec![0u8; n];
+    f.read_exact(&mut b).ok()?;
+    Some(b)
+}
+fn u16be(b: &[u8], i: usize) -> usize { ((b[i] as usize) << 8) | b[i + 1] as usize }
+fn u32be(b: &[u8], i: usize) -> u64 { ((b[i] as u64) << 24) | ((b[i + 1] as u64) << 16) | ((b[i + 2] as u64) << 8) | b[i + 3] as u64 }
+
+/// Family names of the font starting at `off`: the legacy family (name ID 1, what Word shows, e.g. "Segoe UI Black")
+/// and the typographic family (ID 16, e.g. "Segoe UI"). Windows English names first.
+fn family_at(f: &mut File, off: u64) -> Option<Vec<String>> {
+    let head = font_rd(f, off, 12)?;
+    let n = u16be(&head, 4);
+    let dir = font_rd(f, off + 12, n * 16)?;
+    let mut name_off = None;
+    for i in 0..n {
+        if &dir[i * 16..i * 16 + 4] == b"name" { name_off = Some((u32be(&dir, i * 16 + 8), u32be(&dir, i * 16 + 12) as usize)); break; }
+    }
+    let (no, nl) = name_off?;
+    if nl > 2_000_000 { return None; }
+    let t = font_rd(f, no, nl)?;
+    let count = u16be(&t, 2);
+    let strings = u16be(&t, 4);
+    let mut best: [Option<(i32, String)>; 2] = [None, None];
+    for i in 0..count {
+        let r = 6 + i * 12;
+        if r + 12 > t.len() { break; }
+        let (plat, enc, lang, id, len, so) = (u16be(&t, r), u16be(&t, r + 2), u16be(&t, r + 4), u16be(&t, r + 6), u16be(&t, r + 8), u16be(&t, r + 10));
+        if id != 1 && id != 16 { continue; }
+        let s = strings + so;
+        if s + len > t.len() { continue; }
+        let raw = &t[s..s + len];
+        let text = if plat == 3 || plat == 0 {
+            let u: Vec<u16> = raw.chunks(2).filter(|c| c.len() == 2).map(|c| ((c[0] as u16) << 8) | c[1] as u16).collect();
+            String::from_utf16_lossy(&u)
+        } else if plat == 1 && enc == 0 { raw.iter().map(|&c| c as char).collect() } else { continue };
+        let text = text.trim().to_string();
+        if text.is_empty() { continue; }
+        let score = (if plat == 3 { 2 } else { 0 }) + (if lang == 0x409 || (plat == 1 && lang == 0) { 1 } else { 0 });
+        let k = if id == 16 { 1 } else { 0 };
+        if best[k].as_ref().map_or(true, |b| score > b.0) { best[k] = Some((score, text)); }
+    }
+    let v: Vec<String> = IntoIterator::into_iter(best).flatten().map(|b| b.1).collect();
+    if v.is_empty() { None } else { Some(v) }
+}
+
+fn families_of(path: &Path) -> Vec<String> {
+    let mut out = Vec::new();
+    let Ok(mut f) = File::open(path) else { return out };
+    let Some(tag) = font_rd(&mut f, 0, 12) else { return out };
+    if &tag[0..4] == b"ttcf" {
+        let n = (u32be(&tag, 8) as usize).min(64);
+        if let Some(offs) = font_rd(&mut f, 12, n * 4) {
+            for i in 0..n { if let Some(fam) = family_at(&mut f, u32be(&offs, i * 4)) { out.extend(fam); } }
+        }
+    } else if let Some(fam) = family_at(&mut f, 0) { out.extend(fam); }
+    out
+}
+
+fn font_families_in(dirs: &[PathBuf]) -> Vec<String> {
+    let mut all: Vec<String> = Vec::new();
+    for d in dirs {
+        let Ok(entries) = std::fs::read_dir(d) else { continue };
+        for e in entries.flatten() {
+            let p = e.path();
+            let ext = p.extension().and_then(|x| x.to_str()).unwrap_or("").to_ascii_lowercase();
+            if !matches!(ext.as_str(), "ttf" | "otf" | "ttc") { continue; }
+            for fam in families_of(&p) { if !fam.starts_with('@') { all.push(fam); } }
+        }
+    }
+    all.sort_by_key(|s| s.to_lowercase());
+    all.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
+    all
+}
+
+
+/// Font families installed on Windows (for everyone and for this user), read from the font files' name tables.
+#[tauri::command]
+async fn system_fonts() -> Vec<String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let mut dirs = vec![PathBuf::from(std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".into())).join("Fonts")];
+        if let Ok(local) = std::env::var("LOCALAPPDATA") { dirs.push(PathBuf::from(local).join("Microsoft").join("Windows").join("Fonts")); }
+        font_families_in(&dirs)
+    })
+    .await
+    .unwrap_or_default()
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(Jobs::default())
         .invoke_handler(tauri::generate_handler![
             probe, ffmpeg_check, ffmpeg_log, tool_run, ffmpeg_cancel, whisper_available, llama_available, llama_run, cpu_count, file_size, download, waveform, data_dir, videos_dir,
-            read_text, write_text, write_bytes, read_bytes, ensure_dir, copy_file, starter_sfx_dir, exists, list_dir, remove_path, reveal
+            read_text, write_text, write_bytes, system_fonts, read_bytes, ensure_dir, copy_file, starter_sfx_dir, exists, list_dir, remove_path, reveal
         ])
         .run(tauri::generate_context!())
         .expect("gagal menjalankan Gals Clip Studio");

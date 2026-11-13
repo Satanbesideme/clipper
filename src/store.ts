@@ -26,7 +26,7 @@ export interface ProjectSummary {
 }
 
 export type ModelSize = 'base' | 'small';
-export interface Settings { outDir: string; encoder: Encoder | ''; model: ModelSize; watermark?: Watermark | null; fontScale?: Record<string, number>; quality?: number; sttTracks?: 'all' | number; sttCareful?: boolean; insertVolume?: number; leftW?: number; rightW?: number; leftHidden?: boolean; rightHidden?: boolean; exportPreset?: string; namePattern?: string; exportFormat?: string; textPresets?: { name: string; style: TextStyle }[]; starred?: string[]; archived?: string[]; homeView?: 'grid' | 'list'; homeSort?: 'recent' | 'name' | 'dur' }
+export interface Settings { outDir: string; encoder: Encoder | ''; model: ModelSize; watermark?: Watermark | null; fontScale?: Record<string, number>; quality?: number; sttTracks?: 'all' | number; sttCareful?: boolean; insertVolume?: number; leftW?: number; rightW?: number; leftHidden?: boolean; rightHidden?: boolean; exportPreset?: string; namePattern?: string; exportFormat?: string; textPresets?: { name: string; style: TextStyle }[]; starred?: string[]; archived?: string[]; homeView?: 'grid' | 'list'; homeSort?: 'recent' | 'name' | 'dur'; importedFonts?: { name: string; file: string }[]; favFonts?: string[] }
 
 let dataDirCache = '';
 export async function dataDir(): Promise<string> {
