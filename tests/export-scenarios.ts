@@ -2,7 +2,7 @@
 // so a failure points at the feature. Usage: node build-test/tests/export-scenarios.js <ffmpeg> <workdir> <fontsdir> <font>
 import { spawnSync } from 'node:child_process';
 import { readFileSync, writeFileSync } from 'node:fs';
-import { DEFAULT_CAPTION, DEFAULT_TEXT, buildAss, renderArgs, type Timeline, type Media, type ImageItem } from '../src/render';
+import { DEFAULT_CAPTION, DEFAULT_TEXT, buildAss, renderArgs, youtubeChapters, type Timeline, type Media, type ImageItem, type RenderSpec } from '../src/render';
 import { bakeCube, gradeOf, hasColour, parseLut, type Grade } from '../src/grade';
 
 const [ffmpeg, dir, fontsDir, font] = process.argv.slice(2);
@@ -122,11 +122,26 @@ const scenarios: [string, (tl: Timeline) => void][] = [
   }]),
   ['teks dengan kotak', (tl) => { tl.texts = [{ id: 't', startMs: 0, endMs: 3000, text: 'MOMEN', x: 0.5, y: 0.2, style: { ...DEFAULT_TEXT, font, box: true } }]; }],
 ];
+// extra export options a scenario can set (In/Out range, captions drawn by the app as PNG frames)
+let extra: Partial<RenderSpec> = {};
+let expectSec = 0;
+scenarios.push(['ekspor bagian In–Out', () => { extra = { range: { inMs: 1500, outMs: 6000 } }; expectSec = 4.5; }]);
+scenarios.push(['teks digambar aplikasi (PNG + ffconcat)', () => {
+  make(['-f', 'lavfi', '-i', 'color=c=black@0:s=600x200,format=rgba', '-frames:v', '1', `${dir}/ov0.png`]);
+  make(['-f', 'lavfi', '-i', 'color=c=yellow:s=600x200,format=rgba', '-frames:v', '1', `${dir}/ov1.png`]);
+  writeFileSync(`${dir}/ov.ffconcat`, "ffconcat version 1.0\nfile 'ov0.png'\nduration 0.5\nfile 'ov1.png'\nduration 1.25\nfile 'ov0.png'\nduration 6.25\nfile 'ov0.png'\n");
+  extra = { ...extra, overlay: { list: `${dir}/ov.ffconcat`, x: 240, y: 1300 } };
+}]);
 scenarios.push(['SEMUA SEKALIGUS', (tl) => { for (const [name, f] of scenarios) if (name !== 'SEMUA SEKALIGUS' && !name.startsWith('meme') && !name.startsWith('layer') && !name.startsWith('kanvas kosong') && name !== 'speed 2x') f(tl); tl.images = [meme('i', `${dir}/meme.png`, 500, 2500, 'pop', 'fade'), meme('g', `${dir}/anim.gif`, 4500, 6500, 'slide', 'pop', true)]; tl.clips[1].trans = 'punch'; tl.layers = [{ id: 'g', name: 'G', source: 'main', inMs: 0, startMs: 0, endMs: 99999, crop: { l: 0, t: 0, r: 0, b: 0.5 }, box: { x: 0.5, y: 0.25, w: 1, h: 0.5 }, opacity: 1, volume: 0 }, { id: 'o', name: 'O', source: 'media', mediaId: 'm', inMs: 2000, startMs: 1000, endMs: 4000, crop: { l: 0, t: 0.5, r: 0, b: 0 }, box: { x: 0.5, y: 0.75, w: 1, h: 0.5 }, opacity: 1, volume: 0.5 }]; tl.hideMain = true; }]);
 
 let failed = 0;
+{
+  const ch = youtubeChapters([{ id: 'a', ms: 65000, label: 'Boss', color: '' }, { id: 'b', ms: 3000, label: '', color: '' }]);
+  if (ch !== '0:00 Intro\n0:03 Bagian 2\n1:05 Boss') { failed++; console.log(`GAGAL chapter YouTube\n      ${JSON.stringify(ch)}`); } else console.log('OK    chapter YouTube');
+}
 for (const [name, setup] of scenarios) {
   const tl = base();
+  extra = {}; expectSec = 0;
   setup(tl);
   let assFile: string | undefined;
   if (tl.texts.length || tl.captions.lines.length) { assFile = `${dir}/subs.ass`; writeFileSync(assFile, buildAss(tl)); }
@@ -140,8 +155,12 @@ for (const [name, setup] of scenarios) {
     gradeLuts[it.id] = `${dir}/grade-${it.id}.cube`;
     writeFileSync(gradeLuts[it.id], bakeCube(g, user));
   }
-  const args = renderArgs({ tl, media, encoder: 'libx264', bitrateK: Math.round(8000 * q), quality: q, assFile, fontsDir, outPath: `${dir}/out.mp4`, gradeLuts });
+  const args = renderArgs({ tl, media, encoder: 'libx264', bitrateK: Math.round(8000 * q), quality: q, assFile, fontsDir, outPath: `${dir}/out.mp4`, gradeLuts, ...extra });
   const r = run(args);
+  if (r.status === 0 && expectSec) {
+    const d = Number(run(['-i', `${dir}/out.mp4`]).stderr.match(/Duration: (\d+):(\d+):([\d.]+)/)?.slice(1).reduce((a, x) => a * 60 + Number(x), 0));
+    if (Math.abs(d - expectSec) > 0.15) { failed++; console.log(`GAGAL ${name}\n      durasi ${d} dtk, harusnya ${expectSec}`); continue; }
+  }
   if (r.status === 0) { console.log(`OK    ${name}`); continue; }
   failed++;
   const lines = r.stderr.split('\n').filter((l) => /error|invalid|failed|not supported|cannot|unable|no such|unknown|mismatch|reinit|changing/i.test(l)).slice(-8);

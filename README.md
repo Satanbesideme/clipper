@@ -68,6 +68,21 @@ Tab **Warna** (atau **Ctrl+U**). Klik satu potongan/layer untuk mengatur sendiri
 
 Klik kanan di timeline **atau langsung di preview** membuka menu: Transform, Crop, Warna, Salin, Tempel, Duplikat, fade suara, urutan layer, split, hapus.
 
+## Shortcut ala Premiere
+| Tombol | Fungsi |
+|---|---|
+| J / K / L | Putar mundur / stop / maju. Tekan lagi untuk 2×, 4×, 8× |
+| M | Tambah marker di playhead (M lagi di tempat yang sama: ganti nama) |
+| Shift + M / Ctrl + Shift + M | Loncat ke marker berikut / sebelumnya |
+| I / O | Set titik In / Out (Shift + I / O: loncat ke sana) |
+| Ctrl + Shift + X | Hapus In/Out |
+| Q / W | Buang bagian potongan dari awal sampai playhead (Q) atau dari playhead sampai akhir (W), celahnya langsung tertutup |
+
+Klik kanan di penggaris waktu untuk menu marker (ganti nama, warna, hapus) dan In/Out. Kalau In/Out dipasang, panel Ekspor bisa mengekspor bagian itu saja. Marker bisa disalin sebagai **chapter YouTube** (`0:00 Intro`, `1:05 Boss`, …) untuk deskripsi video. Video, musik, dan suara di timeline menampilkan gelombang suara.
+
+## Ekspor = persis preview
+Subtitle dan teks di video hasil ekspor digambar oleh aplikasi sendiri, dengan kode yang sama dengan preview: font, baris, posisi, ukuran, dan animasinya sama persis. Suara juga tidak lagi maju sedikit dibanding gambar pada rekaman yang audionya mulai sedikit terlambat.
+
 ## Salin & tempel
 Pilih item di timeline lalu **Ctrl+C**, **Ctrl+V** (tempel di playhead), **Ctrl+Shift+V** (tempel di waktu aslinya), **Ctrl+X** (potong), atau **Ctrl+D** (duplikat). Klik kanan di timeline membuka menu yang sama, plus Transform, Crop, fade suara, split, dan hapus.
 

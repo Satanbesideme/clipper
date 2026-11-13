@@ -267,6 +267,24 @@ export interface Timeline {
   layers?: VideoLayer[];   // bottom to top, above the main track
   hideMain?: boolean;      // show only the layers (black behind them)
   background?: string;     // blank canvas: colour behind everything (#rrggbb); also fills 'fit' bars
+  markers?: Marker[];      // named points on the timeline (M); also YouTube chapters
+  range?: { inMs: number; outMs: number } | null;  // In/Out points (I / O)
+}
+
+/** A named point on the timeline. */
+export interface Marker { id: string; ms: number; label: string; color: string }
+
+/** "0:00 Intro" lines for a YouTube description. YouTube wants the first chapter at 0:00. */
+export function youtubeChapters(markers: Marker[], offsetMs = 0): string {
+  const ms = [...markers].map((m) => ({ ...m, ms: m.ms - offsetMs })).filter((m) => m.ms >= 0).sort((a, b) => a.ms - b.ms);
+  if (!ms.length) return '';
+  if (ms[0].ms > 0) ms.unshift({ id: '', ms: 0, label: 'Intro', color: '' });
+  const long = ms[ms.length - 1].ms >= 3600000;
+  const stamp = (t: number) => {
+    const s = Math.floor(t / 1000), h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = String(s % 60).padStart(2, '0');
+    return long ? `${h}:${String(m).padStart(2, '0')}:${sec}` : `${m}:${sec}`;
+  };
+  return ms.map((m, i) => `${stamp(m.ms)} ${m.label || `Bagian ${i + 1}`}`).join('\n');
 }
 
 /** Part of a frame kept by a crop, as shares cut from each side (0..1). */
@@ -577,6 +595,8 @@ export interface RenderSpec {
   gradeLuts?: Record<string, string>;  // clip/layer id -> baked .cube file (written by the caller from bakeCube)
   /** Captions and text drawn by the app itself (PNG frames + ffconcat list), placed at x/y. Replaces the .ass file. */
   overlay?: { list: string; x: number; y: number };
+  /** Export only this part of the timeline (In/Out). */
+  range?: { inMs: number; outMs: number };
 }
 
 /** Colour (baked LUT) for a clip or layer, run on its own pixels. */
@@ -832,6 +852,11 @@ export function renderArgs(spec: RenderSpec): string[] {
     aOut = 'mix';
   }
 
+  if (spec.range) {
+    const a = (Math.max(0, spec.range.inMs) / 1000).toFixed(3), b = (Math.min(total, spec.range.outMs) / 1000).toFixed(3);
+    f.push(`[${v}]trim=start=${a}:end=${b},setpts=PTS-STARTPTS[rgv]`, `[${aOut}]atrim=start=${a}:end=${b},asetpts=PTS-STARTPTS[rga]`);
+    v = 'rgv'; aOut = 'rga';
+  }
   args.push('-filter_complex', f.join(';'), '-map', `[${v}]`, '-map', `[${aOut}]`,
     ...encoderArgs(spec.encoder, spec.bitrateK, spec.quality ?? 1),
     '-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart', spec.outPath);

@@ -7,7 +7,7 @@ import {
   DEFAULT_CAPTION, DEFAULT_TEXT, clipDuration, clipStarts, locate, splitAt, timelineDuration,
   type CaptionLine, type ImageItem, type Watermark, type SoundItem, type TextItem, type TextStyle, type Trans, type VideoClip, type Word,
   transState, TRANS_IN_MS, textAnimState, unitOf, wordPulse, fadesOf, fadeGain, MUSIC_FADE_IN, MUSIC_FADE_OUT, wordScale, wordColor, lineAnimOf, SHOUT_COLOR, type WordFx, type TextAnim, type CapAnim, clipFx, removePauses, remapItems, invertRanges, DUCK_LEVEL,
-  type ClipTrans, type Duck, type MusicItem, type Range, type VideoLayer, type Crop, NO_CROP, cropSize,
+  type ClipTrans, type Duck, type MusicItem, type Range, type VideoLayer, type Crop, NO_CROP, cropSize, type Marker, youtubeChapters,
 } from './render';
 import {
   IMAGE_EXT, SOUND_EXT, VIDEO_MEME_EXT, addVideoMeme, categoriesOf, deleteMeme, deletePad, deleteVideoMeme, importFiles as importLibFiles, loadLibrary, move, saveLibrary, soundOf,
@@ -753,6 +753,8 @@ function toggleHelp() {
     ['Ctrl + [ / ]', 'Layer ke belakang / depan'], ['Ctrl + B', 'Split di playhead'], ['Delete', 'Hapus yang dipilih'],
     ['Ctrl + Z / Ctrl + Y', 'Urungkan / ulangi'], ['Ctrl + S', 'Simpan + salinan versi'], ['Ctrl + E', 'Ekspor'], ['Ctrl + Alt + C', 'Ukuran kanvas'],
     ['Tahan \\', 'Bandingkan tanpa warna'], ['← / →', 'Mundur / maju 1 frame (Shift: 1 detik)'], ['Ctrl + A', 'Pilih semua item'],
+    ['J / K / L', 'Putar mundur / stop / maju (tekan lagi: 2×, 4×, 8×)'], ['M', 'Marker (M lagi: ganti nama)'], ['Shift + M / Ctrl + Shift + M', 'Ke marker berikut / sebelumnya'],
+    ['I / O', 'Set In / Out (Shift: loncat ke sana)'], ['Ctrl + Shift + X', 'Hapus In/Out'], ['Q / W', 'Buang awal / sisa potongan sampai playhead'],
     ['Klik kanan', 'Menu di timeline dan preview'], ['Ctrl + 0', 'Muat seluruh timeline'], ['Esc', 'Batal pilih / stop preview suara'],
   ];
 
@@ -1665,7 +1667,8 @@ function setFade(kind: FadeKind, id: string, which: 'in' | 'out' | 'none', ms = 
 /** Right-click on the timeline: actions for what is under the pointer (or the picked group). */
 function timelineMenu(e: MouseEvent, x: number, y: number) {
   if (!P) return;
-  const hit = y >= RULER ? hitTest(x, y) : null;
+  if (y < RULER) { rulerMenu(e, x); return; }
+  const hit = hitTest(x, y);
   if (hit && !hit.marker && !isSelected(hit.kind, hit.id)) { multi.clear(); sel = { kind: hit.kind, id: hit.id }; renderInspector(); drawTimeline(); renderFrame(); }
   if (!hit && !multi.size) { sel = null; renderInspector(); drawTimeline(); }
   selectionMenu(e, Math.max(0, xToMs(x)));
@@ -1852,7 +1855,7 @@ function syncVideo() {
   if (activeVideo && activeVideo !== v) activeVideo.pause();
   activeVideo = v;
   activeIndex = loc.index;
-  v.playbackRate = c.speed;
+  v.playbackRate = Math.min(16, c.speed * playRate());
   v.volume = clamp(c.volume, 0, 1);
   if (Math.abs(v.currentTime * 1000 - loc.sourceMs) > 40) v.currentTime = loc.sourceMs / 1000;
 }
@@ -1870,7 +1873,7 @@ function seek(ms: number) {
   updateTime();
 }
 
-function togglePlay() { if (playing) pause(); else play(); }
+function togglePlay() { if (reverseTimer) { stopReverse(); shuttle = 0; showSpeed(); return; } if (playing) pause(); else play(); }
 
 let clock: { at: number; t: number } | null = null;   // playback clock when no main video drives time
 function play() {
@@ -1888,6 +1891,7 @@ function play() {
 
 function pause() {
   playing = false;
+  if (shuttle > 0) { shuttle = 0; showSpeed(); }
   activeVideo?.pause();
   sfxEls.forEach((a) => a.pause());
   musicEls.forEach((a) => a.pause());
@@ -1923,7 +1927,7 @@ function tickInner() {
     }
   } else if (clock) {
     // blank canvas (no main video): time runs on the clock
-    t = clock.t + (performance.now() - clock.at);
+    t = clock.t + (performance.now() - clock.at) * playRate();
     if (t >= timelineDuration(tl())) { t = timelineDuration(tl()); pause(); }
   }
   // keep the playhead in view
@@ -2883,6 +2887,8 @@ function drawTimelineInner() {
     grad.addColorStop(0, 'rgba(0,0,0,0)'); grad.addColorStop(1, 'rgba(0,0,0,.7)');
     ctx.fillStyle = grad;
     ctx.fillRect(x, lm.y + lm.h - 22, w, 22);
+    const wv = m?.hasAudio ? waveOf(m.playable) : undefined;
+    if (wv) drawWave(ctx, wv, x, lm.y + lm.h - 26, w, 24, W, (dx) => c.inMs + (dx / pxPerSec) * 1000 * c.speed, 'rgba(126,232,214,.55)');
     ctx.fillStyle = '#f2f4f1';
     ctx.font = `600 10px ${TL_FONT}`;
     const label = `${c.speed !== 1 ? `${c.speed}× · ` : ''}${tc(clipDuration(c), true)}`;
@@ -2966,6 +2972,8 @@ function drawTimelineInner() {
     const xx = msToX(mu.startMs), w = (mu.lengthMs / 1000) * pxPerSec;
     if (xx + w < 0 || xx > W) continue;
     capsule(ctx, 'music', xx, ln.y, w, ln.h, isSelected('music', mu.id), `${mu.name}${mu.duck !== 'off' ? '  · ducking' : ''}`);
+    const mw = waveOf(mu.file);
+    if (mw) drawWave(ctx, mw, xx, ln.y + 3, w, ln.h - 6, W, (dx) => mu.inMs + (dx / pxPerSec) * 1000, 'rgba(255,255,255,.16)');
     drawFades(ctx, 'music', mu.id, xx, ln.y, Math.min(w, ((timelineDuration(tl()) - mu.startMs) / 1000) * pxPerSec), ln.h, isSelected('music', mu.id) && !multi.size);
   }
 
@@ -2975,6 +2983,8 @@ function drawTimelineInner() {
     const xx = msToX(sn.startMs), w = (sn.lengthMs / 1000) * pxPerSec;
     if (xx + w < 0 || xx > W) continue;
     capsule(ctx, 'sound', xx, ln.y, w, ln.h, isSelected('sound', sn.id), sn.name);
+    const sw = waveOf(sn.file);
+    if (sw) drawWave(ctx, sw, xx, ln.y + 3, w, ln.h - 6, W, (dx) => (dx / pxPerSec) * 1000, 'rgba(255,255,255,.16)');
     drawFades(ctx, 'sound', sn.id, xx, ln.y, w, ln.h, isSelected('sound', sn.id) && !multi.size);
   }
 
@@ -2993,6 +3003,8 @@ function drawTimelineInner() {
     ctx.strokeRect(mx + 0.5, my + 0.5, Math.abs(marquee.x1 - marquee.x0), Math.abs(marquee.y1 - marquee.y0));
     ctx.setLineDash([]);
   }
+
+  drawMarkersAndRange(ctx, W, H);
 
   // playhead
   const px = msToX(t);
@@ -3136,6 +3148,8 @@ function snapMs(ms: number, ignoreId?: string): number {
   for (const x of images()) if (x.id !== ignoreId) pts.push(x.startMs, x.endMs);
   for (const x of sounds()) if (x.id !== ignoreId) pts.push(x.startMs, soundEnd(x));
   for (const x of music()) if (x.id !== ignoreId) pts.push(x.startMs, x.startMs + x.lengthMs);
+  for (const m of markers()) pts.push(m.ms);
+  if (tl().range) pts.push(tl().range!.inMs, tl().range!.outMs);
   const tol = (8 / pxPerSec) * 1000;
   let best = ms, d = tol;
   for (const p of pts) if (Math.abs(p - ms) < d) { d = Math.abs(p - ms); best = p; }
@@ -3169,7 +3183,7 @@ function setupTimeline() {
     if (!P || e.button === 2) return;
     const { x, y } = pos(e);
     tlCanvas.setPointerCapture(e.pointerId);
-    if (y < RULER) { drag = { mode: 'scrub' }; seek(xToMs(x)); return; }
+    if (y < RULER) { drag = { mode: 'scrub' }; const mk = markerAtX(x); seek(mk ? mk.ms : xToMs(x)); return; }
     const fh = fadeHandles.find((q) => Math.hypot(q.x - x, q.y - y) <= 8);
     if (fh && e.button === 0) { snapshot(); drag = { mode: 'fade', kind: fh.kind, id: fh.id, which: fh.which }; return; }
     const hit = hitTest(x, y);
@@ -5009,6 +5023,10 @@ function renderExport() {
     h('div', { class: 'muted small' }, `${tl().width}×${tl().height} · ${tl().fps} fps · MP4 H.264 · ${tc(d, true)}`),
     d > 180000 ? h('div', { class: 'warn small' }, 'Lebih dari 3 menit: YouTube Shorts membatasi 3 menit. TikTok masih bisa.') : h('span'),
     qualityBlock(d),
+    rangeNow() ? h('label', { class: 'switch-row' },
+      h('input', { type: 'checkbox', checked: exportRangeOnly, onchange: (e: Event) => { exportRangeOnly = (e.target as HTMLInputElement).checked; } }),
+      h('span', {}, `Hanya bagian In–Out (${tc(rangeNow()!.outMs - rangeNow()!.inMs, true)})`)) : h('span'),
+    markers().length ? h('button', { class: 'ghost small', onclick: () => void copyChapters() }, icon('copy', 14), ` Salin chapter YouTube (${markers().length} marker)`) : h('span'),
     h('div', { class: 'muted small' }, `Encoder: ${settings.encoder ? ENCODER_LABEL[settings.encoder] : 'mengecek…'}`),
     h('button', {
       class: 'ghost small path', title: settings.outDir,
@@ -5028,6 +5046,7 @@ function renderExport() {
           btn.disabled = true;
           await enqueueExport(P!, {
             outDir: settings.outDir, encoder: settings.encoder || (await detectEncoder()), fontScale, quality: settings.quality ?? 0.75, captionBreaks,
+            range: exportRangeOnly ? rangeNow() : null,
             renderOverlay: (dir) => renderOverlayTrack(dir, (f) => { btn.textContent = `Menyiapkan teks… ${Math.round(f * 100)}%`; }),
           }).finally(() => { btn.disabled = false; btn.textContent = 'Ekspor video'; });
         } catch (e) { toast((e as Error).message, 'error'); }
@@ -5038,6 +5057,7 @@ function renderExport() {
   renderQueue();
 }
 
+let exportRangeOnly = true;
 const QUALITY_STOPS: [number, string][] = [[0.5, 'Hemat'], [0.75, 'Shorts'], [1, 'Maksimal']];
 function qualityBlock(durMs: number): HTMLElement {
   const q = settings.quality ?? 0.75;
@@ -5121,6 +5141,245 @@ function renderQueue() {
   for (const j of done) { (j as { notified?: boolean }).notified = true; toast(`Selesai: ${j.outPath.split('\\').pop()}`); }
 }
 
+// ================= Premiere-style tools: markers, In/Out, J/K/L, Q/W, waveforms =================
+
+const MARKER_COLORS: [string, string][] = [['#3cc3b3', 'Tosca'], ['#ffb020', 'Kuning'], ['#ff5c7a', 'Merah'], ['#7c8cff', 'Ungu'], ['#7ddc6a', 'Hijau']];
+const markers = () => (tl().markers ??= []);
+const markerAtX = (x: number) => markers().find((m) => Math.abs(msToX(m.ms) - x) <= 6);
+
+function addMarker() {
+  if (!P) return;
+  const near = markers().find((m) => Math.abs(m.ms - t) < 1000 / tl().fps);
+  if (near) { void renameMarker(near); return; }
+  snapshot();
+  markers().push({ id: uid(), ms: Math.round(t), label: `Marker ${markers().length + 1}`, color: MARKER_COLORS[0][0] });
+  markers().sort((a, b) => a.ms - b.ms);
+  changed();
+  toast('Marker ditambah. Tekan M lagi di tempat yang sama untuk ganti nama.');
+}
+function jumpMarker(dir: 1 | -1) {
+  if (!P) return;
+  const ms = markers().map((m) => m.ms);
+  const r = tl().range;
+  if (r) ms.push(r.inMs, r.outMs);
+  const next = dir > 0 ? ms.filter((m) => m > t + 1).sort((a, b) => a - b)[0] : ms.filter((m) => m < t - 1).sort((a, b) => b - a)[0];
+  if (next === undefined) { toast(dir > 0 ? 'Tidak ada marker sesudah ini.' : 'Tidak ada marker sebelum ini.'); return; }
+  pause();
+  seek(next);
+}
+async function renameMarker(m: Marker, at?: { x: number; y: number }) {
+  const pos = at ?? (() => { const r = tlCanvas.getBoundingClientRect(); return { x: r.left + msToX(m.ms), y: r.top + RULER + 4 }; })();
+  const name = await askText(pos.x, pos.y, 'Nama marker', m.label);
+  if (name === null) return;
+  snapshot();
+  m.label = name.trim() || m.label;
+  changed();
+}
+function markerMenu(e: MouseEvent, m: Marker) {
+  openMenu(e.clientX, e.clientY, [
+    { label: 'Ganti nama…', icon: 'text', run: () => void renameMarker(m, { x: e.clientX, y: e.clientY }) },
+    { label: 'Loncat ke sini', icon: 'forward', run: () => seek(m.ms) },
+    'sep',
+    ...MARKER_COLORS.map(([c, n]) => ({ label: `Warna ${n}${m.color === c ? '  ✓' : ''}`, icon: 'color' as IconName, run: () => { snapshot(); m.color = c; changed(); } })),
+    'sep',
+    { label: 'Hapus marker', icon: 'trash', danger: true, run: () => { snapshot(); tl().markers = markers().filter((x) => x.id !== m.id); changed(); } },
+    { label: 'Hapus semua marker', icon: 'trash', danger: true, disabled: markers().length < 2, run: () => { snapshot(); tl().markers = []; changed(); } },
+  ]);
+}
+function rulerMenu(e: MouseEvent, x: number) {
+  const m = markerAtX(x);
+  if (m) { markerMenu(e, m); return; }
+  const ms = Math.max(0, xToMs(x));
+  const r = tl().range;
+  openMenu(e.clientX, e.clientY, [
+    { label: 'Tambah marker di sini', icon: 'plus', keys: 'M', run: () => { seek(ms); addMarker(); } },
+    { label: 'Set In di sini', icon: 'fadeIn', keys: 'I', run: () => setRange('in', ms) },
+    { label: 'Set Out di sini', icon: 'fadeOut', keys: 'O', run: () => setRange('out', ms) },
+    { label: 'Hapus In/Out', icon: 'x', keys: 'Ctrl+Shift+X', disabled: !r, run: () => setRange('clear') },
+    'sep',
+    { label: 'Salin chapter YouTube', icon: 'copy', disabled: !markers().length, run: () => void copyChapters() },
+  ]);
+}
+
+/** A small text box at the pointer; resolves with the text, or null on Esc / click away. */
+function askText(x: number, y: number, title: string, value: string): Promise<string | null> {
+  return new Promise((resolve) => {
+    document.querySelector('.ask-pop')?.remove();
+    const input = h('input', { type: 'text', value, 'aria-label': title }) as HTMLInputElement;
+    const pop = h('div', { class: 'ask-pop' }, h('div', { class: 'muted small' }, title), input);
+    document.body.append(pop);
+    const r = pop.getBoundingClientRect();
+    pop.style.left = `${Math.min(x, window.innerWidth - r.width - 8)}px`;
+    pop.style.top = `${Math.min(y, window.innerHeight - r.height - 8)}px`;
+    let done = false;
+    const finish = (v: string | null) => { if (done) return; done = true; pop.remove(); window.removeEventListener('pointerdown', away, true); resolve(v); };
+    const away = (e: Event) => { if (!(e.target as HTMLElement).closest?.('.ask-pop')) finish(input.value); };
+    input.addEventListener('keydown', (e) => {
+      e.stopPropagation();
+      if (e.key === 'Enter') finish(input.value);
+      if (e.key === 'Escape') finish(null);
+    });
+    setTimeout(() => { window.addEventListener('pointerdown', away, true); input.focus(); input.select(); }, 0);
+  });
+}
+
+async function copyChapters() {
+  const r = tl().range;
+  const text = youtubeChapters(markers().filter((m) => !r || (m.ms >= r.inMs && m.ms < r.outMs)), r?.inMs ?? 0);
+  if (!text) { toast('Belum ada marker. Tekan M di awal tiap bagian video.'); return; }
+  try { await navigator.clipboard.writeText(text); toast('Chapter YouTube disalin. Tempel di deskripsi video.'); }
+  catch { void askText(window.innerWidth / 2 - 160, 120, 'Salin chapter ini (Ctrl+C)', text); }
+}
+
+function setRange(which: 'in' | 'out' | 'clear', at = t) {
+  if (!P) return;
+  snapshot();
+  const total = timelineDuration(tl());
+  const r = tl().range ?? { inMs: 0, outMs: total };
+  if (which === 'clear') tl().range = null;
+  else {
+    if (which === 'in') r.inMs = Math.round(clamp(at, 0, total));
+    else r.outMs = Math.round(clamp(at, 0, total));
+    if (r.outMs - r.inMs < 100) { if (which === 'in') r.outMs = total; else r.inMs = 0; }
+    tl().range = r;
+  }
+  changed();
+  if (which !== 'clear') toast(`In/Out: ${tc(tl().range!.inMs, true)} – ${tc(tl().range!.outMs, true)} (${tc(tl().range!.outMs - tl().range!.inMs, true)})`);
+}
+/** In/Out clamped to the current timeline, or null when not set. */
+function rangeNow(): { inMs: number; outMs: number } | null {
+  const r = tl().range;
+  if (!r) return null;
+  const total = timelineDuration(tl());
+  const a = clamp(r.inMs, 0, total), b = clamp(r.outMs, 0, total);
+  return b - a >= 100 && (a > 0 || b < total) ? { inMs: a, outMs: b } : null;
+}
+
+// J / K / L: play backwards, stop, play forwards; press again for 2x, 4x, 8x
+let shuttle = 0;
+let reverseTimer = 0;
+const playRate = () => Math.max(1, shuttle);
+function stopReverse() { if (reverseTimer) { clearInterval(reverseTimer); reverseTimer = 0; } }
+function shuttleKey(k: 'j' | 'k' | 'l') {
+  if (!P) return;
+  if (k === 'k') { stopReverse(); pause(); shuttle = 0; showSpeed(); return; }
+  if (k === 'l') {
+    stopReverse();
+    const next = playing && shuttle > 0 ? Math.min(8, shuttle * 2) : 1;
+    if (!playing) play();
+    shuttle = next;
+    clock = { at: performance.now(), t };
+    syncVideo();
+  } else {
+    const next = reverseTimer && shuttle < 0 ? Math.max(-8, shuttle * 2) : -1;
+    pause();
+    shuttle = next;
+    stopReverse();
+    let last = performance.now();
+    reverseTimer = window.setInterval(() => {
+      const now = performance.now();
+      const nt = t - (now - last) * -shuttle;
+      last = now;
+      if (nt <= 0) { seek(0); stopReverse(); shuttle = 0; return; }
+      seek(nt);
+    }, 60);
+  }
+  showSpeed();
+}
+function showSpeed() {
+  const el = $('#time');
+  if (!el) return;
+  el.dataset.speed = shuttle && Math.abs(shuttle) !== 1 || shuttle < 0 ? `${shuttle < 0 ? '◀ ' : ''}${Math.abs(shuttle)}×` : '';
+}
+
+/** Q / W: cut the main clip under the playhead from its start (Q) or to its end (W), closing the gap. */
+function rippleTrim(which: 'start' | 'end') {
+  if (!P) return;
+  const loc = locate(tl().clips, t);
+  if (!loc) { toast('Taruh playhead di atas video utama.'); return; }
+  const c = tl().clips[loc.index];
+  const start = clipStarts(tl().clips)[loc.index];
+  const off = t - start, len = clipDuration(c);
+  if (off < 50 || len - off < 50) { toast('Playhead terlalu dekat dengan ujung potongan.'); return; }
+  pause();
+  const before = clipMap();
+  snapshot();
+  if (which === 'start') c.inMs = Math.round(c.inMs + off * c.speed);
+  else c.outMs = Math.round(c.inMs + off * c.speed);
+  followMainTrack(before);
+  changed();
+  seek(which === 'start' ? start : t);
+  toast(which === 'start' ? `Awal potongan dibuang (${tc(off, true)}).` : `Sisa potongan dibuang (${tc(len - off, true)}).`);
+}
+
+// waveforms of the audio on the timeline, one peak per 100 ms, loaded once per file
+const waves = new Map<string, Uint8Array | null>();
+function waveOf(path: string): Uint8Array | undefined {
+  if (!path) return undefined;
+  if (waves.has(path)) return waves.get(path) ?? undefined;
+  waves.set(path, null);
+  invoke<number[]>('waveform', { path, track: 0, job: `wave-${uid()}` })
+    .then((pk) => { if (pk?.length) { waves.set(path, Uint8Array.from(pk)); drawTimeline(); } })
+    .catch(() => undefined);
+  return undefined;
+}
+/** Bars from the bottom of a box; `srcAt(dx)` gives the file time (ms) at dx pixels into the box. */
+function drawWave(ctx: CanvasRenderingContext2D, peaks: Uint8Array, x: number, y: number, w: number, hgt: number, viewW: number, srcAt: (dx: number) => number, color: string) {
+  const x0 = Math.max(x, 0), x1 = Math.min(x + w, viewW);
+  if (x1 <= x0) return;
+  ctx.save();
+  ctx.beginPath(); ctx.rect(x0, y, x1 - x0, hgt); ctx.clip();
+  ctx.fillStyle = color;
+  for (let px = Math.floor(x0); px < x1; px += 2) {
+    const a = Math.floor(srcAt(px - x) / 100), b = Math.floor(srcAt(px + 2 - x) / 100);
+    let pk = 0;
+    for (let i = Math.max(0, a); i <= Math.max(a, b) && i < peaks.length; i++) if (peaks[i] > pk) pk = peaks[i];
+    const bh = Math.max(1, (pk / 255) * hgt);
+    ctx.fillRect(px, y + hgt - bh, 1.5, bh);
+  }
+  ctx.restore();
+}
+
+/** Markers and In/Out on the ruler, with thin lines down through the lanes. */
+function drawMarkersAndRange(ctx: CanvasRenderingContext2D, W: number, H: number) {
+  const r = tl().range;
+  if (r) {
+    const a = msToX(r.inMs), b = msToX(r.outMs);
+    ctx.fillStyle = 'rgba(0,0,0,.38)';
+    if (a > 0) ctx.fillRect(0, RULER, Math.min(a, W), H - RULER);
+    if (b < W) ctx.fillRect(Math.max(0, b), RULER, W - Math.max(0, b), H - RULER);
+    ctx.fillStyle = 'rgba(60,195,179,.22)';
+    ctx.fillRect(a, 0, b - a, RULER - 1);
+    ctx.fillStyle = '#3cc3b3';
+    ctx.fillRect(a, 0, 2, H); ctx.fillRect(b - 2, 0, 2, H);
+    ctx.font = `700 9px ${TL_FONT}`;
+    ctx.fillStyle = '#0f1414';
+    roundRect(ctx, a, 2, 12, 11, 3); ctx.fillStyle = '#3cc3b3'; ctx.fill();
+    roundRect(ctx, b - 12, 2, 12, 11, 3); ctx.fill();
+    ctx.fillStyle = '#0f1414';
+    ctx.fillText('I', a + 4.5, 8); ctx.fillText('O', b - 9.5, 8);
+  }
+  for (const m of markers()) {
+    const x = msToX(m.ms);
+    if (x < -80 || x > W + 4) continue;
+    ctx.fillStyle = m.color;
+    ctx.globalAlpha = 0.35;
+    ctx.fillRect(x, RULER, 1, H - RULER);
+    ctx.globalAlpha = 1;
+    ctx.beginPath();
+    ctx.moveTo(x - 5, RULER - 15); ctx.lineTo(x + 5, RULER - 15); ctx.lineTo(x + 5, RULER - 6); ctx.lineTo(x, RULER - 1); ctx.lineTo(x - 5, RULER - 6); ctx.closePath();
+    ctx.fill();
+    if (pxPerSec > 12 || markers().length < 12) {
+      ctx.font = `600 10px ${TL_FONT}`;
+      const tw = Math.min(140, ctx.measureText(m.label).width + 8);
+      ctx.fillStyle = 'rgba(18,20,20,.9)';
+      roundRect(ctx, x + 7, RULER - 16, tw, 13, 3); ctx.fill();
+      ctx.fillStyle = m.color;
+      ctx.fillText(m.label, x + 11, RULER - 9.5, tw - 8);
+    }
+  }
+}
+
 // ================= keyboard =================
 
 function onKey(e: KeyboardEvent) {
@@ -5143,6 +5402,8 @@ function onKey(e: KeyboardEvent) {
   if (ctrl && e.key.toLowerCase() === 'j') { e.preventDefault(); duplicateSelection(); return; }
   if (ctrl && e.key.toLowerCase() === 't') { e.preventDefault(); startTransform('transform'); return; }
   if (ctrl && e.altKey && e.key.toLowerCase() === 'c') { e.preventDefault(); toggleCanvasPop(); return; }
+  if (ctrl && e.shiftKey && e.key.toLowerCase() === 'm') { e.preventDefault(); jumpMarker(-1); return; }
+  if (ctrl && e.shiftKey && e.key.toLowerCase() === 'x') { e.preventDefault(); setRange('clear'); return; }
   if (ctrl && ['u', 'l', 'm'].includes(e.key.toLowerCase())) { e.preventDefault(); switchTab('color'); return; }
   if (ctrl && e.key.toLowerCase() === 'e') { e.preventDefault(); toggleExport(); return; }
   if (ctrl && e.key.toLowerCase() === 's') { e.preventDefault(); void saveNow(); return; }
@@ -5169,6 +5430,18 @@ function onKey(e: KeyboardEvent) {
     if (e.shiftKey) { const m = library.memes[n]; if (m) { e.preventDefault(); insertMeme(m); } }
     else { const pad = library.pads[n]; if (pad) { e.preventDefault(); insertSound(pad); } }
     return;
+  }
+  if (!ctrl && !e.altKey) {
+    const key = e.key.toLowerCase();
+    if (key === 'm') { e.preventDefault(); if (e.shiftKey) jumpMarker(1); else addMarker(); return; }
+    if (key === 'i' || key === 'o') {
+      e.preventDefault();
+      if (e.shiftKey) { const r = tl().range; if (r) { pause(); seek(key === 'i' ? r.inMs : r.outMs); } }
+      else setRange(key === 'i' ? 'in' : 'out');
+      return;
+    }
+    if ((key === 'j' || key === 'k' || key === 'l') && !e.repeat) { e.preventDefault(); shuttleKey(key); return; }
+    if ((key === 'q' || key === 'w') && !e.shiftKey) { e.preventDefault(); rippleTrim(key === 'q' ? 'start' : 'end'); return; }
   }
   if ((e.key === 'c' || e.key === 'C') && !ctrl && !e.altKey) { if (tab === 'crop' && cropMode) { cropMode = false; renderInspector(); renderFrame(); } else startTransform('crop'); return; }
   if (e.key === 'Enter' && (cropMode || tfSession)) { endTransform(true); return; }

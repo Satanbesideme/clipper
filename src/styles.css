@@ -844,3 +844,10 @@ body.dragging .hp-hero { box-shadow: inset 0 0 0 2px rgba(91,214,200,.7); }
 .np-col { display: grid; gap: 8px; }
 .np-form .seg { background: var(--bg); }
 @media (max-width: 640px) { .np-options, .np-row { grid-template-columns: 1fr; } }
+
+/* ---------- v0.15: marker name box, shuttle speed, export options ---------- */
+.ask-pop { position: fixed; z-index: 80; display: grid; gap: 6px; padding: 10px; min-width: 240px; background: var(--panel-2, #1d2020); border: 1px solid rgba(255,255,255,.1); border-radius: 12px; box-shadow: 0 14px 40px rgba(0,0,0,.45); }
+.ask-pop input { width: 100%; }
+#time[data-speed]:not([data-speed=""])::after { content: attr(data-speed); margin-left: 8px; padding: 1px 6px; border-radius: 999px; background: #3cc3b3; color: #0f1414; font-weight: 700; font-size: 11px; }
+.switch-row { display: flex; align-items: center; gap: 8px; font-size: 12.5px; cursor: pointer; }
+.switch-row input { accent-color: #3cc3b3; }

@@ -440,6 +440,7 @@ async function uniquePath(dir: string, base: string): Promise<string> {
 }
 
 export async function enqueueExport(p: Project, opts: { outDir: string; encoder: Encoder; fontScale?: Record<string, number>; quality?: number; captionBreaks?: CaptionBreaks;
+  range?: { inMs: number; outMs: number } | null;
   /** Draws captions and text as frames with the app's own renderer (exactly like the preview); null = nothing to draw. */
   renderOverlay?: (dir: string) => Promise<{ list: string; x: number; y: number; dir: string } | null> }) {
   const tl: Timeline = structuredClone(p.timeline);
@@ -462,13 +463,13 @@ export async function enqueueExport(p: Project, opts: { outDir: string; encoder:
     const fs = opts.fontScale ?? {};
     await invoke('write_text', { path: assFile, content: buildAss(tl, (font, bold) => fs[`${font}|${bold ? 1 : 0}`] ?? 1, opts.captionBreaks) });
   }
-  const outPath = await uniquePath(opts.outDir, safeName(p.name));
+  const outPath = await uniquePath(opts.outDir, safeName(opts.range ? `${p.name} (bagian)` : p.name));
   const media = Object.fromEntries(p.media.map((m) => [m.id, m]));
   const quality = opts.quality ?? 0.75;
   const gradeLuts = await bakeGrades(tl, await projectDir(p.id), id);
-  const build = (encoder: Encoder) => renderArgs({ tl, media, encoder, bitrateK: qualityBitrate(tl.fps, quality, tl.width * tl.height), quality, assFile, fontsDir: FONTS_DIR, outPath, gradeLuts, overlay: overlay ?? undefined });
+  const build = (encoder: Encoder) => renderArgs({ tl, media, encoder, bitrateK: qualityBitrate(tl.fps, quality, tl.width * tl.height), quality, assFile, fontsDir: FONTS_DIR, outPath, gradeLuts, overlay: overlay ?? undefined, range: opts.range ?? undefined });
   const job: ExportJob = {
-    id, projectId: p.id, label: p.name, outPath, totalMs: timelineDuration(tl), progress: 0, status: 'queued', error: '',
+    id, projectId: p.id, label: p.name, outPath, totalMs: opts.range ? opts.range.outMs - opts.range.inMs : timelineDuration(tl), progress: 0, status: 'queued', error: '',
     args: build(opts.encoder), encoder: opts.encoder, build, assFile, extraFiles: [...Object.values(gradeLuts), ...(overlay ? [overlay.dir] : [])],
   };
   queue.push(job);
