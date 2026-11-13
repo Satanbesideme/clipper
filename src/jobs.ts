@@ -188,7 +188,7 @@ export function timelineWavArgs(clips: Timeline['clips'], media: Record<string, 
       src = `[${i}:a:${Math.min(tracks, n - 1)}]`;
     }
     f.push(m.hasAudio
-      ? `${src}asetpts=PTS-STARTPTS,${[...atempo(c.speed), 'aresample=16000', 'aformat=sample_fmts=s16:channel_layouts=mono', 'apad', `atrim=0:${dur}`].join(',')}[a${i}]`
+      ? `${src}aresample=async=1:min_hard_comp=0.01:first_pts=0,${[...atempo(c.speed), 'aresample=16000', 'aformat=sample_fmts=s16:channel_layouts=mono', 'apad', `atrim=0:${dur}`].join(',')}[a${i}]`
       : `anullsrc=r=16000:cl=mono,atrim=0:${dur},aformat=sample_fmts=s16:channel_layouts=mono[a${i}]`);
   });
   // voice clean-up: cut rumble and hiss, then lift quiet voices (a friend on Discord) to the same level as loud ones
@@ -439,7 +439,9 @@ async function uniquePath(dir: string, base: string): Promise<string> {
   return p;
 }
 
-export async function enqueueExport(p: Project, opts: { outDir: string; encoder: Encoder; fontScale?: Record<string, number>; quality?: number; captionBreaks?: CaptionBreaks }) {
+export async function enqueueExport(p: Project, opts: { outDir: string; encoder: Encoder; fontScale?: Record<string, number>; quality?: number; captionBreaks?: CaptionBreaks;
+  /** Draws captions and text as frames with the app's own renderer (exactly like the preview); null = nothing to draw. */
+  renderOverlay?: (dir: string) => Promise<{ list: string; x: number; y: number; dir: string } | null> }) {
   const tl: Timeline = structuredClone(p.timeline);
   if (!timelineDuration(tl)) throw new Error('Timeline masih kosong. Tambahkan video, layer, teks, atau musik dulu.');
   tl.texts = tl.texts.map((t) => ({ ...t, text: stripEmoji(t.text) })).filter((t) => t.text);
@@ -447,7 +449,15 @@ export async function enqueueExport(p: Project, opts: { outDir: string; encoder:
   await invoke('ensure_dir', { path: opts.outDir });
   const id = uid();
   let assFile: string | undefined;
-  if (tl.texts.length || tl.captions.lines.length) {
+  let overlay: { list: string; x: number; y: number; dir: string } | null = null;
+  if (opts.renderOverlay && (tl.texts.length || tl.captions.lines.length)) {
+    const dir = join(await projectDir(p.id), `export-${id}-text`);
+    try { overlay = await opts.renderOverlay(dir); } catch (e) {
+      console.warn('overlay render failed, using subtitles instead', e);
+      await invoke('remove_path', { path: dir }).catch(() => undefined);
+    }
+  }
+  if (!overlay && (tl.texts.length || tl.captions.lines.length)) {
     assFile = join(await projectDir(p.id), `export-${id}.ass`);
     const fs = opts.fontScale ?? {};
     await invoke('write_text', { path: assFile, content: buildAss(tl, (font, bold) => fs[`${font}|${bold ? 1 : 0}`] ?? 1, opts.captionBreaks) });
@@ -456,10 +466,10 @@ export async function enqueueExport(p: Project, opts: { outDir: string; encoder:
   const media = Object.fromEntries(p.media.map((m) => [m.id, m]));
   const quality = opts.quality ?? 0.75;
   const gradeLuts = await bakeGrades(tl, await projectDir(p.id), id);
-  const build = (encoder: Encoder) => renderArgs({ tl, media, encoder, bitrateK: qualityBitrate(tl.fps, quality, tl.width * tl.height), quality, assFile, fontsDir: FONTS_DIR, outPath, gradeLuts });
+  const build = (encoder: Encoder) => renderArgs({ tl, media, encoder, bitrateK: qualityBitrate(tl.fps, quality, tl.width * tl.height), quality, assFile, fontsDir: FONTS_DIR, outPath, gradeLuts, overlay: overlay ?? undefined });
   const job: ExportJob = {
     id, projectId: p.id, label: p.name, outPath, totalMs: timelineDuration(tl), progress: 0, status: 'queued', error: '',
-    args: build(opts.encoder), encoder: opts.encoder, build, assFile, extraFiles: Object.values(gradeLuts),
+    args: build(opts.encoder), encoder: opts.encoder, build, assFile, extraFiles: [...Object.values(gradeLuts), ...(overlay ? [overlay.dir] : [])],
   };
   queue.push(job);
   onChange();

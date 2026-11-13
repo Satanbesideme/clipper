@@ -2136,72 +2136,97 @@ function renderFrameInner() {
       ctx.globalAlpha = 1;
     }
   }
+  drawOverlays(ctx, overlayPlan(t, W, H, k), k, true);
+  drawSafeGuide(ctx, W, H);
+}
+
+type AnimSt = ReturnType<typeof textAnimState>;
+/** What the captions and text look like at one moment: plain data, so the export can tell when a frame changes. */
+type OverlayPlan = {
+  cap?: { id: string; lines: Seg[][]; cx: number; cy: number; dy: number; style: TextStyle; an: AnimSt };
+  texts: { id: string; full: Seg[][]; shown: Seg[][] | null; cx: number; cy: number; dy: number; style: TextStyle; an: AnimSt }[];
+};
+
+function overlayPlan(tt: number, W: number, H: number, k: number): OverlayPlan {
+  const plan: OverlayPlan = { texts: [] };
   const cap = tl().captions;
-  const line = cap.lines.find((l) => t >= l.startMs && t < l.endMs);
+  const line = cap.lines.find((l) => tt >= l.startMs && tt < l.endMs);
   if (line) {
     const anim: CapAnim = lineAnimOf(line, cap);
     let active = -1;
-    line.words.forEach((w, i) => { if (t >= w.startMs) active = i; });
+    line.words.forEach((w, i) => { if (tt >= w.startMs) active = i; });
     const segs: Seg[] = line.words.map((w, i) => ({
       text: cap.caps ? w.text.toLocaleUpperCase('id-ID') : w.text,
       color: wordColor(w, i === active, cap),
-      scale: wordScale(w.fx, anim, i === active, i <= active ? t - Math.max(line.startMs, w.startMs) : -1),
+      scale: wordScale(w.fx, anim, i === active, i <= active ? tt - Math.max(line.startMs, w.startMs) : -1),
       hidden: anim === 'word' && i > active,
     }));
-    const lines = rowsByBreaks(segs, captionBreaks(line));
     // line entrance/exit like the export: pop, fade, rise and shake reuse the text animation curves
     const entrance = anim === 'pop' || anim === 'fade' || anim === 'rise' || anim === 'shake' ? anim : 'none';
-    const an = textAnimState(entrance, t - line.startMs, line.endMs - line.startMs, 0);
-    const cx = W / 2, cy = cap.y * H;
-    ctx.save(); ctx.globalAlpha = 0;
-    const b = drawText(ctx, lines, cx, cy, cap.style, k);
-    ctx.restore();
-    if (an.alpha > 0.01) {
-      ctx.save();
-      ctx.globalAlpha = an.alpha;
-      ctx.translate(cx, cy + an.dy * (60 / 90) * k);
-      if (an.rot) ctx.rotate((-an.rot * Math.PI) / 180);
-      ctx.scale(an.scale, an.scale);
-      ctx.translate(-cx, -cy);
-      drawText(ctx, lines, cx, cy, cap.style, k);
-      ctx.restore();
-    }
-    boxes.push({ kind: 'captions', id: line.id, ...b });
+    const an = textAnimState(entrance, tt - line.startMs, line.endMs - line.startMs, 0);
+    plan.cap = { id: line.id, lines: rowsByBreaks(segs, captionBreaks(line)), cx: W / 2, cy: cap.y * H, dy: an.dy * (60 / 90) * k, style: cap.style, an };
   }
-  drawSafeGuide(ctx, W, H);
+  measureCtx ??= document.createElement('canvas').getContext('2d');
+  const mctx = measureCtx!;
   for (const x of tl().texts) {
-    if (t < x.startMs || t >= x.endMs || !x.text.trim()) continue;
-    const toLines = (txt: string) => txt.split('\n').flatMap((l) => wrapSegs(ctx, l.split(/\s+/).filter(Boolean).map((w) => ({ text: w, color: x.style.color })), x.style, k, W - 120 * k));
-    const full = toLines(x.text);
+    if (tt < x.startMs || tt >= x.endMs || !x.text.trim()) continue;
+    const full = x.text.split('\n').flatMap((l) => wrapSegs(mctx, l.split(/\s+/).filter(Boolean).map((w) => ({ text: w, color: x.style.color })), x.style, k, W - 120 * k));
     const total = [...x.text].filter((c) => c !== '\n').length;
-    const an = textAnimState(x.anim, t - x.startMs, x.endMs - x.startMs, total);
-    // the box for selecting/dragging is the full, still text; the drawing below may be animated
-    ctx.save(); ctx.globalAlpha = 0;
-    const b = drawText(ctx, full, x.x * W, x.y * H, x.style, k);
-    ctx.restore();
-    if (an.alpha > 0.01) {
+    const an = textAnimState(x.anim, tt - x.startMs, x.endMs - x.startMs, total);
+    let shown: Seg[][] | null = null;
+    if (an.chars < total) {
+      // typewriter: keep the final layout, draw only the characters revealed so far
+      let left = an.chars;
+      shown = full.map((ln) => ln.map((seg) => {
+        const take = Math.max(0, Math.min(seg.text.length, left));
+        left -= seg.text.length;
+        return { ...seg, text: seg.text.slice(0, take) };
+      }));
+    }
+    plan.texts.push({ id: x.id, full, shown, cx: x.x * W, cy: x.y * H, dy: an.dy * k, style: x.style, an });
+  }
+  return plan;
+}
+
+/** Draws a plan. With `ui`, also records hit boxes and outlines the selected text. */
+function drawOverlays(ctx: CanvasRenderingContext2D, plan: OverlayPlan, k: number, ui: boolean) {
+  const c = plan.cap;
+  if (c) {
+    if (ui) {
+      ctx.save(); ctx.globalAlpha = 0;
+      const b = drawText(ctx, c.lines, c.cx, c.cy, c.style, k);
+      ctx.restore();
+      boxes.push({ kind: 'captions', id: c.id, ...b });
+    }
+    if (c.an.alpha > 0.01) {
       ctx.save();
-      ctx.globalAlpha = an.alpha;
-      const cx = x.x * W, cy = x.y * H + an.dy * k;
-      ctx.translate(cx, cy);
-      if (an.rot) ctx.rotate((-an.rot * Math.PI) / 180);
-      ctx.scale(an.scale, an.scale);
-      ctx.translate(-cx, -cy);
-      let shown = full;
-      if (an.chars < total) {
-        // typewriter: keep the final layout, draw only the characters revealed so far
-        let left = an.chars;
-        shown = full.map((line) => line.map((seg) => {
-          const take = Math.max(0, Math.min(seg.text.length, left));
-          left -= seg.text.length;
-          return { ...seg, text: seg.text.slice(0, take) };
-        }));
-        drawTextFixed(ctx, full, shown, cx, cy, x.style, k);
-      } else {
-        drawText(ctx, shown, cx, cy, x.style, k);
-      }
+      ctx.globalAlpha = c.an.alpha;
+      ctx.translate(c.cx, c.cy + c.dy);
+      if (c.an.rot) ctx.rotate((-c.an.rot * Math.PI) / 180);
+      ctx.scale(c.an.scale, c.an.scale);
+      ctx.translate(-c.cx, -c.cy);
+      drawText(ctx, c.lines, c.cx, c.cy, c.style, k);
       ctx.restore();
     }
+  }
+  for (const x of plan.texts) {
+    if (x.an.alpha > 0.01) {
+      ctx.save();
+      ctx.globalAlpha = x.an.alpha;
+      const cx = x.cx, cy = x.cy + x.dy;
+      ctx.translate(cx, cy);
+      if (x.an.rot) ctx.rotate((-x.an.rot * Math.PI) / 180);
+      ctx.scale(x.an.scale, x.an.scale);
+      ctx.translate(-cx, -cy);
+      if (x.shown) drawTextFixed(ctx, x.full, x.shown, cx, cy, x.style, k);
+      else drawText(ctx, x.full, cx, cy, x.style, k);
+      ctx.restore();
+    }
+    if (!ui) continue;
+    // the box for selecting/dragging is the full, still text; the drawing above may be animated
+    ctx.save(); ctx.globalAlpha = 0;
+    const b = drawText(ctx, x.full, x.cx, x.cy, x.style, k);
+    ctx.restore();
     boxes.push({ kind: 'text', id: x.id, ...b });
     if (sel?.kind === 'text' && sel.id === x.id) {
       ctx.strokeStyle = '#37b8ac';
@@ -2211,6 +2236,105 @@ function renderFrameInner() {
       ctx.setLineDash([]);
     }
   }
+}
+
+/** Rough area a plan can paint (scaled words, outline, box and animation included), for cropping export frames. */
+function planBounds(ctx: CanvasRenderingContext2D, plan: OverlayPlan, k: number): { x0: number; y0: number; x1: number; y1: number } | null {
+  let r: { x0: number; y0: number; x1: number; y1: number } | null = null;
+  const add = (lines: Seg[][], cx: number, cy: number, dy: number, st: TextStyle, an: AnimSt) => {
+    const b = drawText(ctx, lines, cx, cy, st, k);
+    const segMax = Math.max(1, ...lines.flat().map((s) => s.scale ?? 1));
+    const sc = Math.max(1, an.scale) * segMax * (an.rot ? 1.25 : 1);
+    const pad = (st.outline * 2 + (st.box ? 24 : 0) + 12) * k;
+    const hw = (b.w / 2) * sc + pad, hh = (b.h / 2) * sc * 1.25 + pad;
+    const bx = b.x + b.w / 2, by = b.y + b.h / 2 + dy;
+    const q = { x0: bx - hw, y0: by - hh, x1: bx + hw, y1: by + hh };
+    r = r ? { x0: Math.min(r.x0, q.x0), y0: Math.min(r.y0, q.y0), x1: Math.max(r.x1, q.x1), y1: Math.max(r.y1, q.y1) } : q;
+  };
+  ctx.save(); ctx.globalAlpha = 0;
+  if (plan.cap) add(plan.cap.lines, plan.cap.cx, plan.cap.cy, plan.cap.dy, plan.cap.style, plan.cap.an);
+  for (const x of plan.texts) add(x.full, x.cx, x.cy, x.dy, x.style, x.an);
+  ctx.restore();
+  return r;
+}
+
+const planKey = (plan: OverlayPlan) => (plan.cap || plan.texts.length
+  ? JSON.stringify(plan, (_k, v) => (typeof v === 'number' ? Math.round(v * 100) / 100 : v))
+  : '');
+
+/**
+ * Draws the captions and text for the whole export with the same code as the preview, as PNG frames plus an
+ * ffconcat list (one frame per change, held for as long as it stays the same). This way the video shows exactly
+ * what the editor showed: same fonts, same line breaks, same positions and the same animation.
+ */
+async function renderOverlayTrack(dir: string, onProgress: (f: number) => void): Promise<{ list: string; x: number; y: number; dir: string } | null> {
+  const T = tl();
+  if (!T.captions.lines.length && !T.texts.some((x) => x.text.trim())) return null;
+  await document.fonts?.ready;
+  const W = T.width, H = T.height, k = unitOf(T);
+  const total = timelineDuration(T);
+  const step = 1000 / Math.min(30, T.fps || 30);
+  const times = new Set<number>([0]);
+  const span = (s: number, e: number) => {
+    times.add(Math.max(0, Math.round(s))); times.add(Math.max(0, Math.round(e)));
+    for (let x = s + step; x < e; x += step) times.add(Math.round(x));
+  };
+  for (const l of T.captions.lines) { span(l.startMs, l.endMs); for (const w of l.words) times.add(Math.round(w.startMs)); }
+  for (const x of T.texts) if (x.text.trim()) span(x.startMs, x.endMs);
+  const ts = [...times].filter((x) => x >= 0 && x < total).sort((a, b) => a - b);
+  // pass 1: what changes when, and the area it all fits in
+  const mctx = (measureCtx ??= document.createElement('canvas').getContext('2d'))!;
+  const steps: { t: number; key: string; plan: OverlayPlan }[] = [];
+  let r: { x0: number; y0: number; x1: number; y1: number } | null = null;
+  for (const x of ts) {
+    const plan = overlayPlan(x, W, H, k);
+    const key = planKey(plan);
+    if (steps.length && steps[steps.length - 1].key === key) continue;
+    steps.push({ t: x, key, plan });
+    if (key) {
+      const q = planBounds(mctx, plan, k);
+      if (q) r = r ? { x0: Math.min(r.x0, q.x0), y0: Math.min(r.y0, q.y0), x1: Math.max(r.x1, q.x1), y1: Math.max(r.y1, q.y1) } : q;
+    }
+  }
+  if (!r) return null;
+  const bb = r as { x0: number; y0: number; x1: number; y1: number };
+  const x0 = Math.max(0, Math.floor(bb.x0 / 2) * 2), y0 = Math.max(0, Math.floor(bb.y0 / 2) * 2);
+  const x1 = Math.min(W, Math.ceil(bb.x1 / 2) * 2), y1 = Math.min(H, Math.ceil(bb.y1 / 2) * 2);
+  const cw = Math.max(2, x1 - x0), ch = Math.max(2, y1 - y0);
+  // pass 2: draw each different frame once
+  const cv = document.createElement('canvas');
+  cv.width = cw; cv.height = ch;
+  const ctx = cv.getContext('2d')!;
+  const files = new Map<string, string>();
+  let n = 0;
+  const fileFor = async (key: string, plan: OverlayPlan) => {
+    const have = files.get(key);
+    if (have) return have;
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, cw, ch);
+    ctx.translate(-x0, -y0);
+    if (key) drawOverlays(ctx, plan, k, false);
+    const blob = await new Promise<Blob | null>((res) => cv.toBlob(res, 'image/png'));
+    if (!blob) throw new Error('Gagal menggambar teks untuk ekspor.');
+    const name = `f${n++}.png`;
+    await invoke('write_bytes', { path: join(dir, name), content: Array.from(new Uint8Array(await blob.arrayBuffer())) });
+    files.set(key, name);
+    return name;
+  };
+  const lines = ['ffconcat version 1.0'];
+  if (steps[0].t > 0) steps.unshift({ t: 0, key: '', plan: { texts: [] } });
+  for (let i = 0; i < steps.length; i++) {
+    const end = i + 1 < steps.length ? steps[i + 1].t : total;
+    const name = await fileFor(steps[i].key, steps[i].plan);
+    lines.push(`file '${name}'`, `duration ${((end - steps[i].t) / 1000).toFixed(4)}`);
+    if (i % 20 === 0) { onProgress(i / steps.length); await new Promise((res) => setTimeout(res, 0)); }
+  }
+  // the concat demuxer drops the last duration unless the last file is listed once more
+  lines.push(`file '${await fileFor('', { texts: [] })}'`);
+  const list = join(dir, 'list.ffconcat');
+  await invoke('write_text', { path: list, content: lines.join('\n') + '\n' });
+  onProgress(1);
+  return { list, x: x0, y: y0, dir };
 }
 
 /** Shades where TikTok / YouTube Shorts put their buttons and captions, so nothing important lands there. */
@@ -4895,12 +5019,17 @@ function renderExport() {
     }, `📁 ${settings.outDir}`),
     h('button', {
       class: 'primary wide', disabled: !timelineDuration(tl()),
-      onclick: async () => {
+      onclick: async (e: Event) => {
         pause();
         try {
           await flush();
           const fontScale = await fontScales();
-          await enqueueExport(P!, { outDir: settings.outDir, encoder: settings.encoder || (await detectEncoder()), fontScale, quality: settings.quality ?? 0.75, captionBreaks });
+          const btn = e.currentTarget as HTMLButtonElement;
+          btn.disabled = true;
+          await enqueueExport(P!, {
+            outDir: settings.outDir, encoder: settings.encoder || (await detectEncoder()), fontScale, quality: settings.quality ?? 0.75, captionBreaks,
+            renderOverlay: (dir) => renderOverlayTrack(dir, (f) => { btn.textContent = `Menyiapkan teks… ${Math.round(f * 100)}%`; }),
+          }).finally(() => { btn.disabled = false; btn.textContent = 'Ekspor video'; });
         } catch (e) { toast((e as Error).message, 'error'); }
       },
     }, 'Ekspor video'),

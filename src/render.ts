@@ -575,6 +575,8 @@ export interface RenderSpec {
   fontsDir?: string;  // e.g. C:/Windows/Fonts
   outPath: string;
   gradeLuts?: Record<string, string>;  // clip/layer id -> baked .cube file (written by the caller from bakeCube)
+  /** Captions and text drawn by the app itself (PNG frames + ffconcat list), placed at x/y. Replaces the .ass file. */
+  overlay?: { list: string; x: number; y: number };
 }
 
 /** Colour (baked LUT) for a clip or layer, run on its own pixels. */
@@ -654,7 +656,7 @@ export function renderArgs(spec: RenderSpec): string[] {
     const dur = (clipDuration(c) / 1000).toFixed(3);
     if (m.hasAudio) {
       const cf = fadesOf(c, clipDuration(c));
-      const chain = ['asetpts=PTS-STARTPTS', ...atempoChain(c.speed), `volume=${Number(c.volume.toFixed(3))}`,
+      const chain = ['aresample=async=1:min_hard_comp=0.01:first_pts=0', ...atempoChain(c.speed), `volume=${Number(c.volume.toFixed(3))}`,
         'aresample=48000:async=1', 'aformat=sample_fmts=fltp:channel_layouts=stereo', `apad`, `atrim=0:${dur}`];
       const fx = afades(cf.fi, cf.fo, clipDuration(c));
       if (fx) chain.push(fx.slice(1));
@@ -714,7 +716,7 @@ export function renderArgs(spec: RenderSpec): string[] {
       if (m.hasAudio && l.volume > 0.001) {
         const d = Math.round(a);
         const lf = fadesOf(l, b - a);
-        f.push(`[${input}:a]asetpts=PTS-STARTPTS,aformat=sample_fmts=fltp:channel_layouts=stereo,aresample=48000,volume=${num(l.volume)}${afades(lf.fi, lf.fo, b - a)},adelay=${d}|${d}[lya${k}]`);
+        f.push(`[${input}:a]aresample=async=1:min_hard_comp=0.01:first_pts=0,aformat=sample_fmts=fltp:channel_layouts=stereo,aresample=48000,volume=${num(l.volume)}${afades(lf.fi, lf.fo, b - a)},adelay=${d}|${d}[lya${k}]`);
         layerAudio.push(`[lya${k}]`);
       }
       input++;
@@ -774,7 +776,14 @@ export function renderArgs(spec: RenderSpec): string[] {
   }
   if (v !== 'cv' && v !== 'mc0') { f.push(`[${v}]format=yuv420p[ovf]`); v = 'ovf'; }
 
-  if (spec.assFile) {
+  if (spec.overlay) {
+    // the app's own drawing of captions and text: exactly what the preview shows
+    args.push('-f', 'concat', '-safe', '0', '-i', spec.overlay.list);
+    f.push(`[${input}:v]format=rgba[otx]`);
+    f.push(`[${v}][otx]overlay=x=${spec.overlay.x}:y=${spec.overlay.y}:eof_action=pass:format=auto,format=yuv420p[sv]`);
+    v = 'sv';
+    input++;
+  } else if (spec.assFile) {
     const fd = spec.fontsDir ? `:fontsdir='${filterPath(spec.fontsDir)}'` : '';
     f.push(`[${v}]subtitles=filename='${filterPath(spec.assFile)}'${fd}[sv]`);
     v = 'sv';
