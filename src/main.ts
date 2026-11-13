@@ -5524,9 +5524,9 @@ function renderExport() {
   const d = timelineDuration(tl());
   pop.replaceChildren(
     h('div', { class: 'row-between' }, h('h3', {}, 'Ekspor'), h('button', { class: 'icon-btn', 'aria-label': 'Tutup', onclick: toggleExport }, icon('x', 15))),
-    h('div', { class: 'muted small' }, `${tl().width}×${tl().height} · ${tl().fps} fps · MP4 H.264 · ${tc(d, true)}`),
+    h('div', { class: 'muted small' }, `${tl().width}×${tl().height} · ${tl().fps} fps · ${exportFormat() === 'webm' ? 'WEBM VP9' : `${exportFormat().toUpperCase()} H.264`} · ${tc(d, true)}`),
     d > 180000 ? h('div', { class: 'warn small' }, 'Lebih dari 3 menit: YouTube Shorts membatasi 3 menit. TikTok masih bisa.') : h('span'),
-    presetBlock(),
+    fileBlock(),
     qualityBlock(d),
     rangeNow() ? h('label', { class: 'switch-row' },
       h('input', { type: 'checkbox', checked: exportRangeOnly, onchange: (e: Event) => { exportRangeOnly = (e.target as HTMLInputElement).checked; } }),
@@ -5543,20 +5543,22 @@ function renderExport() {
     h('button', {
       class: 'primary wide', disabled: !timelineDuration(tl()),
       onclick: async (e: Event) => {
+        // take the button now: after an await the event no longer knows which element it came from
+        const btn = e.currentTarget as HTMLButtonElement;
         pause();
         try {
+          btn.disabled = true;
           await flush();
           const fontScale = await fontScales();
-          const btn = e.currentTarget as HTMLButtonElement;
-          btn.disabled = true;
           await enqueueExport(P!, {
             outDir: settings.outDir, encoder: settings.encoder || (await detectEncoder()), fontScale, quality: settings.quality ?? 0.75, captionBreaks,
             range: exportRangeOnly ? rangeNow() : null,
             fileName: exportFileName(),
+            container: exportFormat(),
             renderOverlay: (dir) => renderOverlayTrack(dir, (f) => { btn.textContent = `Menyiapkan teks… ${Math.round(f * 100)}%`; }),
             renderMasks: (dir) => renderMaskFiles(dir),
-          }).finally(() => { btn.disabled = false; btn.textContent = 'Ekspor video'; });
-        } catch (e) { toast((e as Error).message, 'error'); }
+          }).then(() => { exportName = ''; const inp = document.querySelector('#export-pop .name-row input') as HTMLInputElement | null; if (inp) inp.value = ''; });
+        } catch (e) { toast((e as Error).message, 'error'); } finally { btn.disabled = false; btn.textContent = 'Ekspor video'; }
       },
     }, 'Ekspor video'),
     h('div', { id: 'queue' }),
@@ -5566,63 +5568,39 @@ function renderExport() {
 
 let exportRangeOnly = true;
 
-// ================= export presets & file names =================
-type ExportPreset = { id: string; name: string; hint: string; aspect: Aspect; short: number; fps?: 30 | 60; quality: number };
-const EXPORT_PRESETS: ExportPreset[] = [
-  { id: 'shorts', name: 'YouTube Shorts', hint: '9:16 · 1080p · 60 fps', aspect: '9:16', short: 1080, fps: 60, quality: 0.8 },
-  { id: 'tiktok', name: 'TikTok', hint: '9:16 · 1080p · 30 fps', aspect: '9:16', short: 1080, fps: 30, quality: 0.75 },
-  { id: 'reels', name: 'Instagram Reels', hint: '9:16 · 1080p · 30 fps', aspect: '9:16', short: 1080, fps: 30, quality: 0.75 },
-  { id: 'yt1080', name: 'YouTube 1080p', hint: '16:9 · FHD', aspect: '16:9', short: 1080, quality: 0.85 },
-  { id: 'yt2k', name: 'YouTube 2K', hint: '16:9 · 1440p', aspect: '16:9', short: 1440, quality: 0.85 },
-  { id: 'yt4k', name: 'YouTube 4K', hint: '16:9 · 2160p', aspect: '16:9', short: 2160, quality: 0.9 },
-  { id: 'feed45', name: 'Feed 4:5', hint: 'Instagram / Facebook', aspect: '4:5', short: 1080, quality: 0.75 },
+// ================= export: file name and format =================
+type ExportFormat = 'mp4' | 'mkv' | 'mov' | 'webm';
+const FORMATS: { id: ExportFormat; name: string; hint: string }[] = [
+  { id: 'mp4', name: 'MP4', hint: 'H.264 + AAC. Paling aman untuk YouTube, TikTok, Instagram, HP' },
+  { id: 'mkv', name: 'MKV', hint: 'H.264 + AAC dalam MKV. Bagus untuk arsip dan diedit ulang' },
+  { id: 'mov', name: 'MOV', hint: 'H.264 + AAC dalam MOV. Untuk Premiere, Final Cut, iPhone' },
+  { id: 'webm', name: 'WEBM', hint: 'VP9 + Opus. Untuk web dan Discord; ekspornya lebih lama (pakai CPU)' },
 ];
-const presetMatches = (pr: ExportPreset) => aspectOf(tl().width, tl().height) === pr.aspect && Math.min(tl().width, tl().height) === pr.short && (!pr.fps || tl().fps === pr.fps);
-function currentPreset(): ExportPreset | undefined {
-  const saved = EXPORT_PRESETS.find((x) => x.id === settings.exportPreset);
-  return saved && presetMatches(saved) ? saved : EXPORT_PRESETS.find(presetMatches);
+let exportName = '';   // typed in the export panel; empty = the project name
+const exportFormat = (): ExportFormat => (settings.exportFormat as ExportFormat) || 'mp4';
+/** The name typed for the file, else the project name (plus "(bagian)" for an In/Out export). */
+function exportFileName(): string {
+  const typed = exportName.replace(/\.(mp4|mkv|mov|webm)$/i, '').replace(/[\\/:*?"<>|]+/g, '-').trim();
+  if (typed) return typed;
+  const base = (P?.name ?? 'video').trim();
+  return exportRangeOnly && rangeNow() ? `${base} (bagian)` : base;
 }
-function applyPreset(pr: ExportPreset) {
-  if (!presetMatches(pr)) setCanvas(pr.aspect, pr.short, pr.fps);
-  settings.exportPreset = pr.id;
-  settings.quality = pr.quality;
-  void saveSettings(settings);
-  renderExport();
-}
-const DEFAULT_NAME_PATTERN = '{tanggal} {judul} - {preset}';
-/** File name from a pattern: {judul} {tanggal} {jam} {preset} {ukuran} {durasi}. */
-function exportFileName(pattern = settings.namePattern || DEFAULT_NAME_PATTERN): string {
-  const now = new Date();
-  const pad = (n: number) => String(n).padStart(2, '0');
-  const r = exportRangeOnly ? rangeNow() : null;
-  const dur = Math.round((r ? r.outMs - r.inMs : timelineDuration(tl())) / 1000);
-  const vals: Record<string, string> = {
-    judul: (P?.name ?? 'video').trim(),
-    tanggal: `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`,
-    jam: `${pad(now.getHours())}.${pad(now.getMinutes())}`,
-    preset: currentPreset()?.name ?? `${tl().width}x${tl().height}`,
-    ukuran: `${tl().width}x${tl().height}`,
-    durasi: dur >= 60 ? `${Math.floor(dur / 60)}m${pad(dur % 60)}s` : `${dur}s`,
-  };
-  const name = pattern.replace(/\{(\w+)\}/g, (all, k: string) => vals[k.toLowerCase()] ?? all).replace(/[\\/:*?"<>|]+/g, '-').replace(/\s+/g, ' ').trim();
-  return name || vals.judul;
-}
-function presetBlock(): HTMLElement {
-  const cur = currentPreset();
-  const nameInput = h('input', {
-    value: settings.namePattern || DEFAULT_NAME_PATTERN, 'aria-label': 'Pola nama file',
-    title: 'Pakai {judul} {tanggal} {jam} {preset} {ukuran} {durasi}',
-    oninput: (e: Event) => { settings.namePattern = (e.target as HTMLInputElement).value; const pv = $('#name-preview'); if (pv) pv.textContent = `${exportFileName()}.mp4`; },
-    onchange: () => void saveSettings(settings),
-  });
+function fileBlock(): HTMLElement {
   return h('div', { class: 'quality' },
-    h('span', { class: 'label' }, 'Preset'),
-    h('div', { class: 'preset-row' }, ...EXPORT_PRESETS.map((pr) => h('button', {
-      class: `chip${cur?.id === pr.id ? ' on' : ''}`, title: `${pr.hint}\nMengubah ukuran kanvas kalau perlu`, onclick: () => applyPreset(pr),
-    }, pr.name))),
     h('span', { class: 'label' }, 'Nama file'),
-    nameInput,
-    h('div', { class: 'muted small mono', id: 'name-preview' }, `${exportFileName()}.mp4`),
+    h('div', { class: 'name-row' },
+      h('input', {
+        value: exportName, placeholder: P?.name ?? 'video', 'aria-label': 'Nama file',
+        oninput: (e: Event) => { exportName = (e.target as HTMLInputElement).value; },
+      }),
+      h('span', { class: 'mono muted' }, `.${exportFormat()}`),
+    ),
+    h('span', { class: 'label' }, 'Format'),
+    h('div', { class: 'seg' }, ...FORMATS.map((f) => h('button', {
+      class: exportFormat() === f.id ? 'on' : '', title: f.hint,
+      onclick: () => { settings.exportFormat = f.id; void saveSettings(settings); renderExport(); },
+    }, f.name))),
+    h('div', { class: 'muted small' }, FORMATS.find((f) => f.id === exportFormat())!.hint),
   );
 }
 
@@ -6409,7 +6387,7 @@ async function openThumbStudio() {
               const blob = await new Promise<Blob | null>((res) => cv.toBlob(res, 'image/png'));
               if (!blob) return;
               await invoke('ensure_dir', { path: settings.outDir });
-              const base = `${exportFileName().replace(/\s*-\s*[^-]*$/, '')} thumbnail ${st.fmt === 'yt' ? '16x9' : '9x16'}`.replace(/[\\/:*?"<>|]+/g, '-');
+              const base = `${(P?.name ?? 'video').trim()} thumbnail ${st.fmt === 'yt' ? '16x9' : '9x16'}`.replace(/[\\/:*?"<>|]+/g, '-');
               let file = join(settings.outDir, `${base}.png`), n = 1;
               while (await invoke<boolean>('exists', { path: file })) file = join(settings.outDir, `${base} (${++n}).png`);
               await invoke('write_bytes', { path: file, content: Array.from(new Uint8Array(await blob.arrayBuffer())) });

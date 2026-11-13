@@ -669,6 +669,8 @@ export interface RenderSpec {
   range?: { inMs: number; outMs: number };
   /** item id -> mask picture (white = visible), drawn by the caller from the item's Mask */
   masks?: Record<string, string>;
+  /** File type: mp4 (default), mkv, mov use H.264 + AAC; webm uses VP9 + Opus. */
+  container?: 'mp4' | 'mkv' | 'mov' | 'webm';
 }
 
 /** Colour (baked LUT) for a clip or layer, run on its own pixels. */
@@ -1051,8 +1053,11 @@ export function renderArgs(spec: RenderSpec): string[] {
     v = 'rgv'; aOut = 'rga';
   }
   args.push('-filter_complex', f.join(';'), '-map', `[${v}]`, '-map', `[${aOut}]`,
-    ...encoderArgs(spec.encoder, spec.bitrateK, spec.quality ?? 1),
-    '-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart', spec.outPath);
+    ...(spec.container === 'webm'
+      ? ['-c:v', 'libvpx-vp9', '-b:v', `${spec.bitrateK}k`, '-maxrate', `${Math.round(spec.bitrateK * 1.5)}k`, '-bufsize', `${spec.bitrateK * 2}k`, '-deadline', 'realtime', '-cpu-used', '5', '-row-mt', '1', '-pix_fmt', 'yuv420p', '-c:a', 'libopus', '-b:a', '160k']
+      : [...encoderArgs(spec.encoder, spec.bitrateK, spec.quality ?? 1), '-c:a', 'aac', '-b:a', '192k']),
+    ...(spec.container === 'mkv' || spec.container === 'webm' ? [] : ['-movflags', '+faststart']),
+    spec.outPath);
   return args;
 }
 

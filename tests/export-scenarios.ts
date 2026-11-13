@@ -154,6 +154,9 @@ scenarios.push(['mask layer video utama + mask meme', (tl) => {
 // extra export options a scenario can set (In/Out range, captions drawn by the app as PNG frames)
 let extra: Partial<RenderSpec> = {};
 let expectSec = 0;
+scenarios.push(['format MKV', (tl) => { tl.captions.lines = [{ id: 'l', startMs: 300, endMs: 2000, words: [{ text: 'halo', startMs: 300, endMs: 800 }] }]; extra = { container: 'mkv' }; }]);
+scenarios.push(['format MOV', () => { extra = { container: 'mov' }; }]);
+scenarios.push(['format WEBM (VP9 + Opus)', (tl) => { tl.music = [{ id: 'mu', file: `${dir}/music.ogg`, name: 'm', startMs: 0, inMs: 0, lengthMs: 30000, sourceMs: 30000, volume: 0.5, duck: 'medium' }]; extra = { container: 'webm' }; }]);
 scenarios.push(['ekspor bagian In–Out', () => { extra = { range: { inMs: 1500, outMs: 6000 } }; expectSec = 4.5; }]);
 scenarios.push(['teks digambar aplikasi (PNG + ffconcat)', () => {
   make(['-f', 'lavfi', '-i', 'color=c=black@0:s=600x200,format=rgba', '-frames:v', '1', `${dir}/ov0.png`]);
@@ -161,7 +164,7 @@ scenarios.push(['teks digambar aplikasi (PNG + ffconcat)', () => {
   writeFileSync(`${dir}/ov.ffconcat`, "ffconcat version 1.0\nfile 'ov0.png'\nduration 0.5\nfile 'ov1.png'\nduration 1.25\nfile 'ov0.png'\nduration 6.25\nfile 'ov0.png'\n");
   extra = { ...extra, overlay: { list: `${dir}/ov.ffconcat`, x: 240, y: 1300 } };
 }]);
-scenarios.push(['SEMUA SEKALIGUS', (tl) => { for (const [name, f] of scenarios) if (name !== 'SEMUA SEKALIGUS' && !name.startsWith('meme') && !name.startsWith('layer') && !name.startsWith('kanvas kosong') && name !== 'speed 2x') f(tl); tl.images = [meme('i', `${dir}/meme.png`, 500, 2500, 'pop', 'fade'), meme('g', `${dir}/anim.gif`, 4500, 6500, 'slide', 'pop', true)]; tl.clips[1].trans = 'punch'; tl.layers = [{ id: 'g', name: 'G', source: 'main', inMs: 0, startMs: 0, endMs: 99999, crop: { l: 0, t: 0, r: 0, b: 0.5 }, box: { x: 0.5, y: 0.25, w: 1, h: 0.5 }, opacity: 1, volume: 0 }, { id: 'o', name: 'O', source: 'media', mediaId: 'm', inMs: 2000, startMs: 1000, endMs: 4000, crop: { l: 0, t: 0.5, r: 0, b: 0 }, box: { x: 0.5, y: 0.75, w: 1, h: 0.5 }, opacity: 1, volume: 0.5 }]; tl.hideMain = true; }]);
+scenarios.push(['SEMUA SEKALIGUS', (tl) => { for (const [name, f] of scenarios) if (name !== 'SEMUA SEKALIGUS' && !name.startsWith('meme') && !name.startsWith('layer') && !name.startsWith('kanvas kosong') && !name.startsWith('format ') && name !== 'speed 2x') f(tl); tl.images = [meme('i', `${dir}/meme.png`, 500, 2500, 'pop', 'fade'), meme('g', `${dir}/anim.gif`, 4500, 6500, 'slide', 'pop', true)]; tl.clips[1].trans = 'punch'; tl.layers = [{ id: 'g', name: 'G', source: 'main', inMs: 0, startMs: 0, endMs: 99999, crop: { l: 0, t: 0, r: 0, b: 0.5 }, box: { x: 0.5, y: 0.25, w: 1, h: 0.5 }, opacity: 1, volume: 0 }, { id: 'o', name: 'O', source: 'media', mediaId: 'm', inMs: 2000, startMs: 1000, endMs: 4000, crop: { l: 0, t: 0.5, r: 0, b: 0 }, box: { x: 0.5, y: 0.75, w: 1, h: 0.5 }, opacity: 1, volume: 0.5 }]; tl.hideMain = true; }]);
 
 let failed = 0;
 {
@@ -184,10 +187,10 @@ for (const [name, setup] of scenarios) {
     gradeLuts[it.id] = `${dir}/grade-${it.id}.cube`;
     writeFileSync(gradeLuts[it.id], bakeCube(g, user));
   }
-  const args = renderArgs({ tl, media, encoder: 'libx264', bitrateK: Math.round(8000 * q), quality: q, assFile, fontsDir, outPath: `${dir}/out.mp4`, gradeLuts, ...extra });
+  const args = renderArgs({ tl, media, encoder: 'libx264', bitrateK: Math.round(8000 * q), quality: q, assFile, fontsDir, outPath: `${dir}/out.${extra.container ?? 'mp4'}`, gradeLuts, ...extra });
   const r = run(args);
   if (r.status === 0 && expectSec) {
-    const d = Number(run(['-i', `${dir}/out.mp4`]).stderr.match(/Duration: (\d+):(\d+):([\d.]+)/)?.slice(1).reduce((a, x) => a * 60 + Number(x), 0));
+    const d = Number(run(['-i', `${dir}/out.${extra.container ?? 'mp4'}`]).stderr.match(/Duration: (\d+):(\d+):([\d.]+)/)?.slice(1).reduce((a, x) => a * 60 + Number(x), 0));
     if (Math.abs(d - expectSec) > 0.15) { failed++; console.log(`GAGAL ${name}\n      durasi ${d} dtk, harusnya ${expectSec}`); continue; }
   }
   if (r.status === 0) { console.log(`OK    ${name}`); continue; }

@@ -432,16 +432,17 @@ export function onQueueChange(cb: () => void) { onChange = cb; }
 
 const FONTS_DIR = 'C:\\Windows\\Fonts';
 
-async function uniquePath(dir: string, base: string): Promise<string> {
+async function uniquePath(dir: string, base: string, ext = 'mp4'): Promise<string> {
   let n = 1;
-  let p = join(dir, `${base}.mp4`);
-  while (await invoke<boolean>('exists', { path: p })) p = join(dir, `${base} (${++n}).mp4`);
+  let p = join(dir, `${base}.${ext}`);
+  while (await invoke<boolean>('exists', { path: p })) p = join(dir, `${base} (${++n}).${ext}`);
   return p;
 }
 
 export async function enqueueExport(p: Project, opts: { outDir: string; encoder: Encoder; fontScale?: Record<string, number>; quality?: number; captionBreaks?: CaptionBreaks;
   range?: { inMs: number; outMs: number } | null;
-  fileName?: string;   // without .mp4; default: the project name
+  fileName?: string;   // without extension; default: the project name
+  container?: 'mp4' | 'mkv' | 'mov' | 'webm';
   /** Draws the mask pictures of masked layers/pictures into `dir`; id -> file. */
   renderMasks?: (dir: string) => Promise<Record<string, string>>;
   /** Draws captions and text as frames with the app's own renderer (exactly like the preview); null = nothing to draw. */
@@ -467,13 +468,13 @@ export async function enqueueExport(p: Project, opts: { outDir: string; encoder:
     const fs = opts.fontScale ?? {};
     await invoke('write_text', { path: assFile, content: buildAss(tl, (font, bold) => fs[`${font}|${bold ? 1 : 0}`] ?? 1, opts.captionBreaks) });
   }
-  const outPath = await uniquePath(opts.outDir, safeName(opts.fileName || (opts.range ? `${p.name} (bagian)` : p.name)));
+  const outPath = await uniquePath(opts.outDir, safeName(opts.fileName || (opts.range ? `${p.name} (bagian)` : p.name)), opts.container ?? 'mp4');
   const media = Object.fromEntries(p.media.map((m) => [m.id, m]));
   const quality = opts.quality ?? 0.75;
   const gradeLuts = await bakeGrades(tl, await projectDir(p.id), id);
   const maskDir = join(await projectDir(p.id), `export-${id}-masks`);
   const masks = opts.renderMasks ? await opts.renderMasks(maskDir).catch((e) => { console.warn('masks failed', e); return {} as Record<string, string>; }) : {};
-  const build = (encoder: Encoder) => renderArgs({ tl, media, encoder, bitrateK: qualityBitrate(tl.fps, quality, tl.width * tl.height), quality, assFile, fontsDir: FONTS_DIR, outPath, gradeLuts, overlay: overlay ?? undefined, range: opts.range ?? undefined, masks });
+  const build = (encoder: Encoder) => renderArgs({ tl, media, encoder, bitrateK: qualityBitrate(tl.fps, quality, tl.width * tl.height), quality, assFile, fontsDir: FONTS_DIR, outPath, gradeLuts, overlay: overlay ?? undefined, range: opts.range ?? undefined, masks, container: opts.container });
   const job: ExportJob = {
     id, projectId: p.id, label: p.name, outPath, totalMs: opts.range ? opts.range.outMs - opts.range.inMs : timelineDuration(tl), progress: 0, status: 'queued', error: '',
     args: build(opts.encoder), encoder: opts.encoder, build, assFile, extraFiles: [...Object.values(gradeLuts), ...(overlay ? [overlay.dir] : []), ...(Object.keys(masks).length ? [maskDir] : [])],
