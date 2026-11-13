@@ -19,10 +19,14 @@ export interface Project {
   updatedAt: string;
 }
 
-export interface ProjectSummary { id: string; name: string; durationMs: number; clips: number; updatedAt: string; version?: number }
+export interface ProjectSummary {
+  id: string; name: string; durationMs: number; clips: number; updatedAt: string; version?: number;
+  width?: number; height?: number;          // canvas size, for the aspect badge
+  thumbMedia?: string; thumbAspect?: number; // first clip's thumbnail sheet, used until a cover is saved
+}
 
 export type ModelSize = 'base' | 'small';
-export interface Settings { outDir: string; encoder: Encoder | ''; model: ModelSize; watermark?: Watermark | null; fontScale?: Record<string, number>; quality?: number; sttTracks?: 'all' | number; sttCareful?: boolean; insertVolume?: number; leftW?: number; rightW?: number; leftHidden?: boolean; rightHidden?: boolean; exportPreset?: string; namePattern?: string; exportFormat?: string; textPresets?: { name: string; style: TextStyle }[] }
+export interface Settings { outDir: string; encoder: Encoder | ''; model: ModelSize; watermark?: Watermark | null; fontScale?: Record<string, number>; quality?: number; sttTracks?: 'all' | number; sttCareful?: boolean; insertVolume?: number; leftW?: number; rightW?: number; leftHidden?: boolean; rightHidden?: boolean; exportPreset?: string; namePattern?: string; exportFormat?: string; textPresets?: { name: string; style: TextStyle }[]; starred?: string[]; archived?: string[]; homeView?: 'grid' | 'list'; homeSort?: 'recent' | 'name' | 'dur' }
 
 let dataDirCache = '';
 export async function dataDir(): Promise<string> {
@@ -88,7 +92,11 @@ export async function flush() {
   await writeJson(join(await projectDir(p.id), 'project.json'), p);
   const all = await readJson<ProjectSummary[]>(join(await dataDir(), 'projects.json'), []);
   const list = all.filter((x) => x.id !== p.id && x.version === 2);
-  list.unshift({ id: p.id, name: p.name, durationMs: timelineDuration(p.timeline), clips: p.timeline.clips.length, updatedAt: p.updatedAt, version: 2 });
+  const m0 = p.media.find((m) => m.id === p.timeline.clips[0]?.mediaId) ?? p.media[0];
+  list.unshift({
+    id: p.id, name: p.name, durationMs: timelineDuration(p.timeline), clips: p.timeline.clips.length, updatedAt: p.updatedAt, version: 2,
+    width: p.timeline.width, height: p.timeline.height, thumbMedia: m0?.id, thumbAspect: m0?.thumbs ? m0.thumbs.tw / m0.thumbs.th : undefined,
+  });
   await writeJson(join(await dataDir(), 'projects.json'), list);
   savedCb(new Date());
 }
@@ -124,6 +132,27 @@ export async function loadVersion(id: string, file: string): Promise<Project | n
   return readJson<Project | null>(join(await historyDir(id), file), null);
 }
 
+/** A copy of a project (with its thumbnails and cover) under a new id and name. */
+export async function duplicateProject(id: string, name: string): Promise<string | null> {
+  const p = await loadProject(id);
+  if (!p) return null;
+  const src = await projectDir(id);
+  const q: Project = { ...structuredClone(p), id: uid(), name, createdAt: new Date().toISOString() };
+  const dst = await projectDir(q.id);
+  await invoke('ensure_dir', { path: dst });
+  const files = await invoke<string[]>('list_dir', { path: src }).catch(() => [] as string[]);
+  for (const f of files) if (/^(thumbs_.*\.jpg|cover\.jpg)$/.test(f)) await invoke('copy_file', { src: join(src, f), dest: join(dst, f) }).catch(() => undefined);
+  await saveProject(q, true);
+  return q.id;
+}
+/** Renames a project without opening it. */
+export async function renameProject(id: string, name: string) {
+  const p = await loadProject(id);
+  if (!p) return;
+  p.name = name;
+  await saveProject(p, true);
+}
+
 export async function deleteProject(id: string) {
   await invoke('remove_path', { path: await projectDir(id) });
   const all = await readJson<ProjectSummary[]>(join(await dataDir(), 'projects.json'), []);
@@ -137,7 +166,7 @@ export async function loadSettings(): Promise<Settings> {
     const vids = await invoke<string>('videos_dir');
     outDir = join(vids || (await dataDir()), 'Gals Clip Studio');
   }
-  return { outDir, encoder: s.encoder ?? '', model: s.model ?? 'small', watermark: s.watermark ?? null, fontScale: s.fontScale ?? {}, quality: s.quality ?? 0.75, sttTracks: s.sttTracks ?? 'all', sttCareful: s.sttCareful ?? true, insertVolume: s.insertVolume ?? 0.25, leftW: s.leftW, rightW: s.rightW, leftHidden: s.leftHidden ?? false, rightHidden: s.rightHidden ?? false };
+  return { ...s, outDir, encoder: s.encoder ?? '', model: s.model ?? 'small', watermark: s.watermark ?? null, fontScale: s.fontScale ?? {}, quality: s.quality ?? 0.75, sttTracks: s.sttTracks ?? 'all', sttCareful: s.sttCareful ?? true, insertVolume: s.insertVolume ?? 0.25, leftW: s.leftW, rightW: s.rightW, leftHidden: s.leftHidden ?? false, rightHidden: s.rightHidden ?? false };
 }
 
 export async function saveSettings(s: Settings) {

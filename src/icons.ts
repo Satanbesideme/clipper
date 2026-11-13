@@ -55,9 +55,20 @@ const P: Record<string, string[]> = {
   rotate: ['M21 12a9 9 0 1 1-3-6.7', 'M21 3v6h-6'],
   flipH: ['M12 3v18', 'M8 7l-5 5 5 5V7z', 'M16 7l5 5-5 5V7z'],
   flipV: ['M3 12h18', 'M7 8l5-5 5 5H7z', 'M7 16l5 5 5-5H7z'],
+  search: ['M11 4a7 7 0 1 0 0 14 7 7 0 1 0 0-14z', 'M20 20l-4-4'],
+  clock: ['M12 2.5a9.5 9.5 0 1 0 0 19 9.5 9.5 0 1 0 0-19z', 'M12 7v5l3 2'],
+  grid: ['M4 4h6.5v6.5H4z', 'M13.5 4H20v6.5h-6.5z', 'M4 13.5h6.5V20H4z', 'M13.5 13.5H20V20h-6.5z'],
+  list: ['M8 6h13', 'M8 12h13', 'M8 18h13', 'M3.5 6h.01', 'M3.5 12h.01', 'M3.5 18h.01'],
+  star: ['M12 3l2.7 5.6 6.1.9-4.4 4.3 1 6.1L12 17l-5.4 2.9 1-6.1L3.2 9.5l6.1-.9z'],
+  archive: ['M3 4h18v4H3z', 'M5 8v11a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8', 'M10 12h4'],
+  calendar: ['M5 5h14a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2z', 'M16 3v4', 'M8 3v4', 'M3 10h18'],
+  more: ['M5 12h.01', 'M12 12h.01', 'M19 12h.01'],
+  check: ['M5 12.5l4.5 4.5L19 7.5'],
+  pencil: ['M4 20h4L19 9l-4-4L4 16z', 'M13.5 6.5l4 4'],
   video: ['M15 10l5-3v10l-5-3', 'M4 6h9a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2z'],
 };
 const FILLED = new Set(['play', 'pause', 'stop']);
+const BOLD = new Set(['more']);
 
 export type IconName = keyof typeof P;
 
@@ -72,7 +83,7 @@ export function icon(name: IconName, size = 18, cls = ''): SVGSVGElement {
   const filled = FILLED.has(name);
   s.setAttribute('fill', filled ? 'currentColor' : 'none');
   s.setAttribute('stroke', filled ? 'none' : 'currentColor');
-  s.setAttribute('stroke-width', '1.8');
+  s.setAttribute('stroke-width', BOLD.has(name) ? '3' : '1.8');
   s.setAttribute('stroke-linecap', 'round');
   s.setAttribute('stroke-linejoin', 'round');
   for (const d of P[name] ?? []) {

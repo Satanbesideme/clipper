@@ -16,7 +16,7 @@ import {
   type Library, type Meme, type Pad, type VideoMeme,
 } from './library';
 import {
-  dataDir, projectDir, deleteProject, flush, listProjects, listVersions, loadVersion, onSaved, snapshotProject, loadProject, loadSettings, newProject, saveProject, saveSettings, uid,
+  dataDir, projectDir, deleteProject, duplicateProject, renameProject, type ProjectSummary, flush, listProjects, listVersions, loadVersion, onSaved, snapshotProject, loadProject, loadSettings, newProject, saveProject, saveSettings, uid,
   type MediaEntry, type Project, type Settings,
 } from './store';
 import {
@@ -405,7 +405,28 @@ async function createBlankProject(st: { aspect: Aspect; short: number; fps: 30 |
   toast('Kanvas kosong siap. Tambah video (jadi video utama) atau layer, teks, meme, musik. Panjang video mengikuti isinya.');
 }
 
+/** Saves the preview of the open project as its cover picture on the home page. */
+async function saveCover() {
+  if (!P || !preview || !preview.width) return;
+  try {
+    const W = 640, H = Math.round((640 * preview.height) / preview.width);
+    const cv = document.createElement('canvas'); cv.width = W; cv.height = H;
+    cv.getContext('2d')!.drawImage(preview, 0, 0, W, H);
+    const blob = await new Promise<Blob | null>((res) => cv.toBlob(res, 'image/jpeg', 0.82));
+    if (!blob) return;
+    await invoke('write_bytes', { path: join(await projectDir(P.id), 'cover.jpg'), content: Array.from(new Uint8Array(await blob.arrayBuffer())) });
+    coverBust.set(P.id, Date.now());
+  } catch { /* a cover is a nicety */ }
+}
+const coverBust = new Map<string, number>();
+
+type HomeFilter = 'recent' | 'all' | 'starred' | 'archived';
+let homeFilter: HomeFilter = 'recent';
+let homeQuery = '';
+const homePicked = new Set<string>();
+
 async function renderHome() {
+  if (P && tl().clips.length + layers().length + images().length > 0) await saveCover();
   pause();
   await flush();
   P = null;
@@ -414,87 +435,186 @@ async function renderHome() {
   videos.clear();
   sheets.clear();
   const list = await listProjects();
+  const dataD = await dataDir();
   const pick = async () => {
     const files = await dialog().open({ multiple: true, title: 'Pilih rekaman', filters: [{ name: 'Video', extensions: VIDEO_EXT }] });
     const arr = typeof files === 'string' ? [files] : files ?? [];
     if (arr.length) await dropped(arr);
   };
+  const starred = new Set(settings.starred ?? []), archived = new Set(settings.archived ?? []);
+  const saveFlags = () => { settings.starred = [...starred]; settings.archived = [...archived]; void saveSettings(settings); };
   const when = (iso: string) => {
     const d = new Date(iso), now = new Date();
-    const days = Math.floor((now.setHours(0, 0, 0, 0) - new Date(iso).setHours(0, 0, 0, 0)) / 86400000);
-    const time = d.toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' });
-    return days === 0 ? `Hari ini, ${time}` : days === 1 ? `Kemarin, ${time}` : d.toLocaleDateString('id-ID', { day: 'numeric', month: 'short', year: 'numeric' });
+    const days = Math.floor((new Date(now).setHours(0, 0, 0, 0) - new Date(iso).setHours(0, 0, 0, 0)) / 86400000);
+    if (days === 0) return `Hari ini, ${d.toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' })}`;
+    if (days === 1) return 'Kemarin';
+    if (days < 7) return `${days} hari lalu`;
+    return d.toLocaleDateString('id-ID', { day: '2-digit', month: '2-digit', year: 'numeric' });
   };
-  const last = list[0];
+  const aspectLabel = (p: ProjectSummary) => {
+    if (!p.width || !p.height) return '';
+    const r = p.width / p.height;
+    return Math.abs(r - 9 / 16) < 0.02 ? '9:16' : Math.abs(r - 16 / 9) < 0.02 ? '16:9' : Math.abs(r - 1) < 0.02 ? '1:1' : Math.abs(r - 0.8) < 0.02 ? '4:5' : `${p.width}×${p.height}`;
+  };
+  const view = () => settings.homeView ?? 'grid';
+  const sortBy = () => settings.homeSort ?? 'recent';
   const totalMs = list.reduce((n, p) => n + (p.durationMs || 0), 0);
-  const exported = await invoke<string[]>('list_dir', { path: settings.outDir }).then((f) => f.filter((x) => /\.mp4$/i.test(x)).length).catch(() => 0);
-  const projList = h('ul', { class: 'hp-list' });
-  const fillList = (q: string) => {
-    const k = q.trim().toLowerCase();
-    const shown = list.filter((p) => !k || p.name.toLowerCase().includes(k));
-    projList.replaceChildren(...shown.map((p) => h('li', {},
-      h('button', { class: 'hp-item', onclick: () => void openProject(p.id), title: `${when(p.updatedAt)} · ${p.clips} potongan` },
-        h('span', { class: 'hp-item-name' }, p.name),
-        h('span', { class: 'hp-item-dur mono' }, tc(p.durationMs)),
-      ),
-      h('button', {
-        class: 'icon-btn hp-del', title: 'Hapus proyek', 'aria-label': `Hapus proyek ${p.name}`,
-        onclick: async () => {
-          if (await dialog().ask(`Hapus proyek "${p.name}"?\nFile rekaman asli tidak ikut terhapus.`, { title: 'Hapus proyek', kind: 'warning' })) {
-            await deleteProject(p.id);
-            await renderHome();
-          }
-        },
-      }, icon('x', 14)),
-    )));
-    if (!shown.length) projList.append(h('li', { class: 'hp-empty muted' }, list.length ? 'Tidak ada proyek dengan nama itu.' : 'Belum ada proyek. Rekaman yang kamu buka akan muncul di sini.'));
+  const exported = await invoke<string[]>('list_dir', { path: settings.outDir }).then((f) => f.filter((x) => /\.(mp4|mkv|mov|webm)$/i.test(x)).length).catch(() => 0);
+
+  /** The cover: the saved preview, else the first frame of the first video, else a placeholder. */
+  const cover = (p: ProjectSummary) => {
+    const box = h('div', { class: 'hc-img' });
+    const dir = join(dataD, 'projects', p.id);
+    const fallback = async () => {
+      let mid = p.thumbMedia, asp = p.thumbAspect;
+      if (!mid) {
+        const full = await loadProject(p.id).catch(() => null);
+        const m0 = full?.media.find((m) => m.id === full.timeline.clips[0]?.mediaId) ?? full?.media[0];
+        mid = m0?.id; asp = m0?.thumbs ? m0.thumbs.tw / m0.thumbs.th : undefined;
+      }
+      if (!mid) { box.classList.add('empty'); box.replaceChildren(logoMark(34)); return; }
+      const url = fileSrc(join(dir, `thumbs_${mid}_001.jpg`));
+      box.style.setProperty('--bg', `url("${url}")`);
+      box.replaceChildren(h('div', { class: 'hc-sheet', style: `background-image:url("${url}");aspect-ratio:${asp ?? 16 / 9}` }));
+    };
+    const img = h('img', { alt: '', loading: 'lazy', draggable: 'false' }) as HTMLImageElement;
+    img.onload = () => box.style.setProperty('--bg', `url("${img.src}")`);
+    img.onerror = () => { img.remove(); void fallback(); };
+    img.src = `${fileSrc(join(dir, 'cover.jpg'))}?v=${coverBust.get(p.id) ?? new Date(p.updatedAt).getTime()}`;
+    box.append(img);
+    return box;
   };
-  fillList('');
-  const durParts = (ms: number) => { const s = Math.round(ms / 1000); return [String(Math.floor(s / 60)), String(s % 60).padStart(2, '0')]; };
-  const [mm, ss] = durParts(last?.durationMs ?? 0);
+
+  const projMenu = (e: MouseEvent, p: ProjectSummary) => {
+    openMenu(e.clientX, e.clientY, [
+      { label: 'Buka', icon: 'forward', run: () => void openProject(p.id) },
+      { label: 'Ganti nama…', icon: 'pencil', run: () => void askText(e.clientX, e.clientY, 'Nama proyek', p.name).then(async (n) => { if (n?.trim() && n.trim() !== p.name) { await renameProject(p.id, n.trim()); await renderHome(); } }) },
+      { label: 'Duplikat', icon: 'dup', run: async () => { setBusy('Menduplikat…'); await duplicateProject(p.id, `${p.name} (salinan)`); setBusy(''); await renderHome(); } },
+      { label: starred.has(p.id) ? 'Hapus bintang' : 'Beri bintang', icon: 'star', run: () => { if (starred.has(p.id)) starred.delete(p.id); else starred.add(p.id); saveFlags(); fill(); } },
+      { label: archived.has(p.id) ? 'Keluarkan dari arsip' : 'Arsipkan', icon: 'archive', run: () => { if (archived.has(p.id)) archived.delete(p.id); else archived.add(p.id); saveFlags(); fill(); } },
+      'sep',
+      { label: 'Hapus proyek', icon: 'trash', danger: true, run: () => void removeProjects([p]) },
+    ]);
+  };
+  const removeProjects = async (ps: ProjectSummary[]) => {
+    const msg = ps.length === 1 ? `Hapus proyek "${ps[0].name}"?` : `Hapus ${ps.length} proyek?`;
+    if (!(await dialog().ask(`${msg}\nFile rekaman asli tidak ikut terhapus.`, { title: 'Hapus proyek', kind: 'warning' }))) return;
+    for (const p of ps) { await deleteProject(p.id); starred.delete(p.id); archived.delete(p.id); homePicked.delete(p.id); }
+    saveFlags();
+    await renderHome();
+  };
+
+  const grid = h('div', { class: 'hm-grid' });
+  const head = h('div', { class: 'hm-head' });
+  const counts = h('div');
+  const shownList = () => {
+    const k = homeQuery.trim().toLowerCase();
+    let ps = list.filter((p) => !k || p.name.toLowerCase().includes(k));
+    if (homeFilter === 'archived') ps = ps.filter((p) => archived.has(p.id));
+    else ps = ps.filter((p) => !archived.has(p.id));
+    if (homeFilter === 'starred') ps = ps.filter((p) => starred.has(p.id));
+    if (homeFilter === 'recent') ps = ps.slice(0, 12);
+    const by = sortBy();
+    if (by === 'name') ps = [...ps].sort((a, b) => a.name.localeCompare(b.name, 'id'));
+    if (by === 'dur') ps = [...ps].sort((a, b) => b.durationMs - a.durationMs);
+    return ps;
+  };
+  const TITLES: Record<HomeFilter, string> = { recent: 'Terbaru', all: 'Semua proyek', starred: 'Berbintang', archived: 'Arsip' };
+  let firstFill = true;
+  const fill = () => {
+    const ps = shownList();
+    for (const id of [...homePicked]) if (!list.some((p) => p.id === id)) homePicked.delete(id);
+    const picked = list.filter((p) => homePicked.has(p.id));
+    head.replaceChildren(
+      h('div', { class: 'hm-title' }, h('h1', {}, TITLES[homeFilter]), h('span', { class: 'hm-count' }, String(ps.length))),
+      picked.length ? h('div', { class: 'hm-bulk' },
+        h('span', {}, `${picked.length} dipilih`),
+        h('button', { class: 'hm-pill', onclick: () => { for (const p of picked) { if (homeFilter === 'archived') archived.delete(p.id); else archived.add(p.id); } homePicked.clear(); saveFlags(); fill(); } }, icon('archive', 15), homeFilter === 'archived' ? 'Keluarkan' : 'Arsipkan'),
+        h('button', { class: 'hm-pill danger', onclick: () => void removeProjects(picked) }, icon('trash', 15), 'Hapus'),
+        h('button', { class: 'hm-pill', onclick: () => { homePicked.clear(); fill(); } }, 'Batal'),
+      ) : h('div', { class: 'hm-tools' },
+        ps.length ? h('button', { class: 'hm-pill', onclick: () => { for (const p of ps) homePicked.add(p.id); fill(); } }, 'Pilih semua') : '',
+        h('label', { class: 'hm-pill hm-select' }, h('select', {
+          'aria-label': 'Urutkan', onchange: (e: Event) => { settings.homeSort = (e.target as HTMLSelectElement).value as 'recent'; void saveSettings(settings); fill(); },
+        }, ...([['recent', 'Terakhir diedit'], ['name', 'Nama'], ['dur', 'Durasi terpanjang']] as const).map(([v, n]) => h('option', { value: v, selected: sortBy() === v }, n))), icon('chevDown', 14)),
+        h('div', { class: 'hm-toggle' },
+          h('button', { class: view() === 'grid' ? 'on' : '', 'aria-label': 'Tampilan grid', title: 'Grid', onclick: () => { settings.homeView = 'grid'; void saveSettings(settings); fill(); } }, icon('grid', 17)),
+          h('button', { class: view() === 'list' ? 'on' : '', 'aria-label': 'Tampilan list', title: 'List', onclick: () => { settings.homeView = 'list'; void saveSettings(settings); fill(); } }, icon('list', 17)),
+        ),
+      ),
+    );
+    grid.className = `hm-grid ${view()}${homePicked.size ? ' picking' : ''}${firstFill ? ' intro' : ''}`;
+    if (!ps.length) {
+      grid.replaceChildren(list.length && homeFilter !== 'recent'
+        ? h('div', { class: 'hm-empty' }, h('div', { class: 'hm-empty-t' }, homeQuery ? 'Tidak ada proyek dengan nama itu' : homeFilter === 'starred' ? 'Belum ada proyek berbintang' : 'Arsip kosong'),
+          h('div', { class: 'muted' }, homeFilter === 'starred' ? 'Klik ☆ di kartu proyek untuk menandainya.' : 'Proyek yang diarsipkan tidak muncul di Terbaru, tapi tidak dihapus.'))
+        : h('button', { class: 'hm-drop', onclick: () => openNewProject(pick) },
+          h('span', { class: 'hm-drop-plus' }, icon('plus', 26)),
+          h('span', { class: 'hm-empty-t' }, homeQuery ? 'Tidak ada proyek dengan nama itu' : 'Mulai proyek pertama'),
+          h('span', { class: 'muted' }, 'Tarik rekaman OBS ke jendela ini, atau klik untuk memilih video / kanvas kosong.')));
+    } else {
+      grid.replaceChildren(...ps.map((p, i) => {
+        const on = homePicked.has(p.id), star = starred.has(p.id);
+        const card = h('article', {
+          class: `hc${on ? ' picked' : ''}`, style: `animation-delay:${Math.min(i, 12) * 28}ms`, tabindex: '0',
+          onclick: (ev: Event) => {
+            const e = ev as MouseEvent;
+            if ((e.target as HTMLElement).closest('button')) return;
+            if (homePicked.size || e.ctrlKey || e.shiftKey) { if (on) homePicked.delete(p.id); else homePicked.add(p.id); fill(); return; }
+            void openProject(p.id);
+          },
+          oncontextmenu: (e: Event) => { e.preventDefault(); projMenu(e as MouseEvent, p); },
+          onkeydown: (e: Event) => { if ((e as KeyboardEvent).key === 'Enter') void openProject(p.id); },
+        },
+          h('div', { class: 'hc-media' },
+            cover(p),
+            aspectLabel(p) ? h('span', { class: 'hc-badge hc-aspect' }, aspectLabel(p)) : '',
+            h('span', { class: 'hc-badge hc-dur mono' }, tc(p.durationMs)),
+            h('button', { class: `hc-star${star ? ' on' : ''}`, 'aria-label': star ? 'Hapus bintang' : 'Beri bintang', title: star ? 'Hapus bintang' : 'Beri bintang', onclick: () => { if (star) starred.delete(p.id); else starred.add(p.id); saveFlags(); fill(); } }, icon('star', 16)),
+            archived.has(p.id) ? h('span', { class: 'hc-badge hc-arch' }, 'ARSIP') : '',
+            h('span', { class: 'hc-open' }, icon('play', 16), 'Buka'),
+          ),
+          h('div', { class: 'hc-body' },
+            h('button', { class: `hc-check${on ? ' on' : ''}`, 'aria-label': on ? 'Batal pilih' : 'Pilih', onclick: () => { if (on) homePicked.delete(p.id); else homePicked.add(p.id); fill(); } }, on ? icon('check', 14) : ''),
+            h('div', { class: 'hc-text' },
+              h('div', { class: 'hc-name', title: p.name }, p.name),
+              h('div', { class: 'hc-meta' }, icon('calendar', 13), h('span', {}, `Diedit ${when(p.updatedAt)}`), h('span', { class: 'hc-dot' }), h('span', {}, `${p.clips} potongan`)),
+            ),
+            h('button', { class: 'hc-more', 'aria-label': 'Menu proyek', title: 'Menu', onclick: (e: Event) => projMenu(e as MouseEvent, p) }, icon('more', 18)),
+          ),
+        );
+        return card;
+      }));
+    }
+    counts.replaceChildren(...(['recent', 'all', 'starred', 'archived'] as HomeFilter[]).map((f) => {
+      const n = f === 'archived' ? list.filter((p) => archived.has(p.id)).length : f === 'starred' ? list.filter((p) => starred.has(p.id) && !archived.has(p.id)).length : list.filter((p) => !archived.has(p.id)).length;
+      const ic: IconName = f === 'recent' ? 'clock' : f === 'all' ? 'grid' : f === 'starred' ? 'star' : 'archive';
+      return h('button', { class: `hm-nav${homeFilter === f ? ' on' : ''}`, onclick: () => { homeFilter = f; homePicked.clear(); fill(); } },
+        icon(ic, 19), h('span', {}, TITLES[f].replace(' proyek', '')), f === 'recent' ? '' : h('span', { class: 'hm-nav-n' }, String(n)));
+    }));
+  };
+  fill();
+  firstFill = false;
   const stat = (k: string, v: string, id?: string) => h('div', { class: 'hp-stat' }, h('span', {}, k), h('span', { class: 'mono', id }, v));
   app.replaceChildren(
-    h('main', { class: 'home2' },
-      h('div', { class: 'hp-card' },
-        h('section', {
-          class: `hp-hero${last ? ' has-last' : ''}`,
-          onclick: (e) => { if ((e.target as HTMLElement).closest('button')) return; if (last) void openProject(last.id); else void pick(); },
-          title: last ? `Lanjutkan "${last.name}"` : 'Pilih rekaman',
-        },
-          h('div', { class: 'hp-brand' }, logoMark(22), h('span', {}, 'gals.clip.studio')),
-          h('div', { class: 'hp-drop-hint' }, icon('plus', 18), 'Lepas rekaman di sini untuk membuat proyek'),
-          last ? h('div', { class: 'hp-big' },
-            h('div', { class: 'hp-num' }, mm, h('span', { class: 'hp-colon' }, ':'), ss),
-            h('div', { class: 'hp-what' },
-              h('div', { class: 'hp-name' }, last.name),
-              h('div', { class: 'hp-sub' }, `${when(last.updatedAt)} · ${last.clips} potongan`),
-            ),
-            h('button', { class: 'hp-continue', onclick: () => void openProject(last.id) }, 'Lanjutkan', icon('forward', 15)),
-          ) : h('div', { class: 'hp-big' },
-            h('div', { class: 'hp-what' },
-              h('div', { class: 'hp-name hp-name-xl' }, APP_NAME),
-              h('div', { class: 'hp-sub' }, 'Potong rekaman vertikal dari OBS jadi shorts. Tarik file video ke jendela ini, atau klik tombol + di kanan atas.'),
-            ),
-          ),
-        ),
-        h('aside', { class: 'hp-side' },
-          h('div', { class: 'hp-search' },
-            h('input', { class: 'hp-q', placeholder: 'Cari proyek', 'aria-label': 'Cari proyek', oninput: (e) => fillList((e.target as HTMLInputElement).value) }),
-            h('button', { class: 'hp-new', title: 'Proyek baru', 'aria-label': 'Proyek baru', onclick: () => openNewProject(pick) }, icon('plus', 22)),
-          ),
-          h('div', { class: 'hp-head' }, h('span', {}, 'Proyek'), h('span', { class: 'muted' }, String(list.length))),
-          projList,
-          h('div', { class: 'hp-rule' }),
-          h('div', { class: 'hp-head' }, h('span', {}, 'Ringkasan')),
-          h('div', { class: 'hp-stats' },
-            stat('Proyek', String(list.length)),
-            stat('Total durasi', tc(totalMs)),
-            stat('Video diekspor', String(exported)),
-            stat('Encoder', settings.encoder ? ENCODER_LABEL[settings.encoder] : 'Mengecek…', 'hp-enc'),
-          ),
-          h('div', { class: 'hp-rule' }),
+    h('main', { class: 'home3' },
+      h('aside', { class: 'hm-side' },
+        h('div', { class: 'hm-brand' }, logoMark(26), h('span', {}, 'Gals Clip ', h('b', {}, 'Studio'))),
+        h('button', { class: 'hm-create hp-new', onclick: () => openNewProject(pick) }, icon('plus', 20), 'Buat baru'),
+        h('label', { class: 'hm-search' }, icon('search', 18), h('input', {
+          value: homeQuery, placeholder: 'Cari proyek', 'aria-label': 'Cari proyek',
+          oninput: (e: Event) => { homeQuery = (e.target as HTMLInputElement).value; if (homeQuery && homeFilter === 'recent') homeFilter = 'all'; fill(); },
+        })),
+        h('div', { class: 'hm-label' }, 'Filter'),
+        counts,
+        h('div', { class: 'spacer' }),
+        h('div', { class: 'hm-stats' },
+          stat('Total durasi', tc(totalMs)),
+          stat('Video diekspor', String(exported)),
+          stat('Encoder', settings.encoder ? ENCODER_LABEL[settings.encoder] : 'Mengecek…', 'hp-enc'),
         ),
       ),
+      h('section', { class: 'hm-main' }, head, grid),
     ),
   );
 }
