@@ -4,6 +4,7 @@ import './styles.css';
 import { dialog, fileSrc, invoke, isTauri, onDrop, extName, join, baseName, dirName } from './tauri';
 import { qualityBitrate } from './ffmpeg';
 import { autoEmoji, clearEmoji } from './emoji';
+import { AI_MODELS, aiEngineReady, aiJson, aiModelReady, cancelAi, downloadAiModel, findMoments, frameScore, type AiModelId, type Moment } from './ai';
 import {
   DEFAULT_CAPTION, DEFAULT_TEXT, clipDuration, clipStarts, locate, splitAt, timelineDuration,
   type CaptionLine, type ImageItem, type Watermark, type SoundItem, type TextItem, type TextStyle, type Trans, type VideoClip, type Word,
@@ -200,7 +201,7 @@ const capWordText = (w: Word, caps?: boolean) => `${caps ? w.text.toLocaleUpperC
 
 type SelKind = 'clip' | 'text' | 'line' | 'sound' | 'image' | 'music' | 'layer';
 type Sel = { kind: SelKind; id: string } | null;
-type LeftTab = 'media' | 'layers' | 'transform' | 'crop' | 'color' | 'music' | 'sound' | 'meme' | 'vmeme' | 'text' | 'captions';
+type LeftTab = 'media' | 'layers' | 'transform' | 'crop' | 'color' | 'music' | 'sound' | 'meme' | 'vmeme' | 'text' | 'captions' | 'ai';
 
 let settings: Settings = { outDir: '', encoder: '', model: 'small' };
 let P: Project | null = null;
@@ -602,7 +603,7 @@ function renderEditor() {
     ),
     h('div', { class: 'workspace' },
       h('nav', { class: 'rail', role: 'tablist', 'aria-label': 'Panel' },
-        ...RAIL.flatMap(([k, ic, label]) => [k === RAIL_BREAK ? h('div', { class: 'rail-sep', 'aria-hidden': 'true' }) : null, h('button', {
+        ...RAIL.flatMap(([k, ic, label]) => [RAIL_BREAKS.has(k) ? h('div', { class: 'rail-sep', 'aria-hidden': 'true' }) : null, h('button', {
           role: 'tab', class: railTab(tab) === k ? 'on' : '', 'aria-selected': railTab(tab) === k ? 'true' : 'false', 'data-tab': k, title: label,
           onclick: () => {
             libEdit = false;
@@ -679,9 +680,10 @@ function renderEditor() {
 const RAIL: [LeftTab, IconName, string][] = [
   ['media', 'media', 'Media'], ['music', 'music', 'Musik'], ['sound', 'wave', 'Suara'], ['meme', 'meme', 'Meme'], ['vmeme', 'vmeme', 'Video meme'],
   ['transform', 'move', 'Transform'], ['color', 'color', 'Warna'], ['layers', 'layers', 'Layer'], ['text', 'text', 'Teks'], ['captions', 'captions', 'Subtitle'],
+  ['ai', 'sparkle', 'AI'],
 ];
-const RAIL_BREAK: LeftTab = 'transform';
-const TAB_NAME: Record<LeftTab, string> = { media: 'Media', music: 'Musik', sound: 'Suara', meme: 'Meme', vmeme: 'Video meme', transform: 'Transform', crop: 'Crop', color: 'Warna', layers: 'Layer', text: 'Teks', captions: 'Subtitle' };
+const RAIL_BREAKS = new Set<LeftTab>(['transform', 'ai']);
+const TAB_NAME: Record<LeftTab, string> = { media: 'Media', music: 'Musik', sound: 'Suara', meme: 'Meme', vmeme: 'Video meme', transform: 'Transform', crop: 'Crop', color: 'Warna', layers: 'Layer', text: 'Teks', captions: 'Subtitle', ai: 'AI Asisten' };
 const railTab = (k: LeftTab): LeftTab => (k === 'crop' ? 'transform' : k);
 let safeGuide = false;
 
@@ -875,6 +877,7 @@ function renderLeftInner() {
   else if (tab === 'vmeme') el.replaceChildren(...videoMemePanel());
   else if (tab === 'meme') el.replaceChildren(...memePanel());
   else if (tab === 'text') el.replaceChildren(...textPanel());
+  else if (tab === 'ai') el.replaceChildren(...aiPanel());
   else el.replaceChildren(...captionPanel());
   markAuditionButtons();
 }
@@ -5962,6 +5965,420 @@ function maskBlock(obj: { mask?: Mask | null; key?: ChromaKey | null }): HTMLEle
       tfSlider('Halus', k.blend * 100, 0, 100, 1, (v) => `${Math.round(v)}`, (v) => { k.blend = v / 100; }),
     ) : '',
   );
+}
+
+
+// ================= AI assistant (local model) =================
+let aiModel: AiModelId = 'pintar';
+let aiState: { engine: boolean; ready: Record<AiModelId, boolean> } | null = null;
+let aiBusy = '';
+let aiDl: { id: AiModelId; frac: number } | null = null;
+let moments: Moment[] | null = null;
+let momentLen = 30000, momentCount = 6;
+let titleOut: { judul: string[]; deskripsi: string; hashtag: string[] } | null = null;
+let fixes: { id: string; before: string; after: string; on: boolean }[] | null = null;
+
+async function refreshAi() {
+  const [engine, a, b] = await Promise.all([aiEngineReady(), aiModelReady('pintar'), aiModelReady('cepat')]);
+  aiState = { engine, ready: { pintar: a, cepat: b } };
+  if (!aiState.ready[aiModel] && aiState.ready[aiModel === 'pintar' ? 'cepat' : 'pintar']) aiModel = aiModel === 'pintar' ? 'cepat' : 'pintar';
+  if (tab === 'ai') renderLeft();
+}
+const aiReady = () => !!aiState?.engine && !!aiState.ready[aiModel];
+async function runAi<T>(label: string, fn: () => Promise<T>): Promise<T | null> {
+  if (aiBusy) { toast('AI masih bekerja. Tunggu atau batalkan dulu.'); return null; }
+  aiBusy = label; setBusy(label); renderLeft();
+  try { return await fn(); } catch (e) {
+    const m = (e as Error).message ?? String(e);
+    if (m !== 'Dibatalkan.') toast(`AI gagal: ${m.split('\n')[0]}`, 'error');
+    return null;
+  } finally { aiBusy = ''; setBusy(''); renderLeft(); }
+}
+
+/** Peaks of a media file's audio (one byte per 100 ms), waiting for them if needed. */
+async function waveAsync(path: string): Promise<Uint8Array | null> {
+  const have = waves.get(path);
+  if (have) return have;
+  try {
+    const pk = await invoke<number[]>('waveform', { path, track: 0, job: `wave-${uid()}` });
+    const arr = Uint8Array.from(pk);
+    waves.set(path, arr);
+    return arr;
+  } catch { return null; }
+}
+async function findHighlights() {
+  if (!P) return;
+  const T = tl();
+  const total = timelineDuration(T);
+  if (!T.clips.length) { toast('Tambahkan video dulu.'); return; }
+  setBusy('Mendengarkan suara video…');
+  const wv = new Map<string, Uint8Array | null>();
+  for (const c of T.clips) { const m = mediaOf(c.mediaId); if (m?.hasAudio && !wv.has(m.id)) wv.set(m.id, await waveAsync(m.playable)); }
+  setBusy('');
+  const loudAt = (ms: number) => {
+    const loc = locate(T.clips, ms);
+    if (!loc) return 0;
+    const pk = wv.get(T.clips[loc.index].mediaId);
+    return pk ? (pk[Math.floor(loc.sourceMs / 100)] ?? 0) / 255 : 0;
+  };
+  const words = T.captions.lines.flatMap((l) => l.words.map((w) => ({ text: w.text, startMs: w.startMs })));
+  const lines = T.captions.lines.map((l) => ({ startMs: l.startMs, endMs: l.endMs, text: l.words.map((w) => w.text).join(' ') }));
+  const found = findMoments(total, loudAt, words, lines, momentLen, momentCount + 3);
+  if (!found.length) { toast('Tidak ada momen yang menonjol.'); return; }
+  moments = found.slice(0, momentCount);
+  renderLeft();
+  if (!aiReady()) { toast(`${moments.length} momen ditemukan dari suara${words.length ? ' dan subtitle' : ''}. Pasang model AI untuk judul & penilaian.`); return; }
+  if (!words.length) { toast('Momen ditemukan dari suara. Buat subtitle dulu supaya AI bisa menilai isinya.'); return; }
+  const cand = found;
+  const res = await runAi('AI menilai momen…', () => aiJson<{ items: { id: number; nilai: number; judul: string; alasan: string }[] }>(aiModel,
+    'Kamu editor video gaming YouTube Indonesia yang jago memilih momen paling seru, lucu, atau menegangkan dari siaran live untuk dijadikan Shorts/TikTok. Jawab dalam bahasa Indonesia santai.',
+    `Ini potongan kandidat dari satu siaran. Untuk tiap potongan beri nilai 1-10 (seberapa layak jadi Shorts), judul pendek yang bikin penasaran (maks 60 karakter, tanpa tanda kutip), dan alasan singkat (maks 12 kata).\n\n${cand.map((m, i) => `#${i} [${tc(m.startMs)}–${tc(m.endMs)}] suara keras: ${m.loud > 0.8 ? 'tinggi' : m.loud > 0.2 ? 'sedang' : 'rendah'}${m.hits.length ? `, kata seru: ${m.hits.slice(0, 5).join(', ')}` : ''}\n"${m.text.slice(0, 450) || '(tanpa subtitle)'}"`).join('\n\n')}`,
+    { type: 'object', properties: { items: { type: 'array', items: { type: 'object', properties: { id: { type: 'integer' }, nilai: { type: 'integer', minimum: 1, maximum: 10 }, judul: { type: 'string' }, alasan: { type: 'string' } }, required: ['id', 'nilai', 'judul', 'alasan'] } } }, required: ['items'] },
+    120 + cand.length * 70));
+  if (!res) return;
+  for (const it of res.items ?? []) {
+    const m = cand[it.id];
+    if (!m) continue;
+    m.ai = clamp(it.nilai, 1, 10); m.title = it.judul?.trim().slice(0, 80); m.reason = it.alasan?.trim().slice(0, 120);
+    m.score = Math.round((m.score * 0.45 + m.ai * 0.55) * 10) / 10;
+  }
+  moments = [...cand].sort((a, b) => b.score - a.score).slice(0, momentCount).sort((a, b) => a.startMs - b.startMs);
+  toast('AI selesai menilai. Momen terbaik ditandai bintang.');
+  renderLeft();
+}
+
+function transcriptText(maxChars = 7000): string {
+  const r = rangeNow();
+  const lines = tl().captions.lines.filter((l) => !r || (l.endMs > r.inMs && l.startMs < r.outMs)).map((l) => l.words.map((w) => w.text).join(' '));
+  const all = lines.join('\n');
+  if (all.length <= maxChars) return all;
+  // spread the sample over the whole video
+  const keep = Math.max(1, Math.floor(lines.length * (maxChars / all.length)));
+  const stepN = lines.length / keep;
+  return Array.from({ length: keep }, (_, i) => lines[Math.floor(i * stepN)]).join('\n');
+}
+async function makeTitles() {
+  const text = transcriptText();
+  if (!text.trim()) { toast('Buat subtitle dulu: AI membaca isi video dari subtitle.'); return; }
+  const res = await runAi('AI membuat judul…', () => aiJson<{ judul: string[]; deskripsi: string; hashtag: string[] }>(aiModel,
+    'Kamu ahli judul YouTube dan TikTok gaming Indonesia. Judul harus bikin penasaran, jujur sesuai isi, pakai bahasa Indonesia santai, boleh 1 emoji. Jangan pakai tanda kutip.',
+    `Isi video (dari subtitle):\n${text}\n\nBuat 5 judul berbeda (maks 70 karakter), 1 deskripsi 2-3 kalimat, dan 8 hashtag relevan (dengan #).`,
+    { type: 'object', properties: { judul: { type: 'array', items: { type: 'string' }, minItems: 5, maxItems: 5 }, deskripsi: { type: 'string' }, hashtag: { type: 'array', items: { type: 'string' }, minItems: 3, maxItems: 10 } }, required: ['judul', 'deskripsi', 'hashtag'] },
+    600));
+  if (!res) return;
+  titleOut = { judul: (res.judul ?? []).map((x) => x.trim()).filter(Boolean), deskripsi: (res.deskripsi ?? '').trim(), hashtag: (res.hashtag ?? []).map((x) => (x.startsWith('#') ? x : `#${x}`).replace(/\s+/g, '')) };
+  renderLeft();
+}
+async function fixSubtitles() {
+  const lines = tl().captions.lines;
+  if (!lines.length) { toast('Belum ada subtitle.'); return; }
+  const out: { id: string; before: string; after: string; on: boolean }[] = [];
+  const B = 24;
+  const res = await runAi('AI mengoreksi subtitle…', async () => {
+    for (let i = 0; i < lines.length; i += B) {
+      const part = lines.slice(i, i + B);
+      setBusy(`AI mengoreksi subtitle… ${Math.round((i / lines.length) * 100)}%`);
+      const r = await aiJson<{ baris: { id: number; teks: string }[] }>(aiModel,
+        'Kamu korektor subtitle bahasa Indonesia untuk video gaming. Subtitle dibuat otomatis dari suara, jadi ada kata salah dengar dan salah ketik. Perbaiki hanya kesalahan itu. Jangan ubah gaya bahasa gaul atau slang, jangan terjemahkan, jangan tambah atau buang kalimat.',
+        `Perbaiki tiap baris. Kalau sudah benar, kembalikan sama persis.\n\n${part.map((l, j) => `${j}: ${l.words.map((w) => w.text).join(' ')}`).join('\n')}`,
+        { type: 'object', properties: { baris: { type: 'array', items: { type: 'object', properties: { id: { type: 'integer' }, teks: { type: 'string' } }, required: ['id', 'teks'] } } }, required: ['baris'] },
+        60 + part.length * 40);
+      for (const b of r.baris ?? []) {
+        const l = part[b.id];
+        if (!l) continue;
+        const before = l.words.map((w) => w.text).join(' ');
+        const after = (b.teks ?? '').replace(/\s+/g, ' ').trim();
+        const norm = (x: string) => x.toLowerCase().replace(/[^\p{L}\p{N} ]/gu, '');
+        if (after && norm(after) !== norm(before) && after.length < before.length * 2 + 10) out.push({ id: l.id, before, after, on: true });
+      }
+    }
+    return true;
+  });
+  if (!res) return;
+  fixes = out;
+  if (!out.length) toast('Subtitle sudah rapi, tidak ada yang perlu dikoreksi.');
+  renderLeft();
+}
+function applyFixes() {
+  if (!fixes) return;
+  snapshot();
+  let n = 0;
+  for (const f of fixes) {
+    if (!f.on) continue;
+    const l = tl().captions.lines.find((x) => x.id === f.id);
+    if (!l) continue;
+    const words = f.after.split(' ').filter(Boolean);
+    if (words.length === l.words.length) words.forEach((w, i) => { l.words[i].text = w; });
+    else {
+      // new word count: share the line's time by word length, keep the styling of the words by position
+      const total = words.reduce((a, w) => a + w.length, 0) || 1;
+      let t0 = l.startMs;
+      l.words = words.map((w, i) => {
+        const d = ((l.endMs - l.startMs) * w.length) / total;
+        const old = l.words[Math.min(i, l.words.length - 1)];
+        const nw: Word = { text: w, startMs: Math.round(t0), endMs: Math.round(t0 + d), ...(old?.fx ? { fx: old.fx } : {}), ...(old?.color ? { color: old.color } : {}) };
+        t0 += d;
+        return nw;
+      });
+    }
+    n++;
+  }
+  fixes = null;
+  changed({ left: true });
+  toast(`${n} baris subtitle dikoreksi. Ctrl+Z untuk membatalkan.`);
+}
+
+function copyText(text: string, what = 'Teks') {
+  void navigator.clipboard.writeText(text).then(() => toast(`${what} disalin.`), () => void askText(window.innerWidth / 2 - 160, 140, 'Salin (Ctrl+C)', text));
+}
+
+function aiPanel(): Node[] {
+  if (!aiState) { void refreshAi(); return [h('div', { class: 'muted small' }, h('span', { class: 'spinner' }), ' Mengecek AI…')]; }
+  const st = aiState;
+  const model = h('div', { class: 'block' },
+    h('div', { class: 'row-between' }, h('div', { class: 'label' }, 'Model AI (di PC kamu, offline)'), st.engine ? '' : h('span', { class: 'warn small' }, 'Mesin AI belum ada')),
+    h('div', { class: 'ai-models' }, ...(Object.keys(AI_MODELS) as AiModelId[]).map((id) => {
+      const m = AI_MODELS[id], ready = st.ready[id], dl = aiDl?.id === id;
+      return h('div', { class: `ai-model${aiModel === id ? ' on' : ''}`, onclick: () => { if (ready) { aiModel = id; renderLeft(); } } },
+        h('div', { class: 'ai-model-name' }, m.name, ready ? h('span', { class: 'adv-dot', title: 'Sudah terpasang' }) : ''),
+        h('div', { class: 'muted small' }, m.hint),
+        ready ? h('span', { class: 'muted small' }, aiModel === id ? 'Dipakai' : 'Klik untuk pakai')
+          : dl ? h('div', { class: 'bar-track' }, h('div', { class: 'bar-fill', style: `width:${Math.round((aiDl!.frac) * 100)}%` }))
+            : h('button', {
+              class: 'secondary small', disabled: !!aiDl, onclick: async (e: Event) => {
+                e.stopPropagation();
+                aiDl = { id, frac: 0 }; renderLeft();
+                try {
+                  await downloadAiModel(id, (f) => { if (aiDl) { aiDl.frac = f; const bar = document.querySelector('.ai-model .bar-fill') as HTMLElement | null; if (bar) bar.style.width = `${Math.round(f * 100)}%`; } });
+                  aiModel = id; toast(`Model ${m.name} siap.`);
+                } catch (err) { toast(`Unduhan gagal: ${(err as Error).message.split('\n')[0]}`, 'error'); }
+                aiDl = null; await refreshAi();
+              },
+            }, 'Unduh'),
+      );
+    })),
+    h('div', { class: 'muted small' }, 'Diunduh sekali, lalu jalan tanpa internet. Semua diproses di PC, rekaman tidak dikirim ke mana pun.'),
+  );
+  const busy = aiBusy ? h('div', { class: 'ai-busy' }, h('span', { class: 'spinner' }), h('span', {}, aiBusy), h('button', { class: 'ghost small', onclick: () => void cancelAi() }, 'Batal')) : '';
+  const hasSubs = tl().captions.lines.length > 0;
+
+  const momentsBlock = h('div', { class: 'block' },
+    h('div', { class: 'label' }, 'Cari momen seru (AI Clip Assistant)'),
+    h('div', { class: 'muted small' }, `Mendengarkan teriakan/tawa, membaca kata seru di subtitle${aiReady() ? ', lalu AI menilai dan memberi judul' : ''}. Cocok untuk VOD panjang.`),
+    h('div', { class: 'row2' },
+      field('Panjang klip', h('select', { onchange: (e) => { momentLen = Number((e.target as HTMLSelectElement).value); } }, ...[15000, 30000, 45000, 60000].map((v) => h('option', { value: v, selected: v === momentLen }, `${v / 1000} detik`)))),
+      field('Jumlah', h('select', { onchange: (e) => { momentCount = Number((e.target as HTMLSelectElement).value); } }, ...[3, 5, 6, 8, 10].map((v) => h('option', { value: v, selected: v === momentCount }, `${v} momen`)))),
+    ),
+    h('button', { class: 'primary wide with-ico', disabled: !!aiBusy, onclick: () => void findHighlights() }, icon('sparkle', 15), 'Cari momen'),
+    moments?.length ? h('div', { class: 'moments' }, ...moments.map((m) => {
+      const best = moments!.length > 2 && m.score >= Math.max(...moments!.map((x) => x.score)) - 0.01;
+      return h('div', { class: 'moment' },
+        h('div', { class: 'row-between' },
+          h('button', { class: 'moment-time mono', title: 'Lihat', onclick: () => { seek(m.startMs); play(); } }, `${tc(m.startMs)} – ${tc(m.endMs)}`),
+          h('span', { class: `moment-score${best ? ' best' : ''}`, title: m.ai ? `Nilai AI ${m.ai}/10` : 'Dari suara & subtitle' }, `${best ? '★ ' : ''}${m.score.toFixed(1)}`),
+        ),
+        m.title ? h('div', { class: 'moment-title' }, m.title) : '',
+        m.reason ? h('div', { class: 'muted small' }, m.reason) : m.hits.length ? h('div', { class: 'muted small' }, `Kata seru: ${m.hits.slice(0, 4).join(', ')}`) : '',
+        h('div', { class: 'quick-grid' },
+          h('button', { class: 'chip', title: 'Set In/Out ke momen ini (lalu Ekspor bagian ini)', onclick: () => { snapshot(); tl().range = { inMs: m.startMs, outMs: m.endMs }; exportRangeOnly = true; changed(); seek(m.startMs); toast('In/Out dipasang. Buka Ekspor untuk mengekspor bagian ini saja.'); } }, 'Jadikan In/Out'),
+          h('button', { class: 'chip', onclick: () => { snapshot(); markers().push({ id: uid(), ms: m.startMs, label: m.title?.slice(0, 40) || `Momen ${tc(m.startMs)}`, color: '#ffb020' }); markers().sort((a, b) => a.ms - b.ms); changed(); } }, '+ Marker'),
+          m.title ? h('button', { class: 'chip', onclick: () => copyText(m.title!, 'Judul') }, 'Salin judul') : '',
+        ),
+      );
+    })) : '',
+  );
+
+  const titleBlock = h('div', { class: 'block' },
+    h('div', { class: 'label' }, 'Judul, deskripsi & hashtag'),
+    h('div', { class: 'muted small' }, hasSubs ? `AI membaca subtitle${rangeNow() ? ' di bagian In/Out' : ''} lalu membuat 5 pilihan judul.` : 'Butuh subtitle dulu (tab Subtitle → Buat subtitle).'),
+    h('button', { class: 'secondary wide with-ico', disabled: !aiReady() || !hasSubs || !!aiBusy, onclick: () => void makeTitles() }, icon('sparkle', 15), 'Buat judul'),
+    titleOut ? h('div', { class: 'stack' },
+      ...titleOut.judul.map((j) => h('div', { class: 'ai-out' }, h('span', {}, j),
+        h('button', { class: 'lp-btn', title: 'Salin', 'aria-label': 'Salin judul', onclick: () => copyText(j, 'Judul') }, icon('copy', 14)),
+        h('button', { class: 'lp-btn', title: 'Jadikan nama proyek', 'aria-label': 'Jadikan nama proyek', onclick: () => { if (P) { P.name = j.slice(0, 80); void saveProject(P); const ti = document.querySelector('.title-input') as HTMLInputElement | null; if (ti) ti.value = P.name; toast('Nama proyek diganti.'); } } }, icon('text', 14)),
+      )),
+      titleOut.deskripsi ? h('div', { class: 'ai-out' }, h('span', {}, titleOut.deskripsi), h('button', { class: 'lp-btn', 'aria-label': 'Salin deskripsi', onclick: () => copyText(`${titleOut!.deskripsi}\n\n${titleOut!.hashtag.join(' ')}`, 'Deskripsi') }, icon('copy', 14))) : '',
+      titleOut.hashtag.length ? h('div', { class: 'ai-out' }, h('span', { class: 'mono small' }, titleOut.hashtag.join(' ')), h('button', { class: 'lp-btn', 'aria-label': 'Salin hashtag', onclick: () => copyText(titleOut!.hashtag.join(' '), 'Hashtag') }, icon('copy', 14))) : '',
+      markers().length ? h('button', { class: 'ghost small', onclick: () => void copyChapters() }, 'Salin juga chapter dari marker') : '',
+    ) : '',
+  );
+
+  const fixBlock = h('div', { class: 'block' },
+    h('div', { class: 'label' }, 'Koreksi subtitle'),
+    h('div', { class: 'muted small' }, 'AI membetulkan kata yang salah dengar atau salah ketik. Kamu pilih mana yang dipakai.'),
+    h('button', { class: 'secondary wide with-ico', disabled: !aiReady() || !hasSubs || !!aiBusy, onclick: () => void fixSubtitles() }, icon('sparkle', 15), 'Koreksi subtitle'),
+    fixes?.length ? h('div', { class: 'stack' },
+      h('div', { class: 'fix-list' }, ...fixes.map((f) => h('label', { class: 'fix' },
+        h('input', { type: 'checkbox', checked: f.on, onchange: (e) => { f.on = (e.target as HTMLInputElement).checked; } }),
+        h('span', {}, h('s', { class: 'muted' }, f.before), h('br'), f.after)))),
+      h('button', { class: 'primary wide', onclick: applyFixes }, `Terapkan ${fixes.filter((f) => f.on).length} koreksi`),
+    ) : '',
+  );
+
+  const thumbBlock = h('div', { class: 'block' },
+    h('div', { class: 'label' }, 'Thumbnail'),
+    h('div', { class: 'muted small' }, 'Memilih frame paling tajam & berwarna, lalu kamu tambah judul besar. Simpan sebagai PNG.'),
+    h('button', { class: 'secondary wide with-ico', disabled: !tl().clips.length, onclick: () => void openThumbStudio() }, icon('image', 15), 'Buat thumbnail'),
+  );
+
+  return [
+    st.engine ? h('span') : h('div', { class: 'warn small' }, 'Mesin AI tidak ditemukan. Install ulang versi terbaru Gals Clip Studio.'),
+    model, busy || h('span'), momentsBlock, titleBlock, fixBlock, thumbBlock,
+  ];
+}
+
+// ---------- thumbnail studio ----------
+type ThumbStyle = { id: string; name: string; fill: string | [string, string]; stroke: string; box?: string };
+const THUMB_STYLES: ThumbStyle[] = [
+  { id: 'kuning', name: 'Kuning gaming', fill: '#ffd400', stroke: '#000' },
+  { id: 'putih', name: 'Putih tebal', fill: '#ffffff', stroke: '#000' },
+  { id: 'api', name: 'Gradasi api', fill: ['#fff15a', '#ff4d00'], stroke: '#2a0700' },
+  { id: 'kotak', name: 'Kotak merah', fill: '#ffffff', stroke: 'transparent', box: '#e3242b' },
+];
+async function grabFrames(times: number[], maxW = 1280): Promise<{ t: number; cv: HTMLCanvasElement; score: number }[]> {
+  const out: { t: number; cv: HTMLCanvasElement; score: number }[] = [];
+  const vids = new Map<string, HTMLVideoElement>();
+  const small = document.createElement('canvas'); small.width = 160; small.height = 90;
+  const sc = small.getContext('2d', { willReadFrequently: true })!;
+  for (const t0 of times) {
+    const loc = locate(tl().clips, t0);
+    if (!loc) continue;
+    const c = tl().clips[loc.index], m = mediaOf(c.mediaId);
+    if (!m) continue;
+    let v = vids.get(m.id);
+    if (!v) {
+      v = document.createElement('video');
+      v.muted = true; v.preload = 'auto'; v.crossOrigin = 'anonymous'; v.src = fileSrc(m.playable);
+      await new Promise<void>((res) => { v!.onloadeddata = () => res(); v!.onerror = () => res(); setTimeout(res, 8000); });
+      vids.set(m.id, v);
+    }
+    await new Promise<void>((res) => { const done = () => { v!.removeEventListener('seeked', done); res(); }; v!.addEventListener('seeked', done); v!.currentTime = loc.sourceMs / 1000; setTimeout(done, 4000); });
+    if (!v.videoWidth) continue;
+    const k = Math.min(1, maxW / v.videoWidth);
+    const cv = document.createElement('canvas'); cv.width = Math.round(v.videoWidth * k); cv.height = Math.round(v.videoHeight * k);
+    cv.getContext('2d')!.drawImage(v, 0, 0, cv.width, cv.height);
+    small.height = Math.max(2, Math.round((160 * cv.height) / cv.width));
+    sc.drawImage(cv, 0, 0, small.width, small.height);
+    out.push({ t: t0, cv, score: frameScore(sc, small.width, small.height) });
+  }
+  vids.forEach((v) => { v.removeAttribute('src'); v.load(); });
+  return out;
+}
+async function openThumbStudio() {
+  if (!P) return;
+  const total = timelineDuration(tl());
+  // candidate times: the found moments (a bit into each), plus evenly over the video
+  const times = new Set<number>();
+  for (const m of moments ?? []) { times.add(Math.round(m.startMs + (m.endMs - m.startMs) * 0.3)); times.add(Math.round(m.startMs + (m.endMs - m.startMs) * 0.65)); }
+  for (let i = 1; i <= 12; i++) times.add(Math.round((total * i) / 13));
+  setBusy('Mencari frame terbaik…');
+  let frames: { t: number; cv: HTMLCanvasElement; score: number }[] = [];
+  try { frames = (await grabFrames([...times].sort((a, b) => a - b))).sort((a, b) => b.score - a.score).slice(0, 8); } finally { setBusy(''); }
+  if (!frames.length) { toast('Frame video tidak bisa dibaca.', 'error'); return; }
+  const st = {
+    frame: 0, text: (titleOut?.judul[0] ?? moments?.find((m) => m.title)?.title ?? P.name).toUpperCase(), style: 'kuning', size: 1, y: 0.78, zoom: 1, panX: 0.5, panY: 0.5,
+    shade: true, pop: true, fmt: (tl().height > tl().width ? 'short' : 'yt') as 'yt' | 'short', logo: !!tl().watermark,
+  };
+  const cv = h('canvas', { class: 'ts-canvas' }) as HTMLCanvasElement;
+  const draw = () => {
+    const [W, H] = st.fmt === 'yt' ? [1280, 720] : [1080, 1920];
+    cv.width = W; cv.height = H;
+    const c = cv.getContext('2d')!;
+    const f = frames[st.frame].cv;
+    const s = Math.max(W / f.width, H / f.height) * st.zoom;
+    const dw = f.width * s, dh = f.height * s;
+    c.filter = st.pop ? 'contrast(1.12) saturate(1.3) brightness(1.04)' : 'none';
+    c.drawImage(f, (W - dw) * st.panX, (H - dh) * st.panY, dw, dh);
+    c.filter = 'none';
+    if (st.shade) {
+      const g = c.createLinearGradient(0, H * 0.45, 0, H); g.addColorStop(0, 'rgba(0,0,0,0)'); g.addColorStop(1, 'rgba(0,0,0,.72)');
+      c.fillStyle = g; c.fillRect(0, 0, W, H);
+      const v = c.createRadialGradient(W / 2, H / 2, Math.min(W, H) * 0.35, W / 2, H / 2, Math.hypot(W, H) / 2); v.addColorStop(0, 'rgba(0,0,0,0)'); v.addColorStop(1, 'rgba(0,0,0,.45)');
+      c.fillStyle = v; c.fillRect(0, 0, W, H);
+    }
+    const sty = THUMB_STYLES.find((x) => x.id === st.style)!;
+    let fs = Math.round((st.fmt === 'yt' ? 118 : 132) * st.size);
+    c.textAlign = 'center'; c.textBaseline = 'middle'; c.lineJoin = 'round';
+    // wrap; shrink the text until it fits in 3 lines
+    const maxW = W * 0.9, words = st.text.trim().split(/\s+/).filter(Boolean);
+    let rows: string[] = [];
+    for (let tries = 0; tries < 30; tries++) {
+      c.font = `900 ${fs}px Impact, "Bahnschrift", "Arial Black", sans-serif`;
+      rows = [];
+      let cur = '';
+      for (const w of words) { const tr = cur ? `${cur} ${w}` : w; if (c.measureText(tr).width > maxW && cur) { rows.push(cur); cur = w; } else cur = tr; }
+      if (cur) rows.push(cur);
+      if (rows.length <= 3 && rows.every((r) => c.measureText(r).width <= maxW)) break;
+      fs = Math.round(fs * 0.92);
+    }
+    const lh = fs * 1.02, top = st.y * H - ((rows.length - 1) * lh) / 2;
+    rows.forEach((r, i) => {
+      const y = top + i * lh, tw = c.measureText(r).width;
+      if (sty.box) { c.fillStyle = sty.box; c.fillRect(W / 2 - tw / 2 - fs * 0.22, y - lh / 2, tw + fs * 0.44, lh * 0.98); }
+      if (sty.stroke !== 'transparent') { c.lineWidth = fs * 0.16; c.strokeStyle = sty.stroke; c.shadowColor = 'rgba(0,0,0,.6)'; c.shadowBlur = fs * 0.2; c.shadowOffsetY = fs * 0.06; c.strokeText(r, W / 2, y); c.shadowColor = 'transparent'; }
+      if (Array.isArray(sty.fill)) { const g = c.createLinearGradient(0, y - lh / 2, 0, y + lh / 2); g.addColorStop(0, sty.fill[0]); g.addColorStop(1, sty.fill[1]); c.fillStyle = g; } else c.fillStyle = sty.fill;
+      c.fillText(r, W / 2, y);
+    });
+    const wm = tl().watermark;
+    if (st.logo && wm) {
+      const el = imageEl(wm.file);
+      if (el.complete && el.naturalWidth) { const lw = Math.min(W, H) * 0.16, lh2 = lw / wm.aspect, m = Math.min(W, H) * 0.04; c.globalAlpha = 0.95; c.drawImage(el, W - lw - m, m, lw, lh2); c.globalAlpha = 1; }
+    }
+  };
+  const close = () => { pop.remove(); window.removeEventListener('keydown', esc, true); };
+  const esc = (e: KeyboardEvent) => { if (e.key === 'Escape' && !(e.target as HTMLElement).closest('input,textarea')) { e.stopPropagation(); close(); } };
+  window.addEventListener('keydown', esc, true);
+  const rangeIn = (label: string, v: number, min: number, max: number, step: number, on: (x: number) => void) =>
+    tfSlider(label, v, min, max, step, (x) => `${Math.round(x * 100)}%`, (x) => { on(x); draw(); });
+  const thumbs = h('div', { class: 'ts-frames' }, ...frames.map((fr, i) => {
+    const b = h('button', { class: `ts-frame${i === st.frame ? ' on' : ''}`, title: `${tc(fr.t)}`, onclick: () => { st.frame = i; thumbs.querySelectorAll('.ts-frame').forEach((x, j) => x.classList.toggle('on', j === i)); draw(); } });
+    const im = document.createElement('canvas'); im.width = 192; im.height = Math.round((192 * fr.cv.height) / fr.cv.width); im.getContext('2d')!.drawImage(fr.cv, 0, 0, im.width, im.height);
+    b.append(im, h('span', { class: 'mono' }, tc(fr.t)));
+    return b;
+  }));
+  const pop = h('div', { class: 'ts-wrap', role: 'dialog', 'aria-label': 'Thumbnail' },
+    h('div', { class: 'ts-card' },
+      h('div', { class: 'row-between' }, h('h3', {}, 'Thumbnail'), h('button', { class: 'icon-btn', 'aria-label': 'Tutup', onclick: close }, icon('x', 16))),
+      h('div', { class: 'ts-body' },
+        h('div', { class: 'ts-left' }, h('div', { class: 'label' }, 'Frame terbaik'), thumbs),
+        h('div', { class: `ts-stage ${st.fmt}` }, cv),
+        h('div', { class: 'ts-right' },
+          h('div', { class: 'seg' },
+            h('button', { class: st.fmt === 'yt' ? 'on' : '', onclick: (e: Event) => { st.fmt = 'yt'; (e.target as HTMLElement).parentElement!.querySelectorAll('button').forEach((b, i) => b.classList.toggle('on', i === 0)); cv.parentElement!.className = 'ts-stage yt'; draw(); } }, 'YouTube 16:9'),
+            h('button', { class: st.fmt === 'short' ? 'on' : '', onclick: (e: Event) => { st.fmt = 'short'; (e.target as HTMLElement).parentElement!.querySelectorAll('button').forEach((b, i) => b.classList.toggle('on', i === 1)); cv.parentElement!.className = 'ts-stage short'; draw(); } }, 'Shorts 9:16'),
+          ),
+          field('Judul', h('textarea', { rows: 3, value: st.text, oninput: (e) => { st.text = (e.target as HTMLTextAreaElement).value; draw(); } }, st.text)),
+          titleOut?.judul.length ? h('div', { class: 'quick-grid' }, ...titleOut.judul.slice(0, 3).map((j) => h('button', { class: 'chip', title: j, onclick: () => { st.text = j.toUpperCase(); (pop.querySelector('textarea') as HTMLTextAreaElement).value = st.text; draw(); } }, j.slice(0, 18) + (j.length > 18 ? '…' : '')))) : '',
+          h('div', { class: 'quick-grid' }, ...THUMB_STYLES.map((x) => h('button', { class: `chip${st.style === x.id ? ' on' : ''}`, onclick: (e: Event) => { st.style = x.id; (e.target as HTMLElement).parentElement!.querySelectorAll('.chip').forEach((b) => b.classList.toggle('on', b === e.target)); draw(); } }, x.name))),
+          rangeIn('Ukuran', st.size, 0.5, 1.6, 0.01, (x) => { st.size = x; }),
+          rangeIn('Posisi', st.y, 0.12, 0.9, 0.01, (x) => { st.y = x; }),
+          rangeIn('Zoom', st.zoom, 1, 2.5, 0.01, (x) => { st.zoom = x; }),
+          rangeIn('Geser X', st.panX, 0, 1, 0.01, (x) => { st.panX = x; }),
+          rangeIn('Geser Y', st.panY, 0, 1, 0.01, (x) => { st.panY = x; }),
+          h('label', { class: 'check' }, h('input', { type: 'checkbox', checked: st.pop, onchange: (e) => { st.pop = (e.target as HTMLInputElement).checked; draw(); } }), 'Warna lebih nendang'),
+          h('label', { class: 'check' }, h('input', { type: 'checkbox', checked: st.shade, onchange: (e) => { st.shade = (e.target as HTMLInputElement).checked; draw(); } }), 'Gelapkan bawah & tepi'),
+          tl().watermark ? h('label', { class: 'check' }, h('input', { type: 'checkbox', checked: st.logo, onchange: (e) => { st.logo = (e.target as HTMLInputElement).checked; draw(); } }), 'Logo channel') : '',
+          h('button', {
+            class: 'primary wide', onclick: async () => {
+              draw();
+              const blob = await new Promise<Blob | null>((res) => cv.toBlob(res, 'image/png'));
+              if (!blob) return;
+              await invoke('ensure_dir', { path: settings.outDir });
+              const base = `${exportFileName().replace(/\s*-\s*[^-]*$/, '')} thumbnail ${st.fmt === 'yt' ? '16x9' : '9x16'}`.replace(/[\\/:*?"<>|]+/g, '-');
+              let file = join(settings.outDir, `${base}.png`), n = 1;
+              while (await invoke<boolean>('exists', { path: file })) file = join(settings.outDir, `${base} (${++n}).png`);
+              await invoke('write_bytes', { path: file, content: Array.from(new Uint8Array(await blob.arrayBuffer())) });
+              toast(`Thumbnail disimpan: ${baseName(file)}`);
+              void invoke('reveal', { path: file }).catch(() => undefined);
+            },
+          }, 'Simpan PNG'),
+        ),
+      ),
+    ),
+  );
+  pop.addEventListener('pointerdown', (e) => { if (e.target === pop) close(); });
+  document.body.append(pop);
+  draw();
 }
 
 // ================= reverse: a reversed copy of the piece, made in 2-second chunks so memory stays small =================

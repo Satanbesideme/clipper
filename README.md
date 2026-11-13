@@ -68,6 +68,26 @@ Tab **Warna** (atau **Ctrl+U**). Klik satu potongan/layer untuk mengatur sendiri
 
 Klik kanan di timeline **atau langsung di preview** membuka menu: Transform, Crop, Warna, Salin, Tempel, Duplikat, fade suara, urutan layer, split, hapus.
 
+## AI Asisten (offline, di PC sendiri)
+Tab **AI** di rel kiri. Unduh model sekali (Pintar ±2,5 GB atau Cepat ±1,1 GB, model Qwen3 berlisensi Apache 2.0), lalu semuanya jalan tanpa internet lewat llama.cpp. Rekaman tidak dikirim ke mana pun.
+- **Cari momen seru**: mendengarkan teriakan/tawa dan membaca kata seru di subtitle, lalu AI menilai dan memberi judul tiap momen. Satu klik untuk jadikan In/Out (lalu ekspor bagian itu) atau marker.
+- **Judul, deskripsi & hashtag**: 5 pilihan judul dari isi subtitle.
+- **Koreksi subtitle**: membetulkan kata salah dengar; kamu pilih mana yang dipakai.
+- **Thumbnail**: memilih frame paling tajam & berwarna, judul besar dengan gaya gaming, 16:9 atau 9:16, simpan PNG.
+
+## Ala Photoshop
+- **Panel Layer**: semua objek (teks, subtitle, meme, layer video, adjustment, video utama) dengan mata (sembunyikan), gembok (kunci), ganti nama (klik dua kali), duplikat, hapus, seret untuk urutan, dan grup (Ctrl+G, lepas: Ctrl+Shift+G).
+- **Adjustment layer**: atur warna semua yang ada di bawahnya, termasuk Levels, Curves, Hue/Saturation, Color Balance, dan LUT. Kekuatannya bisa diatur.
+- **Transform lanjutan**: rotasi, flip, titik anchor, dan distort/perspektif (tarik 4 sudut di preview).
+- **Mask**: kotak atau elips dengan feather, bisa dibalik, dan muncul bertahap (wipe). Ada juga **green screen** (chroma key) dengan pengambil warna dari preview.
+- **Blending modes**: Multiply, Screen, Overlay, Soft Light, Add, Darken, Lighten, Difference.
+- **Typography studio**: spasi huruf, tinggi baris, warna & tebal garis tepi, bayangan, teks gradasi, miring, dan preset teks sendiri.
+
+## Lain-lain
+- Reverse video (klik kanan potongan → Putar mundur).
+- Preset ekspor (Shorts, TikTok, Reels, YouTube 1080p/2K/4K, Feed 4:5) dan nama file otomatis (`{tanggal} {judul} - {preset}`).
+- Auto emoji di subtitle dan tombol "Rapikan timing kata".
+
 ## Shortcut ala Premiere
 | Tombol | Fungsi |
 |---|---|

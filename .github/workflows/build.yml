@@ -103,6 +103,39 @@ jobs:
           Copy-Item (Join-Path $cli.DirectoryName "*.dll") src-tauri/whisper/
           Get-ChildItem src-tauri/whisper
 
+      - name: Unduh llama.cpp (AI lokal)
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $headers = @{ Authorization = "Bearer $env:GH_TOKEN"; "User-Agent" = "galsurku-clipper-ci" }
+          $asset = $null
+          try {
+            $releases = Invoke-RestMethod "https://api.github.com/repos/ggml-org/llama.cpp/releases?per_page=10" -Headers $headers -MaximumRetryCount 6 -RetryIntervalSec 20
+            foreach ($r in $releases) {
+              $asset = $r.assets | Where-Object { $_.name -match '^llama-.*-bin-win-cpu-x64\.zip$' } | Select-Object -First 1
+              if ($asset) { Write-Host "Pakai $($asset.name) dari $($r.tag_name)"; break }
+            }
+          } catch { Write-Host "Daftar rilis llama.cpp tidak bisa dibaca: $($_.Exception.Message)" }
+          $ok = $false
+          if ($asset) {
+            for ($i = 1; $i -le 8 -and -not $ok; $i++) {
+              try { Invoke-WebRequest $asset.browser_download_url -OutFile llama-new.zip; $ok = $true } catch { Write-Host "Unduh gagal ($i): $($_.Exception.Message)"; Start-Sleep -Seconds (15 * $i) }
+            }
+          }
+          if ($ok) { Move-Item -Force llama-new.zip deps-cache/llama.zip }
+          elseif (Test-Path deps-cache/llama.zip) { Write-Host "::warning::Pakai llama.cpp dari build sebelumnya" }
+          else { throw "llama.cpp tidak bisa diunduh" }
+          Copy-Item deps-cache/llama.zip llama.zip
+          Expand-Archive llama.zip -DestinationPath llama-tmp
+          $cli = Get-ChildItem llama-tmp -Recurse -Filter llama-completion.exe | Select-Object -First 1
+          if (-not $cli) { $cli = Get-ChildItem llama-tmp -Recurse -Filter llama-cli.exe | Select-Object -First 1 }
+          if (-not $cli) { Get-ChildItem llama-tmp -Recurse | ForEach-Object { Write-Host $_.FullName }; throw "llama-completion.exe tidak ada di zip" }
+          New-Item -ItemType Directory -Force src-tauri/llama | Out-Null
+          Copy-Item $cli.FullName src-tauri/llama/
+          Copy-Item (Join-Path $cli.DirectoryName "*.dll") src-tauri/llama/
+          Get-ChildItem src-tauri/llama
+
       - run: npm install
 
       - run: npx tauri icon app-icon.png

@@ -5,3 +5,5 @@ src-tauri/gen/
 src-tauri/binaries/*.exe
 src-tauri/whisper/*.exe
 src-tauri/whisper/*.dll
+src-tauri/llama/*.exe
+src-tauri/llama/*.dll

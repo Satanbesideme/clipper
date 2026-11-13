@@ -181,6 +181,67 @@ async fn ffmpeg_log(args: Vec<String>) -> Result<String, String> {
     .map_err(|e| e.to_string())?
 }
 
+/// The local AI engine (llama.cpp). Newer builds call the plain prompt-in, text-out tool `llama-completion`.
+fn llama_exe(app: &AppHandle) -> Result<PathBuf, String> {
+    let res = app.path().resource_dir().map_err(|e| e.to_string())?;
+    let names: &[&str] = if cfg!(windows) { &["llama-completion.exe", "llama-cli.exe"] } else { &["llama-completion", "llama-cli"] };
+    for n in names {
+        for p in [res.join("llama").join(n), res.join(n)] {
+            if p.exists() { return Ok(p); }
+        }
+    }
+    Err("Mesin AI lokal (llama.cpp) tidak ditemukan di folder aplikasi. Coba install ulang.".into())
+}
+
+#[tauri::command]
+fn llama_available(app: AppHandle) -> bool {
+    llama_exe(&app).is_ok()
+}
+
+/// Runs the local AI once and returns everything it printed. Cancel with `ffmpeg_cancel(job)`.
+#[tauri::command]
+async fn llama_run(app: AppHandle, jobs: State<'_, Jobs>, job: String, args: Vec<String>) -> Result<String, String> {
+    let exe = llama_exe(&app)?;
+    #[allow(unused_mut)]
+    let mut c = Command::new(&exe);
+    if let Some(dir) = exe.parent() { c.current_dir(dir); }
+    #[cfg(windows)]
+    c.creation_flags(CREATE_NO_WINDOW);
+    let mut child = c
+        .args(&args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("Mesin AI tidak bisa dijalankan: {e}"))?;
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    jobs.0.lock().unwrap().insert(job.clone(), child);
+    let map = jobs.0.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let err_h = stderr.map(|mut e| std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            let _ = e.read_to_end(&mut buf);
+            let text = String::from_utf8_lossy(&buf).to_string();
+            let lines: Vec<&str> = text.lines().collect();
+            lines[lines.len().saturating_sub(25)..].join("\n")
+        }));
+        let mut out = Vec::new();
+        if let Some(mut o) = stdout { let _ = o.read_to_end(&mut out); }
+        let tail = err_h.and_then(|h| h.join().ok()).unwrap_or_default();
+        let child = map.lock().unwrap().remove(&job);
+        match child {
+            Some(mut c) => {
+                let ok = c.wait().map(|s| s.success()).unwrap_or(false);
+                if ok { Ok(String::from_utf8_lossy(&out).to_string()) } else { Err(format!("Mesin AI berhenti dengan error.\n{tail}")) }
+            }
+            None => Err("Dibatalkan.".into()),
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 #[tauri::command]
 fn whisper_available(app: AppHandle) -> bool {
     whisper_exe(&app).is_ok()
@@ -367,7 +428,7 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .manage(Jobs::default())
         .invoke_handler(tauri::generate_handler![
-            probe, ffmpeg_check, ffmpeg_log, tool_run, ffmpeg_cancel, whisper_available, cpu_count, file_size, download, waveform, data_dir, videos_dir,
+            probe, ffmpeg_check, ffmpeg_log, tool_run, ffmpeg_cancel, whisper_available, llama_available, llama_run, cpu_count, file_size, download, waveform, data_dir, videos_dir,
             read_text, write_text, write_bytes, read_bytes, ensure_dir, copy_file, starter_sfx_dir, exists, list_dir, remove_path, reveal
         ])
         .run(tauri::generate_context!())
