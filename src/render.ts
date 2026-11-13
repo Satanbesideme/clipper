@@ -925,7 +925,7 @@ export function renderArgs(spec: RenderSpec): string[] {
     const a = Math.max(0, im.startMs), b = Math.min(total, im.endMs);
     if (b <= a || im.hidden) return;
     const dur = ((b - a) / 1000).toFixed(3);
-    if (im.animated) args.push('-ignore_loop', '0', '-t', dur, '-i', im.file);
+    if (im.animated) args.push('-stream_loop', '-1', '-ignore_loop', '1', '-t', dur, '-i', im.file);   // loop even GIFs made to play once
     else args.push('-loop', '1', '-t', dur, '-framerate', String(F), '-i', im.file);
     const w = Math.max(2, Math.round((W * im.scale) / 2) * 2);
     const [icx, icy] = anchoredCentre(im.x * W, im.y * H, w, w / im.aspect, im.tf);

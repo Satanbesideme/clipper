@@ -12,7 +12,7 @@ import {
   type ClipTrans, type Duck, type MusicItem, type Range, type VideoLayer, type Crop, NO_CROP, cropSize, type Marker, youtubeChapters, type Blend, BLENDS, type LayerGroup, type Tf, tfActive, anchoredCentre, type Mask, type ChromaKey, maskActive,
 } from './render';
 import {
-  IMAGE_EXT, SOUND_EXT, VIDEO_MEME_EXT, addVideoMeme, categoriesOf, deleteMeme, deletePad, deleteVideoMeme, importFiles as importLibFiles, loadLibrary, move, saveLibrary, soundOf,
+  IMAGE_EXT, SOUND_EXT, VIDEO_MEME_EXT, addVideoMeme, addMeme, categoriesOf, deleteMeme, deletePad, deleteVideoMeme, importFiles as importLibFiles, loadLibrary, move, saveLibrary, soundOf,
   type Library, type Meme, type Pad, type VideoMeme,
 } from './library';
 import {
@@ -296,6 +296,7 @@ async function boot() {
   // a copy every 3 minutes while editing, kept in the project's history
   setInterval(() => { void autoSnapshot('auto'); }, 180_000);
   window.addEventListener('keydown', onKey);
+  window.addEventListener('paste', onPaste);
   setupTooltips();
   window.addEventListener('resize', () => { layoutPreview(); sizeTimeline(); });
   await renderHome();
@@ -1512,7 +1513,7 @@ function renderInspectorInner() {
             await saveLibrary(); toast(`Jadi default untuk "${m.name}".`);
           },
         }, 'Jadikan default untuk meme ini') : h('span'),
-        img.animated ? h('div', { class: 'muted small' }, 'GIF tampil diam di preview, tapi bergerak di hasil ekspor.') : h('span'),
+        img.animated ? h('div', { class: 'muted small' }, 'GIF bergerak di preview saat diputar, dan berulang terus selama tampil.') : h('span'),
         h('button', { class: 'danger-ghost wide', onclick: deleteSelected }, 'Hapus gambar'),
       ),
     );
@@ -1804,6 +1805,7 @@ function selectionMenu(e: MouseEvent, atMs: number) {
       ...paste, 'sep',
       { label: 'Pilih semua item', icon: 'select', keys: 'Ctrl+A', run: () => { multi.clear(); for (const r of itemRects()) multi.add(mkey(r.kind, r.id)); sel = null; renderInspector(); drawTimeline(); } },
       { label: 'Layer dari seluruh video utama', icon: 'layers', run: () => { snapshot(); const ly = addMainLayer(); if (ly) { sel = { kind: 'layer', id: ly.id }; changed({ left: true }); switchTab('transform'); } } },
+      { label: 'Tempel gambar dari web', icon: 'image', keys: 'Ctrl+V', run: () => void pasteFromClipboardApi() },
       { label: 'Adjustment layer baru', icon: 'color', run: () => void addAdjustmentLayer() },
       { label: 'Ukuran kanvas…', icon: 'fit', keys: 'Ctrl+Alt+C', run: toggleCanvasPop },
     ]);
@@ -2223,7 +2225,12 @@ function renderFrameInner() {
   const k = (W / tl().width) * unitOf(tl());
   for (const im of images()) {
     if (t < im.startMs || t >= im.endMs || im.hidden) continue;
-    const el = imageEl(im.file);
+    const img = imageEl(im.file);
+    // animated GIF: the frame for this moment, like the export (which loops it from its start)
+    const ga = im.animated ? gifAnim(im.file) : null;
+    const el: CanvasImageSource & { naturalWidth: number; naturalHeight: number; complete: boolean } = ga
+      ? Object.assign(gifFrameAt(ga, t - im.startMs), { naturalWidth: ga.w, naturalHeight: ga.h, complete: true })
+      : img;
     const w = im.scale * W, hh = w / im.aspect;
     const x = im.x * W - w / 2, y = im.y * H - hh / 2;
     const an = transState(im, t - im.startMs);
@@ -3540,6 +3547,44 @@ function setupTimeline() {
 // ================= soundboard & meme libraries =================
 
 const imageEls = new Map<string, HTMLImageElement>();
+// ---------- animated GIFs in the preview: a GIF drawn on a canvas only shows its first frame, so decode its frames ----------
+type GifAnim = { frames: ImageBitmap[]; ends: number[]; total: number; w: number; h: number };
+const gifAnims = new Map<string, GifAnim | null>();
+function gifAnim(file: string): GifAnim | null {
+  if (gifAnims.has(file)) return gifAnims.get(file)!;
+  gifAnims.set(file, null);
+  type Dec = { tracks: { ready: Promise<void>; selectedTrack: { frameCount: number } | null }; decode(o: { frameIndex: number }): Promise<{ image: VideoFrame }>; close(): void };
+  const Ctor = (window as unknown as { ImageDecoder?: new (o: { data: ArrayBuffer; type: string }) => Dec }).ImageDecoder;
+  if (!Ctor) return null;
+  void (async () => {
+    const buf = await (await fetch(fileSrc(file))).arrayBuffer();
+    const dec = new Ctor({ data: buf, type: 'image/gif' });
+    await dec.tracks.ready;
+    const n = Math.min(600, dec.tracks.selectedTrack?.frameCount ?? 1);
+    const frames: ImageBitmap[] = [], ends: number[] = [];
+    let acc = 0, w = 0, h = 0;
+    for (let i = 0; i < n; i++) {
+      const { image } = await dec.decode({ frameIndex: i });
+      // like browsers and ffmpeg: a delay under 20 ms plays as 100 ms
+      let d = (image.duration ?? 100_000) / 1000;
+      if (d < 20) d = 100;
+      w = image.displayWidth; h = image.displayHeight;
+      frames.push(await createImageBitmap(image));
+      image.close();
+      acc += d; ends.push(acc);
+    }
+    dec.close();
+    if (frames.length > 1) { gifAnims.set(file, { frames, ends, total: acc, w, h }); renderFrame(); }
+  })().catch(() => undefined);
+  return null;
+}
+function gifFrameAt(a: GifAnim, ms: number): ImageBitmap {
+  const t0 = ((ms % a.total) + a.total) % a.total;
+  let lo = 0, hi = a.ends.length - 1;
+  while (lo < hi) { const mid = (lo + hi) >> 1; if (a.ends[mid] > t0) hi = mid; else lo = mid + 1; }
+  return a.frames[lo];
+}
+
 function imageEl(file: string) {
   let el = imageEls.get(file);
   if (!el) {
@@ -6445,6 +6490,102 @@ async function reverseClip(c: VideoClip) {
   }
 }
 
+
+// ================= paste pictures from the web (Ctrl+V) =================
+let pendingPaste = 0;
+function onPaste(e: ClipboardEvent) {
+  const tag = (e.target as HTMLElement)?.tagName;
+  if (tag === 'INPUT' || tag === 'TEXTAREA' || (e.target as HTMLElement)?.isContentEditable || !P) return;
+  const cd = e.clipboardData;
+  if (!cd) return;
+  const html = cd.getData('text/html');
+  const m = html ? /<img[^>]+src\s*=\s*["']([^"']+)["']/i.exec(html) : null;
+  const decode = (u: string) => { const ta = document.createElement('textarea'); ta.innerHTML = u; return ta.value; };
+  let url = m ? decode(m[1]) : '';
+  const text = cd.getData('text/plain').trim();
+  if (!url && /^(https?:\/\/\S+\.(gif|png|jpe?g|webp)(\?\S*)?|data:image\/[a-z]+;base64,\S+)$/i.test(text)) url = text;
+  const blob = [...cd.files].find((f) => f.type.startsWith('image/')) ?? null;
+  if (!url && !blob) return;   // not a picture: the timer from the key press pastes the app's own clipboard
+  e.preventDefault();
+  if (pendingPaste) { clearTimeout(pendingPaste); pendingPaste = 0; }
+  void pasteWebImage(url, blob);
+}
+
+/** Same as Ctrl+V on a picture, from the menu (reads the clipboard directly). */
+async function pasteFromClipboardApi() {
+  try {
+    const items = await navigator.clipboard.read();
+    let url = '', blob: File | null = null;
+    for (const it of items) {
+      if (!url && it.types.includes('text/html')) {
+        const html = await (await it.getType('text/html')).text();
+        const m = /<img[^>]+src\s*=\s*["']([^"']+)["']/i.exec(html);
+        if (m) { const ta = document.createElement('textarea'); ta.innerHTML = m[1]; url = ta.value; }
+      }
+      const imgType = it.types.find((x) => x.startsWith('image/'));
+      if (!blob && imgType) blob = new File([await it.getType(imgType)], 'tempel', { type: imgType });
+      if (!url && it.types.includes('text/plain')) {
+        const tx = (await (await it.getType('text/plain')).text()).trim();
+        if (/^https?:\/\/\S+\.(gif|png|jpe?g|webp)(\?\S*)?$/i.test(tx)) url = tx;
+      }
+    }
+    if (!url && !blob) { toast('Belum ada gambar yang disalin. Di browser: klik kanan gambar → Copy image.'); return; }
+    await pasteWebImage(url, blob);
+  } catch {
+    toast('Clipboard tidak bisa dibaca dari menu. Salin gambarnya, klik timeline, lalu tekan Ctrl+V.');
+  }
+}
+const sniffExt = (b: Uint8Array) =>
+  b[0] === 0x47 && b[1] === 0x49 && b[2] === 0x46 ? 'gif' : b[0] === 0x89 && b[1] === 0x50 ? 'png' : b[0] === 0xff && b[1] === 0xd8 ? 'jpg'
+    : b[0] === 0x52 && b[1] === 0x49 && b[8] === 0x57 && b[9] === 0x45 ? 'webp' : '';
+async function pasteWebImage(url: string, blob: File | null) {
+  if (!P) return;
+  if (!canPlace()) { toast('Tambahkan video ke timeline dulu.'); return; }
+  setBusy('Menempel gambar…');
+  const dir = join(await dataDir(), 'paste');
+  await invoke('ensure_dir', { path: dir });
+  const id = uid().slice(0, 4);
+  // name it after the file on the web ("kaget.gif" -> "kaget"), else "tempel"
+  let label = 'tempel';
+  try { if (/^https?:/i.test(url)) label = decodeURIComponent(new URL(url).pathname.split('/').pop() ?? '').replace(/\.[a-z0-9]+$/i, '').replace(/[^\p{L}\p{N} _-]+/gu, ' ').trim().slice(0, 40) || 'tempel'; } catch { /* keep "tempel" */ }
+  const save = async (bytes: Uint8Array) => {
+    const ext = sniffExt(bytes);
+    if (!ext) return '';
+    const f = join(dir, `${label} ${id}.${ext}`);
+    await invoke('write_bytes', { path: f, content: Array.from(bytes) });
+    return f;
+  };
+  const tryAdd = async (path: string) => { try { return await addMeme(path, 'Tempel'); } catch { return null; } };
+  let meme: Meme | null = null;
+  try {
+    // the original file first (keeps a GIF animated), then the copy the browser put on the clipboard
+    if (url.startsWith('data:image/')) {
+      const bin = atob(url.slice(url.indexOf(',') + 1));
+      const path = await save(Uint8Array.from(bin, (c) => c.charCodeAt(0)));
+      if (path) meme = await tryAdd(path);
+    } else if (/^https?:\/\//i.test(url)) {
+      const tmp = join(dir, `web-${id}.bin`);
+      try {
+        await invoke('download', { url, dest: tmp });
+        const path = await save(Uint8Array.from(await invoke<number[]>('read_bytes', { path: tmp })));
+        if (path) meme = await tryAdd(path);
+      } catch { /* the site may refuse direct downloads; fall back to the clipboard copy */ }
+      await invoke('remove_path', { path: tmp }).catch(() => undefined);
+    }
+    if (!meme && blob) {
+      const path = await save(new Uint8Array(await blob.arrayBuffer()));
+      if (path) meme = await tryAdd(path);
+    }
+    if (!meme) { toast('Gambar ini tidak bisa ditempel. Coba klik kanan gambarnya → Copy image, atau simpan dulu lalu tarik ke aplikasi.', 'error'); return; }
+    await saveLibrary();
+    library = await loadLibrary();
+    insertMeme(meme);
+    toast(meme.animated ? 'GIF ditempel di playhead (juga disimpan di library Meme, kategori Tempel).' : 'Gambar ditempel di playhead (juga disimpan di library Meme, kategori Tempel).');
+  } finally {
+    setBusy('');
+  }
+}
+
 // ================= tooltips: every icon says what it does =================
 function setupTooltips() {
   const tip = h('div', { class: 'tip', role: 'tooltip' });
@@ -6735,7 +6876,13 @@ function onKey(e: KeyboardEvent) {
   if (ctrl && e.key.toLowerCase() === 'b') { e.preventDefault(); splitHere(); return; }
   if (ctrl && e.key.toLowerCase() === 'c') { e.preventDefault(); copySelection(); return; }
   if (ctrl && e.key.toLowerCase() === 'x') { e.preventDefault(); copySelection(true); return; }
-  if (ctrl && e.key.toLowerCase() === 'v') { e.preventDefault(); pasteClipboard(e.shiftKey && clipboard ? clipboard.base : undefined); return; }
+  if (ctrl && e.key.toLowerCase() === 'v') {
+    // the paste event decides: a picture from the web/clipboard, else the app's own clipboard
+    const shift = e.shiftKey;
+    if (pendingPaste) clearTimeout(pendingPaste);
+    pendingPaste = window.setTimeout(() => { pendingPaste = 0; pasteClipboard(shift && clipboard ? clipboard.base : undefined); }, 90);
+    return;
+  }
   if (ctrl && e.key.toLowerCase() === 'd') { e.preventDefault(); duplicateSelection(); return; }
   if (ctrl && e.key.toLowerCase() === 'g') { e.preventDefault(); if (e.shiftKey) ungroup(); else groupSelection(); return; }
   // Photoshop habits

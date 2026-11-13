@@ -119,15 +119,17 @@ async function addSound(path: string, name = stem(path), cat?: string): Promise<
   return pad;
 }
 
-async function addMeme(path: string, cat?: string): Promise<Meme> {
+export async function addMeme(path: string, cat?: string): Promise<Meme> {
   const L = await loadLibrary();
   const info = await probe(path).catch(() => null);
   const v = info?.streams.find((s) => s.codec_type === 'video' && s.width && s.height);
   if (!v || !v.width || !v.height) throw new Error(`${baseName(path)} bukan gambar yang bisa dibaca.`);
   const animated = extName(path) === 'gif' && Number(v.nb_frames ?? '2') !== 1;
+  // a GIF stays on screen for one full play (at least 2 s, at most 15 s)
+  const gifMs = animated ? Math.round(Number(info?.format.duration ?? 0) * 1000) : 0;
   const m: Meme = {
     id: uid(), name: stem(path), file: await copyIn(path, 'images'), width: v.width, height: v.height, animated,
-    durationMs: 2000, transIn: 'pop', transOut: 'fade', cat,
+    durationMs: Math.min(15000, Math.max(2000, gifMs || 2000)), transIn: 'pop', transOut: 'fade', cat,
   };
   L.memes.push(m);
   return m;

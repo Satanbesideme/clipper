@@ -84,6 +84,8 @@ Tab **AI** di rel kiri. Unduh model sekali (Super ±5 GB untuk kartu grafis 8 GB
 - **Typography studio**: spasi huruf, tinggi baris, warna & tebal garis tepi, bayangan, teks gradasi, miring, dan preset teks sendiri.
 
 ## Lain-lain
+- **Tempel gambar dari web**: di browser klik kanan gambar → Copy image (atau salin link .gif/.png), lalu di aplikasi tekan Ctrl+V. Gambar/GIF dipasang di playhead dan disimpan di library Meme (kategori Tempel). Bisa juga lewat klik kanan timeline → Tempel gambar dari web.
+- **GIF bergerak** di preview, dan berulang terus selama tampil di hasil ekspor (juga GIF yang aslinya cuma main sekali).
 - Reverse video (klik kanan potongan → Putar mundur).
 - Preset ekspor (Shorts, TikTok, Reels, YouTube 1080p/2K/4K, Feed 4:5) dan nama file otomatis (`{tanggal} {judul} - {preset}`).
 - Auto emoji di subtitle dan tombol "Rapikan timing kata".
