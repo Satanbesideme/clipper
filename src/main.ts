@@ -105,7 +105,7 @@ const CAP_TEMPLATES: CapTemplate[] = [
   { id: 'minimal', name: 'Minimal', hint: 'Tipis dan bersih, satu kalimat sekaligus.', mode: 'line', anim: 'fade', y: 0.78, caps: false, sample: 'cuma mau bilang',
     style: { font: 'Segoe UI', size: 62, color: '#ffffff', highlight: '#ffffff', outline: 3, bold: false, box: false } },
   { id: 'kinetic', name: 'Kinetic', hint: 'Huruf besar, kata yang diucapkan memantul.', mode: 'word', anim: 'bounce', y: 0.62, caps: true, sample: 'GAS TERUS',
-    style: { font: 'Arial Black', size: 86, color: '#ffffff', highlight: '#3cc3b3', outline: 8, bold: true, box: false } },
+    style: { font: 'Arial Black', size: 86, color: '#ffffff', highlight: '#3fc2cc', outline: 8, bold: true, box: false } },
   { id: 'documentary', name: 'Documentary', hint: 'Serif kalem di kotak gelap, seperti film dokumenter.', mode: 'line', anim: 'fade', y: 0.82, caps: false, sample: 'Malam itu…',
     style: { font: 'Georgia', size: 56, color: '#f3efe4', highlight: '#f3efe4', outline: 0, bold: false, box: true } },
   { id: 'gaming', name: 'Gaming', hint: 'Tebal, kuning menyala, muncul dengan pop.', mode: 'word', anim: 'pop', y: 0.6, caps: true, sample: 'CLUTCH!',
@@ -242,6 +242,7 @@ async function boot() {
   // a copy every 3 minutes while editing, kept in the project's history
   setInterval(() => { void autoSnapshot('auto'); }, 180_000);
   window.addEventListener('keydown', onKey);
+  setupTooltips();
   window.addEventListener('resize', () => { layoutPreview(); sizeTimeline(); });
   await renderHome();
   if (!settings.encoder) {
@@ -282,7 +283,7 @@ const playheadMax = () => (isBlank() ? timelineDuration(tl()) + 60_000 : Math.ma
 // ================= new project: from a video, or a blank canvas =================
 const BG_COLORS: { name: string; hex: string }[] = [
   { name: 'Hitam', hex: '#000000' }, { name: 'Charcoal GALSURKU', hex: '#1a1b1b' }, { name: 'Putih', hex: '#ffffff' },
-  { name: 'Teal', hex: '#37b8ac' }, { name: 'Hijau (green screen)', hex: '#00b140' },
+  { name: 'Teal', hex: '#3fc2cc' }, { name: 'Hijau (green screen)', hex: '#00b140' },
 ];
 function closeNewProject() { document.querySelector('.np-overlay')?.remove(); }
 function openNewProject(pickVideo: () => Promise<void>) {
@@ -907,34 +908,32 @@ function mediaPanel(): Node[] {
   return [
     stingerCard(),
     h('button', { class: 'secondary wide with-ico', onclick: () => void pickAndImport() }, icon('video', 16), 'Tambah video'),
-    p.media.length ? h('div', { class: 'media-grid' },
+    p.media.length ? h('div', { class: 'media-tiles' },
       ...p.media.map((m) => {
-        const thumb = h('div', { class: 'media-thumb' });
+        const thumb = h('div', { class: 'mt-thumb' });
         const img = sheets.get(m.id)?.[0];
         if (img?.complete && img.naturalWidth) {
           thumb.style.backgroundImage = `url("${img.src}")`;
-          thumb.style.backgroundSize = `${m.thumbs.tw * 10}px auto`;
-          thumb.style.width = `${m.thumbs.tw}px`;
+          thumb.style.aspectRatio = `${m.thumbs.tw} / ${m.thumbs.th}`;
         }
-        return h('div', { class: 'media-item' },
-          thumb,
-          h('div', { class: 'media-meta' },
-            h('div', { class: 'media-name', title: m.path }, m.name),
-            h('div', { class: 'muted small mono' }, `${tc(m.durationMs)} · ${m.width}×${m.height}`),
+        const addMain = () => {
+          snapshot();
+          tl().clips.push({ id: uid(), mediaId: m.id, inMs: 0, outMs: m.durationMs, speed: 1, volume: 1, fit: Math.abs(Math.log((m.width / m.height) / (tl().width / tl().height))) < 0.35 ? 'fill' : 'fit' });
+          changed();
+          fitZoom();
+        };
+        const used = tl().clips.some((c) => c.mediaId === m.id) || layers().some((l) => l.source === 'media' && l.mediaId === m.id);
+        return h('div', { class: `media-tile${used ? ' used' : ''}`, title: `${m.path}\nKlik dua kali: tambahkan ke akhir timeline`, ondblclick: addMain },
+          h('div', { class: 'mt-frame' }, thumb,
+            h('span', { class: 'mt-dur mono' }, tc(m.durationMs)),
+            used ? h('span', { class: 'mt-used', title: 'Sudah dipakai di timeline' }) : '',
+            h('div', { class: 'mt-actions' },
+              h('button', { class: 'mt-btn', 'aria-label': `Jadikan ${m.name} layer`, title: 'Jadikan layer di posisi playhead', onclick: (e: Event) => { e.stopPropagation(); addMediaLayer(m); } }, icon('layers', 15)),
+              h('button', { class: 'mt-btn', 'aria-label': `Tambahkan ${m.name} ke timeline`, title: 'Tambahkan ke akhir timeline', onclick: (e: Event) => { e.stopPropagation(); addMain(); } }, icon('plus', 15)),
+            ),
           ),
-          h('button', {
-            class: 'icon-btn add', title: 'Jadikan layer di posisi playhead', 'aria-label': `Jadikan ${m.name} layer`,
-            onclick: () => addMediaLayer(m),
-          }, icon('layers', 16)),
-          h('button', {
-            class: 'icon-btn add', title: 'Tambahkan ke akhir timeline', 'aria-label': `Tambahkan ${m.name} ke timeline`,
-            onclick: () => {
-              snapshot();
-              tl().clips.push({ id: uid(), mediaId: m.id, inMs: 0, outMs: m.durationMs, speed: 1, volume: 1, fit: Math.abs(Math.log((m.width / m.height) / (tl().width / tl().height))) < 0.35 ? 'fill' : 'fit' });
-              changed();
-              fitZoom();
-            },
-          }, icon('plus', 16)),
+          h('div', { class: 'mt-name' }, m.name),
+          h('div', { class: 'mt-meta mono' }, `${m.width}×${m.height} · ${Math.round(m.fps)} fps`),
         );
       }),
     ) : h('p', { class: 'muted small hint-p' }, 'Tarik rekaman dari OBS ke sini, atau klik tombol di atas.'),
@@ -2233,7 +2232,7 @@ function drawOverlays(ctx: CanvasRenderingContext2D, plan: OverlayPlan, k: numbe
     ctx.restore();
     boxes.push({ kind: 'text', id: x.id, ...b });
     if (sel?.kind === 'text' && sel.id === x.id) {
-      ctx.strokeStyle = '#37b8ac';
+      ctx.strokeStyle = '#3fc2cc';
       ctx.lineWidth = 2;
       ctx.setLineDash([6, 4]);
       ctx.strokeRect(b.x - 6, b.y - 6, b.w + 12, b.h + 12);
@@ -2698,11 +2697,11 @@ const TL_HUE: Record<'line' | 'text' | 'layer' | 'image' | 'music' | 'sound', { 
   line: { hue: '#f2c14e', ink: '#f7dc98', icon: 'captions' },
   text: { hue: '#ff8a73', ink: '#ffc2b5', icon: 'text' },
   layer: { hue: '#5aa9ff', ink: '#bcdcff', icon: 'layers' },
-  image: { hue: '#3cc3b3', ink: '#a5ece3', icon: 'image' },
+  image: { hue: '#3fc2cc', ink: '#a5ece3', icon: 'image' },
   music: { hue: '#b98cff', ink: '#dcc6ff', icon: 'music' },
   sound: { hue: '#59d38c', ink: '#b2efcb', icon: 'wave' },
 };
-const TL_FONT = '"Segoe UI Variable Text", "Segoe UI", sans-serif';
+const TL_FONT = 'Inter, "Segoe UI Variable Text", "Segoe UI", sans-serif';
 
 function capsule(ctx: CanvasRenderingContext2D, kind: keyof typeof TL_HUE, x: number, y: number, w: number, hgt: number, isSel: boolean, label: string, dim = false, thumb?: (lx: number) => number) {
   const c = TL_HUE[kind];
@@ -2819,14 +2818,14 @@ function drawTimelineInner() {
   const dpr = window.devicePixelRatio || 1;
   const W = tlCanvas.width / dpr, H = tlCanvas.height / dpr;
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  ctx.fillStyle = '#141616';
+  ctx.fillStyle = '#10161c';
   ctx.fillRect(0, 0, W, H);
   computeLanes();
   fadeHandles = [];
 
   // lane backgrounds
   for (const l of lanes) {
-    ctx.fillStyle = l.kind === 'main' ? '#191c1c' : '#171919';
+    ctx.fillStyle = l.kind === 'main' ? '#141c23' : '#121920';
     roundRect(ctx, 4, l.y - 1, W - 8, l.h + 2, 8);
     ctx.fill();
   }
@@ -2842,12 +2841,12 @@ function drawTimelineInner() {
   if (!music().length) laneHint(ctx, 'music', 'Musik latar: panel Musik', lmu.y, lmu.h);
 
   // ruler
-  ctx.fillStyle = '#121414';
+  ctx.fillStyle = '#0e1419';
   ctx.fillRect(0, 0, W, RULER);
   ctx.fillStyle = 'rgba(255,255,255,.05)';
   ctx.fillRect(0, RULER - 1, W, 1);
   const step = niceStep();
-  ctx.font = '10px "Cascadia Mono", Consolas, monospace';
+  ctx.font = '10px "JetBrains Mono", "Cascadia Mono", Consolas, monospace';
   for (let ms = Math.floor(xToMs(0) / step) * step; msToX(ms) < W; ms += step) {
     if (ms < 0) continue;
     const x = msToX(ms);
@@ -2868,7 +2867,7 @@ function drawTimelineInner() {
     ctx.save();
     roundRect(ctx, x + 1, lm.y, w - 2, lm.h, 9);
     ctx.clip();
-    ctx.fillStyle = '#262a29';
+    ctx.fillStyle = '#1c2630';
     ctx.fillRect(x, lm.y, w, lm.h);
     const m = mediaOf(c.mediaId);
     const imgs = m ? sheets.get(m.id) : undefined;
@@ -2888,18 +2887,18 @@ function drawTimelineInner() {
     ctx.fillStyle = grad;
     ctx.fillRect(x, lm.y + lm.h - 22, w, 22);
     const wv = m?.hasAudio ? waveOf(m.playable) : undefined;
-    if (wv) drawWave(ctx, wv, x, lm.y + lm.h - 26, w, 24, W, (dx) => c.inMs + (dx / pxPerSec) * 1000 * c.speed, 'rgba(126,232,214,.55)');
+    if (wv) drawWave(ctx, wv, x, lm.y + lm.h - 26, w, 24, W, (dx) => c.inMs + (dx / pxPerSec) * 1000 * c.speed, 'rgba(120,214,226,.55)');
     ctx.fillStyle = '#f2f4f1';
     ctx.font = `600 10px ${TL_FONT}`;
     const label = `${c.speed !== 1 ? `${c.speed}× · ` : ''}${tc(clipDuration(c), true)}`;
     ctx.fillText(label, x + 6, lm.y + lm.h - 8);
     ctx.restore();
     ctx.lineWidth = isSel ? 2 : 1;
-    ctx.strokeStyle = isSel ? '#3cc3b3' : 'rgba(0,0,0,.6)';
+    ctx.strokeStyle = isSel ? '#3fc2cc' : 'rgba(0,0,0,.6)';
     roundRect(ctx, x + 1, lm.y, w - 2, lm.h, 9);
     ctx.stroke();
     if (isSel) {
-      ctx.fillStyle = '#3cc3b3';
+      ctx.fillStyle = '#3fc2cc';
       roundRect(ctx, x + 2, lm.y + lm.h / 2 - 11, 5, 22, 2.5); ctx.fill();
       roundRect(ctx, x + w - 7, lm.y + lm.h / 2 - 11, 5, 22, 2.5); ctx.fill();
     }
@@ -2915,7 +2914,7 @@ function drawTimelineInner() {
     const box = { x: x - 8, y: lm.y + 3, w: 16, h: 16, index: i };
     cutMarkers.push(box);
     roundRect(ctx, box.x, box.y, box.w, box.h, 8);
-    ctx.fillStyle = tr === 'none' ? 'rgba(20,22,22,.9)' : '#3cc3b3';
+    ctx.fillStyle = tr === 'none' ? 'rgba(20,22,22,.9)' : '#3fc2cc';
     ctx.fill();
     ctx.strokeStyle = tr === 'none' ? '#58605d' : '#0f1414';
     ctx.lineWidth = 1;
@@ -2990,16 +2989,16 @@ function drawTimelineInner() {
 
   // drop marker while dragging a clip
   if (dropX !== null) {
-    ctx.fillStyle = '#37b8ac';
+    ctx.fillStyle = '#3fc2cc';
     ctx.fillRect(dropX - 1, lm.y - 4, 3, lm.h + 8);
   }
 
   // selection box
   if (marquee) {
     const mx = Math.min(marquee.x0, marquee.x1), my = Math.min(marquee.y0, marquee.y1);
-    ctx.fillStyle = 'rgba(60,195,179,.1)';
+    ctx.fillStyle = 'rgba(63,194,204,.1)';
     ctx.fillRect(mx, my, Math.abs(marquee.x1 - marquee.x0), Math.abs(marquee.y1 - marquee.y0));
-    ctx.strokeStyle = '#3cc3b3'; ctx.lineWidth = 1; ctx.setLineDash([4, 3]);
+    ctx.strokeStyle = '#3fc2cc'; ctx.lineWidth = 1; ctx.setLineDash([4, 3]);
     ctx.strokeRect(mx + 0.5, my + 0.5, Math.abs(marquee.x1 - marquee.x0), Math.abs(marquee.y1 - marquee.y0));
     ctx.setLineDash([]);
   }
@@ -3009,8 +3008,8 @@ function drawTimelineInner() {
   // playhead
   const px = msToX(t);
   ctx.save();
-  ctx.shadowColor = 'rgba(60,195,179,.55)'; ctx.shadowBlur = 8;
-  ctx.fillStyle = '#3cc3b3';
+  ctx.shadowColor = 'rgba(63,194,204,.55)'; ctx.shadowBlur = 8;
+  ctx.fillStyle = '#3fc2cc';
   ctx.fillRect(px - 1, 8, 2, H);
   ctx.beginPath(); ctx.moveTo(px, 1); ctx.lineTo(px + 7, 8); ctx.lineTo(px, 15); ctx.lineTo(px - 7, 8); ctx.closePath(); ctx.fill();
   ctx.restore();
@@ -5141,9 +5140,45 @@ function renderQueue() {
   for (const j of done) { (j as { notified?: boolean }).notified = true; toast(`Selesai: ${j.outPath.split('\\').pop()}`); }
 }
 
+
+// ================= tooltips: every icon says what it does =================
+function setupTooltips() {
+  const tip = h('div', { class: 'tip', role: 'tooltip' });
+  document.body.append(tip);
+  let timer = 0;
+  let cur: HTMLElement | null = null;
+  const hide = () => { clearTimeout(timer); tip.classList.remove('show'); cur = null; };
+  document.addEventListener('pointerover', (e) => {
+    const el = (e.target as HTMLElement).closest?.('[title],[data-tip],button[aria-label]') as HTMLElement | null;
+    if (el === cur) return;
+    hide();
+    if (!el) return;
+    // the browser's own tooltip is slow and plain: keep the text, show ours instead
+    const own = el.getAttribute('title');
+    if (own !== null) { if (own) el.dataset.tip = own; el.removeAttribute('title'); }
+    const text = el.dataset.tip || (el.tagName === 'BUTTON' && !el.textContent?.trim() ? el.getAttribute('aria-label') ?? '' : '');
+    if (!text) return;
+    cur = el;
+    timer = window.setTimeout(() => {
+      if (cur !== el || !el.isConnected) return;
+      tip.textContent = text;
+      tip.classList.add('show');
+      const r = el.getBoundingClientRect(), tr = tip.getBoundingClientRect();
+      let top = r.bottom + 8;
+      if (top + tr.height > window.innerHeight - 6) top = r.top - tr.height - 8;
+      const left = clamp(r.left + r.width / 2 - tr.width / 2, 6, window.innerWidth - tr.width - 6);
+      tip.style.transform = `translate(${Math.round(left)}px, ${Math.round(top)}px)`;
+    }, 420);
+  });
+  document.addEventListener('pointerdown', hide, true);
+  document.addEventListener('scroll', hide, true);
+  window.addEventListener('blur', hide);
+  window.addEventListener('keydown', hide, true);
+}
+
 // ================= Premiere-style tools: markers, In/Out, J/K/L, Q/W, waveforms =================
 
-const MARKER_COLORS: [string, string][] = [['#3cc3b3', 'Tosca'], ['#ffb020', 'Kuning'], ['#ff5c7a', 'Merah'], ['#7c8cff', 'Ungu'], ['#7ddc6a', 'Hijau']];
+const MARKER_COLORS: [string, string][] = [['#3fc2cc', 'Tosca'], ['#ffb020', 'Kuning'], ['#ff5c7a', 'Merah'], ['#7c8cff', 'Ungu'], ['#7ddc6a', 'Hijau']];
 const markers = () => (tl().markers ??= []);
 const markerAtX = (x: number) => markers().find((m) => Math.abs(msToX(m.ms) - x) <= 6);
 
@@ -5348,13 +5383,13 @@ function drawMarkersAndRange(ctx: CanvasRenderingContext2D, W: number, H: number
     ctx.fillStyle = 'rgba(0,0,0,.38)';
     if (a > 0) ctx.fillRect(0, RULER, Math.min(a, W), H - RULER);
     if (b < W) ctx.fillRect(Math.max(0, b), RULER, W - Math.max(0, b), H - RULER);
-    ctx.fillStyle = 'rgba(60,195,179,.22)';
+    ctx.fillStyle = 'rgba(63,194,204,.22)';
     ctx.fillRect(a, 0, b - a, RULER - 1);
-    ctx.fillStyle = '#3cc3b3';
+    ctx.fillStyle = '#3fc2cc';
     ctx.fillRect(a, 0, 2, H); ctx.fillRect(b - 2, 0, 2, H);
     ctx.font = `700 9px ${TL_FONT}`;
     ctx.fillStyle = '#0f1414';
-    roundRect(ctx, a, 2, 12, 11, 3); ctx.fillStyle = '#3cc3b3'; ctx.fill();
+    roundRect(ctx, a, 2, 12, 11, 3); ctx.fillStyle = '#3fc2cc'; ctx.fill();
     roundRect(ctx, b - 12, 2, 12, 11, 3); ctx.fill();
     ctx.fillStyle = '#0f1414';
     ctx.fillText('I', a + 4.5, 8); ctx.fillText('O', b - 9.5, 8);
