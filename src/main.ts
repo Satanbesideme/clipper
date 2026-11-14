@@ -406,6 +406,17 @@ async function createBlankProject(st: { aspect: Aspect; short: number; fps: 30 |
   toast('Kanvas kosong siap. Tambah video (jadi video utama) atau layer, teks, meme, musik. Panjang video mengikuti isinya.');
 }
 
+
+/** Writes a blob to disk as base64 (a list of numbers over the bridge is slow and heavy for big pictures). */
+function writeBlob(path: string, blob: Blob): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onerror = () => reject(r.error ?? new Error('File tidak bisa dibaca.'));
+    r.onload = () => { invoke('write_b64', { path, data: String(r.result) }).then(() => resolve(), reject); };
+    r.readAsDataURL(blob);
+  });
+}
+
 /** Saves the preview of the open project as its cover picture on the home page. */
 async function saveCover() {
   if (!P || !preview || !preview.width) return;
@@ -415,7 +426,7 @@ async function saveCover() {
     cv.getContext('2d')!.drawImage(preview, 0, 0, W, H);
     const blob = await new Promise<Blob | null>((res) => cv.toBlob(res, 'image/jpeg', 0.82));
     if (!blob) return;
-    await invoke('write_bytes', { path: join(await projectDir(P.id), 'cover.jpg'), content: Array.from(new Uint8Array(await blob.arrayBuffer())) });
+    await writeBlob(join(await projectDir(P.id), 'cover.jpg'), blob);
     coverBust.set(P.id, Date.now());
   } catch { /* a cover is a nicety */ }
 }
@@ -2566,7 +2577,7 @@ async function renderOverlayTrack(dir: string, onProgress: (f: number) => void):
     const blob = await new Promise<Blob | null>((res) => cv.toBlob(res, 'image/png'));
     if (!blob) throw new Error('Gagal menggambar teks untuk ekspor.');
     const name = `f${n++}.png`;
-    await invoke('write_bytes', { path: join(dir, name), content: Array.from(new Uint8Array(await blob.arrayBuffer())) });
+    await writeBlob(join(dir, name), blob);
     files.set(key, name);
     return name;
   };
@@ -5677,6 +5688,8 @@ function renderExport() {
             container: exportFormat(),
             renderOverlay: (dir) => renderOverlayTrack(dir, (f) => { btn.textContent = `Menyiapkan teks… ${Math.round(f * 100)}%`; }),
             renderMasks: (dir) => renderMaskFiles(dir),
+            fontFilesFor: (families) => (settings.importedFonts ?? []).filter((f) => families.some((x) => x.toLowerCase() === f.name.toLowerCase())).map((f) => f.file),
+            onOverlayError: (msg) => toast(`Teks diekspor pakai cara cadangan, jadi font atau posisinya bisa beda dari preview. Kirim pesan ini ke pembuat aplikasi: ${msg}`, 'error'),
           }).then(() => { exportName = ''; const inp = document.querySelector('#export-pop .name-row input') as HTMLInputElement | null; if (inp) inp.value = ''; });
         } catch (e) { toast((e as Error).message, 'error'); } finally { btn.disabled = false; btn.textContent = 'Ekspor video'; }
       },
@@ -6054,7 +6067,7 @@ async function renderMaskFiles(dir: string): Promise<Record<string, string>> {
     const blob = await new Promise<Blob | null>((res) => cv.toBlob(res, 'image/png'));
     if (!blob) continue;
     const file = join(dir, `mask-${j.id.slice(0, 8)}.png`);
-    await invoke('write_bytes', { path: file, content: Array.from(new Uint8Array(await blob.arrayBuffer())) });
+    await writeBlob(file, blob);
     out[j.id] = file;
   }
   return out;
@@ -6510,7 +6523,7 @@ async function openThumbStudio() {
               const base = `${(P?.name ?? 'video').trim()} thumbnail ${st.fmt === 'yt' ? '16x9' : '9x16'}`.replace(/[\\/:*?"<>|]+/g, '-');
               let file = join(settings.outDir, `${base}.png`), n = 1;
               while (await invoke<boolean>('exists', { path: file })) file = join(settings.outDir, `${base} (${++n}).png`);
-              await invoke('write_bytes', { path: file, content: Array.from(new Uint8Array(await blob.arrayBuffer())) });
+              await writeBlob(file, blob);
               toast(`Thumbnail disimpan: ${baseName(file)}`);
               void invoke('reveal', { path: file }).catch(() => undefined);
             },
@@ -6619,10 +6632,12 @@ async function importFonts(): Promise<string | null> {
   let last: string | null = null, ok = 0;
   for (const f of arr) {
     // "Bangers-Regular.ttf" -> "Bangers"; "Montserrat-BoldItalic.ttf" -> "Montserrat BoldItalic"
-    const name = baseName(f).replace(/\.[^.]+$/, '').replace(/[-_ ]?(Regular|Normal|Book|Roman)$/i, '').replace(/[-_]+/g, ' ').trim() || 'Font';
     const dest = join(dir, baseName(f));
     try {
       await invoke('copy_file', { src: f, dest });
+      // the family name written in the font (what Windows and the export know it by), else from the file name
+      const inside = await invoke<string[]>('font_file_names', { path: dest }).catch(() => [] as string[]);
+      const name = inside[0] || baseName(f).replace(/\.[^.]+$/, '').replace(/[-_ ]?(Regular|Normal|Book|Roman)$/i, '').replace(/[-_]+/g, ' ').trim() || 'Font';
       if (!(await registerFontFile(name, dest))) { toast(`${baseName(f)} bukan font yang bisa dibaca.`, 'error'); continue; }
       settings.importedFonts = [...(settings.importedFonts ?? []).filter((x) => x.name !== name), { name, file: dest }];
       fontNames = [name, ...fontNames.filter((x) => x !== name)];
@@ -6760,7 +6775,7 @@ async function pasteWebImage(url: string, blob: File | null) {
     const ext = sniffExt(bytes);
     if (!ext) return '';
     const f = join(dir, `${label} ${id}.${ext}`);
-    await invoke('write_bytes', { path: f, content: Array.from(bytes) });
+    await writeBlob(f, new Blob([bytes as Uint8Array<ArrayBuffer>]));
     return f;
   };
   const tryAdd = async (path: string) => { try { return await addMeme(path, 'Tempel'); } catch { return null; } };

@@ -515,13 +515,62 @@ async fn system_fonts() -> Vec<String> {
     .unwrap_or_default()
 }
 
+/// Family names inside one font file (for naming an imported font the way Windows and libass know it).
+#[tauri::command]
+fn font_file_names(path: String) -> Vec<String> {
+    families_of(Path::new(&path))
+}
+
+/// Font files (system-wide and per-user) that contain any of these families.
+#[tauri::command]
+async fn font_files(families: Vec<String>) -> Vec<String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let want: Vec<String> = families.iter().map(|f| f.to_lowercase()).collect();
+        let mut dirs = vec![PathBuf::from(std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".into())).join("Fonts")];
+        if let Ok(local) = std::env::var("LOCALAPPDATA") { dirs.push(PathBuf::from(local).join("Microsoft").join("Windows").join("Fonts")); }
+        let mut out = Vec::new();
+        for d in dirs {
+            let Ok(entries) = std::fs::read_dir(&d) else { continue };
+            for e in entries.flatten() {
+                let p = e.path();
+                let ext = p.extension().and_then(|x| x.to_str()).unwrap_or("").to_ascii_lowercase();
+                if !matches!(ext.as_str(), "ttf" | "otf" | "ttc") { continue; }
+                if families_of(&p).iter().any(|f| want.contains(&f.to_lowercase())) { out.push(p.to_string_lossy().to_string()); }
+            }
+        }
+        out
+    })
+    .await
+    .unwrap_or_default()
+}
+
+/// Writes base64 data to a file (much lighter over the bridge than a list of numbers).
+#[tauri::command]
+fn write_b64(path: String, data: String) -> Result<(), String> {
+    fn val(c: u8) -> Option<u32> {
+        match c { b'A'..=b'Z' => Some((c - b'A') as u32), b'a'..=b'z' => Some((c - b'a' + 26) as u32), b'0'..=b'9' => Some((c - b'0' + 52) as u32), b'+' | b'-' => Some(62), b'/' | b'_' => Some(63), _ => None }
+    }
+    let src = data.split(',').last().unwrap_or("").as_bytes();
+    let mut out = Vec::with_capacity(src.len() / 4 * 3);
+    let (mut acc, mut bits) = (0u32, 0u32);
+    for &c in src {
+        let Some(v) = val(c) else { continue };
+        acc = (acc << 6) | v;
+        bits += 6;
+        if bits >= 8 { bits -= 8; out.push((acc >> bits) as u8); acc &= (1 << bits) - 1; }
+    }
+    let p = PathBuf::from(&path);
+    if let Some(parent) = p.parent() { std::fs::create_dir_all(parent).map_err(|e| e.to_string())?; }
+    std::fs::write(&p, out).map_err(|e| e.to_string())
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(Jobs::default())
         .invoke_handler(tauri::generate_handler![
             probe, ffmpeg_check, ffmpeg_log, tool_run, ffmpeg_cancel, whisper_available, llama_available, llama_run, cpu_count, file_size, download, waveform, data_dir, videos_dir,
-            read_text, write_text, write_bytes, system_fonts, read_bytes, ensure_dir, copy_file, starter_sfx_dir, exists, list_dir, remove_path, reveal
+            read_text, write_text, write_bytes, system_fonts, font_file_names, font_files, write_b64, read_bytes, ensure_dir, copy_file, starter_sfx_dir, exists, list_dir, remove_path, reveal
         ])
         .run(tauri::generate_context!())
         .expect("gagal menjalankan Gals Clip Studio");

@@ -445,6 +445,10 @@ export async function enqueueExport(p: Project, opts: { outDir: string; encoder:
   container?: 'mp4' | 'mkv' | 'mov' | 'webm';
   /** Draws the mask pictures of masked layers/pictures into `dir`; id -> file. */
   renderMasks?: (dir: string) => Promise<Record<string, string>>;
+  /** Font files the app imported for these families (the .ass fallback needs the files themselves). */
+  fontFilesFor?: (families: string[]) => string[];
+  /** Called when the app's own text drawing failed and the .ass fallback is used. */
+  onOverlayError?: (msg: string) => void;
   /** Draws captions and text as frames with the app's own renderer (exactly like the preview); null = nothing to draw. */
   renderOverlay?: (dir: string) => Promise<{ list: string; x: number; y: number; dir: string } | null> }) {
   const tl: Timeline = structuredClone(p.timeline);
@@ -460,7 +464,22 @@ export async function enqueueExport(p: Project, opts: { outDir: string; encoder:
     const dir = join(await projectDir(p.id), `export-${id}-text`);
     try { overlay = await opts.renderOverlay(dir); } catch (e) {
       console.warn('overlay render failed, using subtitles instead', e);
+      opts.onOverlayError?.(e instanceof Error ? e.message : String(e));
       await invoke('remove_path', { path: dir }).catch(() => undefined);
+    }
+  }
+  // fallback (.ass via libass): it only sees the fonts in the folder it is given, so gather the files of the fonts used
+  let fontsDir = FONTS_DIR;
+  const extraDirs: string[] = [];
+  if (!overlay && (tl.texts.length || tl.captions.lines.length)) {
+    const used = [...new Set([...(tl.captions.lines.length ? [tl.captions.style.font] : []), ...tl.texts.map((x) => x.style.font)])];
+    const files = [...(opts.fontFilesFor?.(used) ?? []), ...(await invoke<string[]>('font_files', { families: used }).catch(() => [] as string[]))];
+    if (files.length) {
+      const fd = join(await projectDir(p.id), `export-${id}-fonts`);
+      await invoke('ensure_dir', { path: fd });
+      for (const f of files) await invoke('copy_file', { src: f, dest: join(fd, baseName(f)) }).catch(() => undefined);
+      fontsDir = fd;
+      extraDirs.push(fd);
     }
   }
   if (!overlay && (tl.texts.length || tl.captions.lines.length)) {
@@ -474,10 +493,10 @@ export async function enqueueExport(p: Project, opts: { outDir: string; encoder:
   const gradeLuts = await bakeGrades(tl, await projectDir(p.id), id);
   const maskDir = join(await projectDir(p.id), `export-${id}-masks`);
   const masks = opts.renderMasks ? await opts.renderMasks(maskDir).catch((e) => { console.warn('masks failed', e); return {} as Record<string, string>; }) : {};
-  const build = (encoder: Encoder) => renderArgs({ tl, media, encoder, bitrateK: qualityBitrate(tl.fps, quality, tl.width * tl.height), quality, assFile, fontsDir: FONTS_DIR, outPath, gradeLuts, overlay: overlay ?? undefined, range: opts.range ?? undefined, masks, container: opts.container });
+  const build = (encoder: Encoder) => renderArgs({ tl, media, encoder, bitrateK: qualityBitrate(tl.fps, quality, tl.width * tl.height), quality, assFile, fontsDir, outPath, gradeLuts, overlay: overlay ?? undefined, range: opts.range ?? undefined, masks, container: opts.container });
   const job: ExportJob = {
     id, projectId: p.id, label: p.name, outPath, totalMs: opts.range ? opts.range.outMs - opts.range.inMs : timelineDuration(tl), progress: 0, status: 'queued', error: '',
-    args: build(opts.encoder), encoder: opts.encoder, build, assFile, extraFiles: [...Object.values(gradeLuts), ...(overlay ? [overlay.dir] : []), ...(Object.keys(masks).length ? [maskDir] : [])],
+    args: build(opts.encoder), encoder: opts.encoder, build, assFile, extraFiles: [...Object.values(gradeLuts), ...(overlay ? [overlay.dir] : []), ...(Object.keys(masks).length ? [maskDir] : []), ...extraDirs],
   };
   queue.push(job);
   onChange();
