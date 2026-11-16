@@ -103,7 +103,16 @@ Tab **AI** di rel kiri. Unduh model sekali (Super ±5 GB untuk kartu grafis 8 GB
 
 Klik kanan di penggaris waktu untuk menu marker (ganti nama, warna, hapus) dan In/Out. Kalau In/Out dipasang, panel Ekspor bisa mengekspor bagian itu saja. Marker bisa disalin sebagai **chapter YouTube** (`0:00 Intro`, `1:05 Boss`, …) untuk deskripsi video. Video, musik, dan suara di timeline menampilkan gelombang suara.
 
+## Timeline bebas (tanpa magnet)
+- Potongan video utama bisa ditaruh di mana saja. Jarak kosong di antaranya jadi **layar hitam** (tanpa suara) di preview dan di hasil ekspor.
+- Tarik ujung kiri potongan untuk memotong bagian depan, ujung kanan untuk bagian belakang. Potongan lain tidak bergeser.
+- **Delete**: hapus potongan, tempatnya jadi hitam. **Shift+Delete** atau *Hapus & rapatkan*: potongan sesudahnya ikut maju.
+- Klik kanan di jarak hitam: *Hapus jarak hitam*, atau *Selipkan video di sini*.
+- Selipkan video di tengah: tombol gunting di kartu video (tab Media) = selipkan di playhead. Video utama dipotong di situ, sisanya bergeser ke belakang.
+- Tarik kartu video ke timeline: dilepas di jalur video utama = diselipkan, dilepas di tempat lain = **layer baru** (dengan suaranya). Video dari Explorer yang dilepas ke proyek yang sudah ada videonya juga jadi layer baru.
+
 ## Ekspor = persis preview
+Kalau teks tidak bisa digambar persis seperti preview, ekspor berhenti dan menanyakan dulu (dengan alasannya), lalu mencatatnya di `export-log.txt` di folder proyek. Di daftar ekspor terlihat tanda **teks = preview** atau **teks cadangan**.
 Subtitle dan teks di video hasil ekspor digambar oleh aplikasi sendiri, dengan kode yang sama dengan preview: font, baris, posisi, ukuran, dan animasinya sama persis. Suara juga tidak lagi maju sedikit dibanding gambar pada rekaman yang audionya mulai sedikit terlambat.
 
 ## Salin & tempel

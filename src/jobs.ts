@@ -393,6 +393,8 @@ export interface ExportJob {
   progress: number;
   status: 'queued' | 'running' | 'done' | 'failed' | 'cancelled';
   error: string;
+  /** How text and subtitles were put in: drawn exactly like the preview, or the libass fallback. */
+  textMode?: 'preview' | 'cadangan' | 'none';
   args: string[];
   encoder: Encoder;
   build: (enc: Encoder) => string[];
@@ -448,7 +450,7 @@ export async function enqueueExport(p: Project, opts: { outDir: string; encoder:
   /** Font files the app imported for these families (the .ass fallback needs the files themselves). */
   fontFilesFor?: (families: string[]) => string[];
   /** Called when the app's own text drawing failed and the .ass fallback is used. */
-  onOverlayError?: (msg: string) => void;
+  onOverlayError?: (msg: string) => Promise<boolean> | boolean | void;
   /** Draws captions and text as frames with the app's own renderer (exactly like the preview); null = nothing to draw. */
   renderOverlay?: (dir: string) => Promise<{ list: string; x: number; y: number; dir: string } | null> }) {
   const tl: Timeline = structuredClone(p.timeline);
@@ -462,10 +464,19 @@ export async function enqueueExport(p: Project, opts: { outDir: string; encoder:
   let overlay: { list: string; x: number; y: number; dir: string } | null = null;
   if (opts.renderOverlay && (tl.texts.length || tl.captions.lines.length)) {
     const dir = join(await projectDir(p.id), `export-${id}-text`);
-    try { overlay = await opts.renderOverlay(dir); } catch (e) {
-      console.warn('overlay render failed, using subtitles instead', e);
-      opts.onOverlayError?.(e instanceof Error ? e.message : String(e));
+    let why = '';
+    try {
+      overlay = await opts.renderOverlay(dir);
+      if (!overlay) why = 'tidak ada frame teks yang tergambar';
+    } catch (e) {
+      console.warn('overlay render failed', e);
+      why = e instanceof Error ? `${e.message}${e.stack ? `\n${e.stack.split('\n').slice(0, 4).join('\n')}` : ''}` : String(e);
+    }
+    if (!overlay) {
       await invoke('remove_path', { path: dir }).catch(() => undefined);
+      // never switch silently: the fallback can look different from the preview
+      const goOn = await opts.onOverlayError?.(why);
+      if (goOn === false) throw new Error('Ekspor dibatalkan.');
     }
   }
   // fallback (.ass via libass): it only sees the fonts in the folder it is given, so gather the files of the fonts used
@@ -496,6 +507,7 @@ export async function enqueueExport(p: Project, opts: { outDir: string; encoder:
   const build = (encoder: Encoder) => renderArgs({ tl, media, encoder, bitrateK: qualityBitrate(tl.fps, quality, tl.width * tl.height), quality, assFile, fontsDir, outPath, gradeLuts, overlay: overlay ?? undefined, range: opts.range ?? undefined, masks, container: opts.container });
   const job: ExportJob = {
     id, projectId: p.id, label: p.name, outPath, totalMs: opts.range ? opts.range.outMs - opts.range.inMs : timelineDuration(tl), progress: 0, status: 'queued', error: '',
+    textMode: overlay ? 'preview' : assFile ? 'cadangan' : 'none',
     args: build(opts.encoder), encoder: opts.encoder, build, assFile, extraFiles: [...Object.values(gradeLuts), ...(overlay ? [overlay.dir] : []), ...(Object.keys(masks).length ? [maskDir] : []), ...extraDirs],
   };
   queue.push(job);

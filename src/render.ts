@@ -20,6 +20,7 @@ export type Fit = 'fill' | 'fit';
 /** A piece of the main (magnetic) video track. */
 export interface VideoClip {
   id: string;
+  startMs?: number;   // timeline time; clips may have gaps between them (black). Old projects: packed one after another
   reversedFrom?: { mediaId: string; inMs: number; outMs: number };  // set when this piece plays a reversed copy
   mediaId: string;
   inMs: number;   // source time
@@ -436,16 +437,29 @@ export const clipDuration = (c: VideoClip) => Math.max(1, Math.round((c.outMs - 
 export function clipStarts(clips: VideoClip[]): number[] {
   const out: number[] = [];
   let t = 0;
-  for (const c of clips) { out.push(t); t += clipDuration(c); }
+  for (const c of clips) { const s = Math.max(t, c.startMs ?? t); out.push(s); t = s + clipDuration(c); }
   return out;
+}
+/** End of the last main clip. */
+export function clipsEnd(clips: VideoClip[]): number {
+  if (!clips.length) return 0;
+  const st = clipStarts(clips);
+  return st[st.length - 1] + clipDuration(clips[clips.length - 1]);
+}
+/** Gives every clip an explicit start, in time order, pushing any overlap to the right. */
+export function settleClips(clips: VideoClip[]): VideoClip[] {
+  const st = clipStarts(clips);
+  const order = clips.map((c, i) => ({ c, s: c.startMs ?? st[i], i })).sort((a, b) => a.s - b.s || a.i - b.i);
+  let t = 0;
+  return order.map(({ c, s }) => { const start = Math.round(Math.max(t, s, 0)); t = start + clipDuration(c); return c.startMs === start ? c : { ...c, startMs: start }; });
 }
 
 /**
- * Length of the video. With a main track it is the main track; a blank canvas (no main clips) is as long as
- * whatever has been put on it (layers, text, memes, captions, sounds, music).
+ * Length of the video: up to the end of the last main clip, or of any picture, text, layer or caption placed after
+ * it (black there). A blank canvas (no main clips) is as long as whatever has been put on it.
  */
 export function timelineDuration(tl: Pick<Timeline, 'clips'> & Partial<Timeline>): number {
-  if (tl.clips.length) return tl.clips.reduce((s, c) => s + clipDuration(c), 0);
+  if (tl.clips.length) return Math.max(clipsEnd(tl.clips), contentEnd({ ...tl, music: [], sounds: [] }));
   return contentEnd(tl);
 }
 const FAR = 1e8;   // "until the end" markers (main-track layers) do not count as content
@@ -461,16 +475,17 @@ export function contentEnd(tl: Partial<Timeline>): number {
   return Math.round(end);
 }
 
-/** Which clip plays at timeline time t, and the matching source time. */
+/** Which clip plays at timeline time t, and the matching source time; null in a gap (black). */
 export function locate(clips: VideoClip[], t: number): { index: number; sourceMs: number; startMs: number } | null {
-  let start = 0;
+  const st = clipStarts(clips);
   for (let i = 0; i < clips.length; i++) {
     const d = clipDuration(clips[i]);
-    if (t < start + d || i === clips.length - 1) {
-      const local = Math.max(0, Math.min(d, t - start));
-      return { index: i, sourceMs: clips[i].inMs + local * clips[i].speed, startMs: start };
+    // the very end of a clip still shows its last frame unless the next clip starts right there
+    const end = st[i] + d, nextStarts = i + 1 < clips.length && st[i + 1] <= end + 0.5;
+    if (t >= st[i] && (t < end || (!nextStarts && t <= end + 0.5))) {
+      const local = Math.max(0, Math.min(d, t - st[i]));
+      return { index: i, sourceMs: clips[i].inMs + local * clips[i].speed, startMs: st[i] };
     }
-    start += d;
   }
   return null;
 }
@@ -482,8 +497,8 @@ export function splitAt(clips: VideoClip[], t: number, newId: string): VideoClip
   const c = clips[loc.index];
   const cut = Math.round(loc.sourceMs);
   if (cut - c.inMs < 100 || c.outMs - cut < 100) return null;
-  const a = { ...c, outMs: cut };
-  const b = { ...c, id: newId, inMs: cut };
+  const a = { ...c, outMs: cut, startMs: loc.startMs };
+  const b = { ...c, id: newId, inMs: cut, startMs: Math.round(loc.startMs + (cut - c.inMs) / c.speed), trans: 'none' as ClipTrans };
   return [...clips.slice(0, loc.index), a, b, ...clips.slice(loc.index + 1)];
 }
 
@@ -772,6 +787,8 @@ export function renderArgs(spec: RenderSpec): string[] {
   const bg = /^#[0-9a-f]{6}$/i.test(tl.background ?? '') ? `0x${tl.background!.slice(1)}` : 'black';
   const args = ['-hide_banner', '-y', '-nostats', '-progress', 'pipe:1'];
   const f: string[] = [];
+  const starts = clipStarts(tl.clips);
+  const touches = (i: number) => i > 0 && Math.abs(starts[i] - (starts[i - 1] + clipDuration(tl.clips[i - 1]))) < 1;
   tl.clips.forEach((c, i) => {
     const m = spec.media[c.mediaId];
     if (!m) throw new Error('Media klip tidak ditemukan.');
@@ -791,8 +808,8 @@ export function renderArgs(spec: RenderSpec): string[] {
         `crop=${W}:${H}:x='(iw-${W})*${zx}':y='(ih-${H})*${zy}'`;
     }
     const sp = c.speed === 1 ? '' : `,setpts=PTS/${Number(c.speed.toFixed(4))}`;
-    const tr: ClipTrans = i > 0 ? (c.trans ?? 'none') : 'none';
-    const next: ClipTrans = tl.clips[i + 1]?.trans ?? 'none';
+    const tr: ClipTrans = touches(i) ? (c.trans ?? 'none') : 'none';
+    const next: ClipTrans = touches(i + 1) ? (tl.clips[i + 1]?.trans ?? 'none') : 'none';
     const durS = clipDuration(c) / 1000;
     const zx = Number((c.zx ?? 0.5).toFixed(4)), zy = Number((c.zy ?? 0.5).toFixed(4));
     let chain: string;
@@ -830,7 +847,21 @@ export function renderArgs(spec: RenderSpec): string[] {
     }
   });
   const total = timelineDuration(tl);
-  if (tl.clips.length) f.push(`${tl.clips.map((_, i) => `[v${i}][a${i}]`).join('')}concat=n=${tl.clips.length}:v=1:a=1[cv][ca]`);
+  if (tl.clips.length) {
+    // black + silence where nothing is on the main track (before, between and after the clips)
+    const segs: string[] = [];
+    let at = 0, g = 0;
+    const gap = (ms: number) => {
+      if (ms < 1) return;
+      const d = (ms / 1000).toFixed(3);
+      f.push(`color=c=${bg}:s=${W}x${H}:r=${F}:d=${d},format=yuv420p[gv${g}]`, `anullsrc=r=48000:cl=stereo,atrim=0:${d},aformat=sample_fmts=fltp:channel_layouts=stereo[ga${g}]`);
+      segs.push(`[gv${g}][ga${g}]`);
+      g++;
+    };
+    tl.clips.forEach((c, i) => { gap(starts[i] - at); segs.push(`[v${i}][a${i}]`); at = starts[i] + clipDuration(c); });
+    gap(total - at);
+    f.push(`${segs.join('')}concat=n=${segs.length}:v=1:a=1[cv][ca]`);
+  }
   else {
     // blank canvas: a plain picture and silence as long as the content
     const d = (total / 1000).toFixed(3);
@@ -1260,20 +1291,36 @@ export function removePauses(
       pieces.push({ clip: { ...c, id: j === 0 ? c.id : newId(), inMs: Math.round(k.startMs), outMs: Math.round(k.endMs), trans: j === 0 ? c.trans : 'none' }, from: i });
     });
   });
-  // new start times
-  let acc = 0;
-  for (const p of pieces) {
-    perOld[p.from].push({ inMs: p.clip.inMs, outMs: p.clip.outMs, newStart: acc });
-    acc += clipDuration(p.clip);
-  }
+  // new start times: each piece moves left by the pauses cut before it; gaps between clips stay
   const oldStarts = clipStarts(clips);
+  const remAfter: number[] = [];
+  let removed = 0, acc = 0;
+  clips.forEach((c, i) => {
+    let cursor = c.inMs, local = 0;
+    for (const p of pieces.filter((q) => q.from === i)) {
+      local += (p.clip.inMs - cursor) / c.speed;
+      const ns = Math.round(oldStarts[i] + (p.clip.inMs - c.inMs) / c.speed - removed - local);
+      p.clip.startMs = ns;
+      perOld[i].push({ inMs: p.clip.inMs, outMs: p.clip.outMs, newStart: ns });
+      acc = ns + clipDuration(p.clip);
+      cursor = p.clip.outMs;
+    }
+    local += (c.outMs - cursor) / c.speed;
+    removed += local;
+    remAfter.push(removed);
+  });
   const nextKept = (from: number): number => {
     for (let i = from; i < perOld.length; i++) if (perOld[i].length) return perOld[i][0].newStart;
     return acc;
   };
   const map = (t: number): number => {
     const loc = locate(clips, t);
-    if (!loc) return 0;
+    if (!loc) {
+      // in a gap: move left by everything cut before it
+      let j = -1;
+      clips.forEach((c, i) => { if (oldStarts[i] + clipDuration(c) <= t) j = i; });
+      return Math.max(0, t - (j >= 0 ? remAfter[j] : 0));
+    }
     const c = clips[loc.index];
     const src = c.inMs + (t - oldStarts[loc.index]) * c.speed;
     for (const k of perOld[loc.index]) {
@@ -1282,8 +1329,7 @@ export function removePauses(
     }
     return nextKept(loc.index + 1);
   };
-  const before = clips.reduce((a, c) => a + clipDuration(c), 0);
-  return { clips: pieces.map((p) => p.clip), map, removedMs: before - acc, cuts };
+  return { clips: pieces.map((p) => p.clip), map, removedMs: Math.round(removed), cuts };
 }
 
 /** Moves every timeline item through `map` after an edit that removed time. Items that vanish are dropped. */

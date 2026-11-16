@@ -6,7 +6,7 @@ import { qualityBitrate } from './ffmpeg';
 import { autoEmoji, clearEmoji } from './emoji';
 import { AI_MODELS, aiEngineReady, aiJson, aiModelReady, cancelAi, downloadAiModel, findMoments, frameScore, type AiModelId, type Moment } from './ai';
 import {
-  DEFAULT_CAPTION, DEFAULT_TEXT, clipDuration, clipStarts, locate, splitAt, timelineDuration,
+  DEFAULT_CAPTION, DEFAULT_TEXT, clipDuration, clipStarts, clipsEnd, settleClips, locate, splitAt, timelineDuration,
   type CaptionLine, type ImageItem, type Watermark, type SoundItem, type TextItem, type TextStyle, type Trans, type VideoClip, type Word,
   transState, TRANS_IN_MS, textAnimState, unitOf, wordPulse, fadesOf, fadeGain, MUSIC_FADE_IN, MUSIC_FADE_OUT, wordScale, wordColor, lineAnimOf, SHOUT_COLOR, type WordFx, type TextAnim, type CapAnim, clipFx, removePauses, remapItems, invertRanges, DUCK_LEVEL,
   type ClipTrans, type Duck, type MusicItem, type Range, type VideoLayer, type Crop, NO_CROP, cropSize, type Marker, youtubeChapters, type Blend, BLENDS, type LayerGroup, type Tf, tfActive, anchoredCentre, type Mask, type ChromaKey, maskActive,
@@ -281,7 +281,7 @@ async function boot() {
     return;
   }
   settings = await loadSettings();
-  void onDrop((paths) => void dropped(paths));
+  void onDrop((paths, at) => void dropped(paths, at));
   // light up the home rings while a file is dragged over the window
   try {
     const wv = window.__TAURI__?.webview.getCurrentWebview() as unknown as { onDragDropEvent(cb: (e: { payload: { type: string } }) => void): Promise<unknown> };
@@ -309,7 +309,7 @@ async function boot() {
   }
 }
 
-async function dropped(paths: string[]) {
+async function dropped(paths: string[], at?: { x: number; y: number }) {
   if (P && tab === 'vmeme') {
     const vids = paths.filter((p) => VIDEO_MEME_EXT.includes(extName(p)));
     if (vids.length) { await addVideoMemes(vids); return; }
@@ -324,9 +324,32 @@ async function dropped(paths: string[]) {
     if (settings.watermark) p.timeline.watermark = { ...settings.watermark };
     await saveProject(p, true);
     await openProject(p.id, vids);
-  } else {
+  } else if (!tl().clips.length) {
     await importFiles(vids, true);
+  } else {
+    // a project with a main video already: dropped videos come in as new layers (or into the main track
+    // when dropped on it), never silently stuck onto the end
+    const where = at ? timelineDropTarget(at.x, at.y) : null;
+    let ms = where?.ms ?? t;
+    for (const path of vids) {
+      const m = await importFiles([path], false);
+      if (!m) continue;
+      if (where?.main) insertMediaAt(m, ms);
+      else addMediaLayer(m, ms, true);
+      ms += m.durationMs;
+    }
   }
+}
+
+/** Where a drop at window point (x, y) lands on the timeline: a time, and whether it is the main track. */
+function timelineDropTarget(cx: number, cy: number): { ms: number; main: boolean } | null {
+  const tc0 = tlCanvas?.isConnected ? tlCanvas : null;
+  if (!tc0) return null;
+  const r = tc0.getBoundingClientRect();
+  if (cx < r.left || cx > r.right || cy < r.top || cy > r.bottom) return null;
+  const x = cx - r.left, y = cy - r.top;
+  const lm = laneOf('main');
+  return { ms: Math.max(0, snapMs(xToMs(x))), main: y >= lm.y && y <= lm.y + lm.h };
 }
 
 /** A blank canvas has no main video; it is as long as what is placed on it. */
@@ -415,6 +438,18 @@ function writeBlob(path: string, blob: Blob): Promise<void> {
     r.onload = () => { invoke('write_b64', { path, data: String(r.result) }).then(() => resolve(), reject); };
     r.readAsDataURL(blob);
   });
+}
+
+const APP_VERSION_TEXT = '0.25.0';
+/** Notes why the export could not draw text like the preview, in the project folder, for troubleshooting. */
+async function writeExportLog(msg: string) {
+  if (!P) return;
+  try {
+    const fonts = [...new Set([tl().captions.style.font, ...tl().texts.map((x) => x.style.font)])];
+    const loaded = fonts.map((f) => `${f}: ${document.fonts?.check(`700 40px "${f}"`) ? 'siap' : 'TIDAK terbaca'}`);
+    const body = [`Waktu: ${new Date().toISOString()}`, `Versi: ${APP_VERSION_TEXT}`, `Alasan: ${msg}`, `Font: ${loaded.join(', ')}`, `Ukuran: ${tl().width}x${tl().height}`, `Baris subtitle: ${tl().captions.lines.length}, teks: ${tl().texts.length}`, navigator.userAgent].join('\n');
+    await invoke('write_text', { path: join(await projectDir(P.id), 'export-log.txt'), content: body + '\n' });
+  } catch { /* best effort */ }
 }
 
 /** Saves the preview of the open project as its cover picture on the home page. */
@@ -641,6 +676,7 @@ async function openProject(id: string, importNow: string[] = []) {
   p.timeline.images ??= [];
   p.timeline.music ??= [];
   p.timeline.layers ??= [];
+  p.timeline.clips = settleClips(p.timeline.clips);
   cropMode = false;
   sel = null;
   t = 0;
@@ -661,16 +697,18 @@ async function pickAndImport() {
   if (arr.length) await importFiles(arr, P!.timeline.clips.length === 0);
 }
 
-async function importFiles(paths: string[], addToTimeline: boolean) {
+async function importFiles(paths: string[], addToTimeline: boolean): Promise<MediaEntry | null> {
   const p = P!;
+  let last: MediaEntry | null = null;
   for (const path of paths) {
     try {
       setBusy('Menambahkan video…');
       const m = await importMedia(path, setBusy);
       p.media.push(m);
+      last = m;
       if (addToTimeline) {
         snapshot();
-        tl().clips.push({ id: uid(), mediaId: m.id, inMs: 0, outMs: m.durationMs, speed: 1, volume: 1, fit: Math.abs(Math.log((m.width / m.height) / (tl().width / tl().height))) < 0.35 ? 'fill' : 'fit' });
+        appendClip(newClipFor(m));
         if (tl().clips.length === 1 && tl().background === undefined) tl().fps = m.fps >= 50 ? 60 : 30;
       }
       await saveProject(p);
@@ -687,6 +725,7 @@ async function importFiles(paths: string[], addToTimeline: boolean) {
       setBusy('');
     }
   }
+  return last;
 }
 
 async function loadSheets(m: MediaEntry) {
@@ -1037,7 +1076,7 @@ async function addStinger(atEnd = false) {
     if (atEnd) {
       if (tl().clips[tl().clips.length - 1]?.mediaId === m.id) { toast('Stinger sudah ada di akhir video.'); return; }
       snapshot();
-      tl().clips.push({ id: uid(), mediaId: m.id, inMs: 0, outMs: m.durationMs, speed: 1, volume: 0.8, fit: 'fill', trans: 'fade' });
+      appendClip({ id: uid(), mediaId: m.id, inMs: 0, outMs: m.durationMs, speed: 1, volume: 0.8, fit: 'fill', trans: 'fade' });
       changed({ left: true }); fitZoom();
       toast('Stinger dipasang di akhir sebagai penutup.');
       return;
@@ -1051,7 +1090,9 @@ async function addStinger(atEnd = false) {
     tl().captions.lines.forEach((l) => { sh(l); l.words.forEach((w) => { w.startMs += d; w.endMs += d; }); });
     const first = tl().clips[0];
     if (first && (first.trans ?? 'none') === 'none') first.trans = 'fade';   // the stinger ends dark: fade the video in from it
-    tl().clips.unshift({ id: uid(), mediaId: m.id, inMs: 0, outMs: m.durationMs, speed: 1, volume: 0.8, fit: 'fill' });
+    tl().clips = settleClips(tl().clips);
+    tl().clips.forEach((c) => { c.startMs = (c.startMs ?? 0) + d; });
+    tl().clips.unshift({ id: uid(), mediaId: m.id, inMs: 0, outMs: m.durationMs, speed: 1, volume: 0.8, fit: 'fill', startMs: 0 });
     if (tl().clips.length === 1) tl().fps = 60;
     changed({ left: true });
     fitZoom();
@@ -1107,17 +1148,18 @@ function mediaPanel(): Node[] {
         }
         const addMain = () => {
           snapshot();
-          tl().clips.push({ id: uid(), mediaId: m.id, inMs: 0, outMs: m.durationMs, speed: 1, volume: 1, fit: Math.abs(Math.log((m.width / m.height) / (tl().width / tl().height))) < 0.35 ? 'fill' : 'fit' });
+          appendClip(newClipFor(m));
           changed();
           fitZoom();
         };
         const used = tl().clips.some((c) => c.mediaId === m.id) || layers().some((l) => l.source === 'media' && l.mediaId === m.id);
-        return h('div', { class: `media-tile${used ? ' used' : ''}`, title: `${m.path}\nKlik dua kali: tambahkan ke akhir timeline`, ondblclick: addMain },
+        return h('div', { class: `media-tile${used ? ' used' : ''}`, title: `${m.path}\nKlik dua kali: tambahkan ke akhir timeline\nTarik ke timeline: di jalur video utama = diselipkan, di tempat lain = layer baru`, ondblclick: addMain, onpointerdown: (e: Event) => startMediaDrag(e as PointerEvent, m) },
           h('div', { class: 'mt-frame' }, thumb,
             h('span', { class: 'mt-dur mono' }, tc(m.durationMs)),
             used ? h('span', { class: 'mt-used', title: 'Sudah dipakai di timeline' }) : '',
             h('div', { class: 'mt-actions' },
               h('button', { class: 'mt-btn', 'aria-label': `Jadikan ${m.name} layer`, title: 'Jadikan layer di posisi playhead', onclick: (e: Event) => { e.stopPropagation(); addMediaLayer(m); } }, icon('layers', 15)),
+              h('button', { class: 'mt-btn', 'aria-label': `Selipkan ${m.name} di playhead`, title: 'Selipkan di playhead (video utama dipotong di situ, sisanya bergeser)', onclick: (e: Event) => { e.stopPropagation(); if (tl().clips.length) insertMediaAt(m, t); else addMain(); } }, icon('split', 15)),
               h('button', { class: 'mt-btn', 'aria-label': `Tambahkan ${m.name} ke timeline`, title: 'Tambahkan ke akhir timeline', onclick: (e: Event) => { e.stopPropagation(); addMain(); } }, icon('plus', 15)),
             ),
           ),
@@ -1127,6 +1169,36 @@ function mediaPanel(): Node[] {
       }),
     ) : h('p', { class: 'muted small hint-p' }, 'Tarik rekaman dari OBS ke sini, atau klik tombol di atas.'),
   ];
+}
+
+/** Dragging a media tile onto the timeline: on the main track it is inserted there, anywhere else it becomes a new layer. */
+function startMediaDrag(e: PointerEvent, m: MediaEntry) {
+  if (e.button !== 0 || (e.target as HTMLElement).closest('button')) return;
+  const sx = e.clientX, sy = e.clientY;
+  let ghost: HTMLElement | null = null;
+  const move = (ev: PointerEvent) => {
+    if (!ghost && Math.hypot(ev.clientX - sx, ev.clientY - sy) < 6) return;
+    if (!ghost) { ghost = h('div', { class: 'media-drag-ghost' }, icon('video', 14), m.name); document.body.append(ghost); }
+    const tgt = timelineDropTarget(ev.clientX, ev.clientY);
+    ghost.style.left = `${ev.clientX + 12}px`; ghost.style.top = `${ev.clientY + 12}px`;
+    ghost.dataset.where = tgt ? (tgt.main && tl().clips.length ? `Selipkan di ${tc(tgt.ms, true)}` : `Layer baru di ${tc(tgt.ms, true)}`) : 'Lepas di timeline';
+    clipGhost = tgt && tgt.main && tl().clips.length ? { x: msToX(tgt.ms), w: (m.durationMs / 1000) * pxPerSec, ms: tgt.ms } : null;
+    drawTimeline();
+  };
+  const up = (ev: PointerEvent) => {
+    window.removeEventListener('pointermove', move);
+    window.removeEventListener('pointerup', up);
+    clipGhost = null;
+    if (!ghost) return;
+    ghost.remove();
+    const tgt = timelineDropTarget(ev.clientX, ev.clientY);
+    if (!tgt) { drawTimeline(); return; }
+    if (!tl().clips.length) { snapshot(); appendClip(newClipFor(m)); changed(); fitZoom(); return; }
+    if (tgt.main) insertMediaAt(m, tgt.ms);
+    else addMediaLayer(m, tgt.ms, true);
+  };
+  window.addEventListener('pointermove', move);
+  window.addEventListener('pointerup', up);
 }
 
 const TEXT_PRESETS: { name: string; style: Partial<TextStyle> }[] = [
@@ -1531,7 +1603,7 @@ function renderInspectorInner() {
         field(`Kecepatan ${clip.speed}×`, h('input', {
           type: 'range', min: 0, max: 8, step: 1, value: [0.25, 0.5, 0.75, 1, 1.25, 1.5, 2, 3, 4].indexOf(clip.speed),
           oninput: (e) => { const v = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 2, 3, 4][Number((e.target as HTMLInputElement).value)]; ((e.target as HTMLElement).previousElementSibling as HTMLElement).textContent = `Kecepatan ${v}×`; },
-          onchange: (e) => { const before = clipMap(); snapshot(); clip.speed = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 2, 3, 4][Number((e.target as HTMLInputElement).value)]; followMainTrack(before); changed(); },
+          onchange: (e) => { const before = clipMap(); snapshot(); tl().clips = settleClips(tl().clips); const c0 = tl().clips.find((q) => q.id === clip.id)!; const end0 = (c0.startMs ?? 0) + clipDuration(c0); c0.speed = clip.speed = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 2, 3, 4][Number((e.target as HTMLInputElement).value)]; shiftClipsFrom(end0, clipDuration(c0) - (end0 - (c0.startMs ?? 0)), c0); followMainTrack(before); changed(); },
         })),
         field(`Volume ${Math.round(clip.volume * 100)}%`, h('input', {
           type: 'range', min: 0, max: 200, step: 5, value: Math.round(clip.volume * 100),
@@ -1557,7 +1629,8 @@ function renderInspectorInner() {
       m?.hasAudio ? fadeBlock('clip', clip.id) : h('span'),
       h('div', { class: 'block' },
         h('button', { class: 'secondary wide', onclick: splitHere }, '✂ Split di playhead'),
-        h('button', { class: 'danger-ghost wide', onclick: deleteSelected }, 'Hapus potongan'),
+        h('button', { class: 'danger-ghost wide', title: 'Tempatnya jadi layar hitam; potongan lain tidak bergeser (Delete)', onclick: () => deleteSelected() }, 'Hapus potongan (sisakan hitam)'),
+        h('button', { class: 'secondary wide', title: 'Potongan sesudahnya ikut maju menutup tempatnya (Shift+Delete)', onclick: () => deleteSelected(true) }, 'Hapus & rapatkan'),
       ),
     );
     return;
@@ -1731,6 +1804,78 @@ function renderInspectorInner() {
 }
 
 // ================= editing actions =================
+
+
+// ================= main track: free positions (gaps are black), insert and ripple helpers =================
+/** Moves every clip that starts at or after `fromMs` by `delta` ms (a ripple). */
+function shiftClipsFrom(fromMs: number, delta: number, except?: VideoClip) {
+  const st = clipStarts(tl().clips);
+  tl().clips.forEach((c, i) => { if (c !== except && st[i] >= fromMs - 0.5) c.startMs = Math.max(0, Math.round(st[i] + delta)); else c.startMs = st[i]; });
+}
+/** Adds a clip after the last one. */
+function appendClip(c: VideoClip) {
+  c.startMs = clipsEnd(tl().clips);
+  tl().clips.push(c);
+}
+/** Puts a clip in the main track at `at`, splitting the clip there and pushing later clips right (insert edit). */
+function insertClipAt(c: VideoClip, at: number) {
+  const before = clipMap();
+  const next = splitAt(tl().clips, at, uid());
+  if (next) tl().clips = next;
+  tl().clips = settleClips(tl().clips);
+  at = Math.max(0, Math.round(at));
+  // if `at` lands in a gap that is long enough, nothing has to move
+  const st = clipStarts(tl().clips);
+  const d = clipDuration(c);
+  const nextStart = st.find((x) => x >= at - 0.5) ?? Infinity;
+  if (nextStart - at < d) shiftClipsFrom(at, d - Math.max(0, nextStart - at));
+  c.startMs = at;
+  tl().clips.push(c);
+  tl().clips = settleClips(tl().clips);
+  followMainTrack(before);
+}
+/** Removes a main clip: leaving its place black (lift), or closing the gap (ripple). */
+function removeClip(id: string, ripple: boolean) {
+  const st = clipStarts(tl().clips);
+  const i = tl().clips.findIndex((c) => c.id === id);
+  if (i < 0) return;
+  const c = tl().clips[i];
+  const before = clipMap();
+  tl().clips = settleClips(tl().clips).filter((x) => x.id !== id);
+  if (ripple) { shiftClipsFrom(st[i] + clipDuration(c), -clipDuration(c)); followMainTrack(before); }
+}
+/** Closes the black gap at `at` by pulling everything after it left. */
+function closeGapAt(at: number) {
+  const st = clipStarts(tl().clips);
+  const prevEnd = Math.max(0, ...tl().clips.map((c, i) => st[i] + clipDuration(c)).filter((e) => e <= at + 0.5));
+  const nextStart = st.find((x) => x > at) ?? Infinity;
+  if (!Number.isFinite(nextStart) || nextStart - prevEnd < 1) return false;
+  const before = clipMap();
+  snapshot();
+  shiftClipsFrom(nextStart, -(nextStart - prevEnd));
+  followMainTrack(before);
+  changed();
+  return true;
+}
+/** The gap (black) at a timeline time, if there is one between or before main clips. */
+function gapAt(at: number): { a: number; b: number } | null {
+  if (!tl().clips.length || locate(tl().clips, at)) return null;
+  const st = clipStarts(tl().clips);
+  const ends = tl().clips.map((c, i) => st[i] + clipDuration(c));
+  const a = Math.max(0, ...ends.filter((e) => e <= at + 0.5));
+  const b = st.find((x) => x > at) ?? Infinity;
+  return Number.isFinite(b) ? { a, b } : null;
+}
+const newClipFor = (m: MediaEntry, volume = 1): VideoClip => ({ id: uid(), mediaId: m.id, inMs: 0, outMs: m.durationMs, speed: 1, volume, fit: Math.abs(Math.log((m.width / m.height) / (tl().width / tl().height))) < 0.35 ? 'fill' : 'fit' });
+/** "Insert at playhead" from the media panel or a drag onto the main track. */
+function insertMediaAt(m: MediaEntry, at: number) {
+  snapshot();
+  const c = newClipFor(m);
+  insertClipAt(c, at);
+  sel = { kind: 'clip', id: c.id };
+  changed({ left: true });
+  toast(`${m.name} diselipkan di ${tc(at, true)}. Yang sesudahnya ikut bergeser.`);
+}
 
 // ================= keep everything on its footage when the main track changes =================
 type ClipMap = { id: string; start: number; end: number; inMs: number; speed: number }[];
@@ -1907,7 +2052,20 @@ function timelineMenu(e: MouseEvent, x: number, y: number) {
   const hit = hitTest(x, y);
   if (hit && !hit.marker && !isSelected(hit.kind, hit.id)) { multi.clear(); sel = { kind: hit.kind, id: hit.id }; renderInspector(); drawTimeline(); renderFrame(); }
   if (!hit && !multi.size) { sel = null; renderInspector(); drawTimeline(); }
+  const lm = laneOf('main');
+  if (!hit && y >= lm.y && y <= lm.y + lm.h) { mainLaneMenu(e, Math.max(0, xToMs(x))); return; }
   selectionMenu(e, Math.max(0, xToMs(x)));
+}
+
+/** Right-click on an empty spot of the main track: close the black gap, or put a video there. */
+function mainLaneMenu(e: MouseEvent, at: number) {
+  const g = gapAt(at);
+  const vids = P!.media.filter((m) => m.durationMs > 0);
+  const items: MenuItem[] = [];
+  if (g) items.push({ label: `Hapus jarak hitam (${tc(g.b - g.a, true)})`, icon: 'trash', run: () => { if (closeGapAt(at)) toast('Jarak hitam dihapus, potongan sesudahnya maju.'); } }, 'sep');
+  for (const m of vids.slice(0, 12)) items.push({ label: `Selipkan “${m.name}” di sini`, icon: 'plus', run: () => insertMediaAt(m, at) });
+  if (!vids.length) items.push({ label: 'Belum ada video di tab Media', icon: 'plus', disabled: true, run: () => undefined });
+  openMenu(e.clientX, e.clientY, items);
 }
 
 /** Right-click on the preview: the thing under the pointer, else the video at the playhead. */
@@ -1989,7 +2147,8 @@ function selectionMenu(e: MouseEvent, atMs: number) {
     }
     items.push('sep', { label: 'Split di playhead', icon: 'split', keys: 'Ctrl+B', run: splitHere });
   } else items.push('sep');
-  items.push({ label: picked.length > 1 ? `Hapus ${picked.length} item` : 'Hapus', icon: 'trash', keys: 'Del', danger: true, run: deleteSelected });
+  items.push({ label: picked.length > 1 ? `Hapus ${picked.length} item` : one?.kind === 'clip' ? 'Hapus (sisakan hitam)' : 'Hapus', icon: 'trash', keys: 'Del', danger: true, run: () => deleteSelected() });
+  if (one?.kind === 'clip') items.push({ label: 'Hapus & rapatkan', icon: 'trash', keys: 'Shift+Del', danger: true, run: () => deleteSelected(true) });
   openMenu(e.clientX, e.clientY, items);
 }
 
@@ -2013,7 +2172,9 @@ function splitHere() {
   changed();
 }
 
-function deleteSelected() {
+let rippleDelete = false;
+function deleteSelected(ripple: unknown = false) {
+  rippleDelete = ripple === true;
   if (P && multi.size) {
     snapshot();
     const n = multi.size;
@@ -2032,7 +2193,7 @@ function deleteSelected() {
   }
   if (!P || !sel) { toast('Pilih dulu potongan, teks, atau subtitle di timeline.'); return; }
   snapshot();
-  if (sel.kind === 'clip') { const before = clipMap(); tl().clips = tl().clips.filter((c) => c.id !== sel!.id); followMainTrack(before); }
+  if (sel.kind === 'clip') removeClip(sel.id, rippleDelete);
   else if (sel.kind === 'text') tl().texts = tl().texts.filter((x) => x.id !== sel!.id);
   else if (sel.kind === 'sound') tl().sounds = sounds().filter((x) => x.id !== sel!.id);
   else if (sel.kind === 'image') tl().images = images().filter((x) => x.id !== sel!.id);
@@ -2090,7 +2251,7 @@ function clipFadeVolume() {
 function syncVideo() {
   if (!P) return;
   const loc = locate(tl().clips, t);
-  if (!loc) { activeVideo = null; activeIndex = -1; return; }
+  if (!loc) { activeVideo?.pause(); activeVideo = null; activeIndex = -1; return; }
   const c = tl().clips[loc.index];
   const v = videoFor(c.mediaId);
   if (!v) return;
@@ -2158,19 +2319,28 @@ function tickInner() {
     const src = v.currentTime * 1000;
     t = starts[activeIndex] + (src - c.inMs) / c.speed;
     if (src >= c.outMs - 20 || v.ended) {
-      if (activeIndex + 1 < clips.length) {
+      const endT = starts[activeIndex] + clipDuration(c);
+      if (activeIndex + 1 < clips.length && starts[activeIndex + 1] - endT < 2) {
         t = starts[activeIndex + 1];
         syncVideo();
         void activeVideo?.play().catch(() => undefined);
+      } else if (endT < timelineDuration(tl()) - 20) {
+        // a black gap (or layers) follows: run on the clock until the next clip
+        v.pause(); activeVideo = null; activeIndex = -1;
+        t = endT; clock = { at: performance.now(), t };
       } else {
         t = timelineDuration(tl());
         pause();
       }
     }
   } else if (clock) {
-    // blank canvas (no main video): time runs on the clock
+    // no main video right now (blank canvas, or a black gap): time runs on the clock
     t = clock.t + (performance.now() - clock.at) * playRate();
     if (t >= timelineDuration(tl())) { t = timelineDuration(tl()); pause(); }
+    else if (clips.length) {
+      const loc = locate(clips, t);
+      if (loc && t < loc.startMs + clipDuration(clips[loc.index]) - 30) { syncVideo(); void activeVideo?.play().catch(() => undefined); }
+    }
   }
   // keep the playhead in view
   const tb = $('#tl-body');
@@ -2346,7 +2516,7 @@ function renderFrameInner() {
       if (fx.white > 0) { ctx.fillStyle = `rgba(255,255,255,${fx.white})`; ctx.fillRect(0, 0, W, H); }
       if (black > 0) { ctx.fillStyle = `rgba(0,0,0,${black})`; ctx.fillRect(0, 0, W, H); }
     }
-  } else if (!isBlank()) {
+  } else if (!isBlank() && !tl().clips.length) {
     ctx.fillStyle = '#6b6b6b';
     ctx.font = '500 18px "Segoe UI", sans-serif';
     ctx.textAlign = 'center';
@@ -3196,9 +3366,32 @@ function drawTimelineInner() {
     if (mediaOf(c.mediaId)?.hasAudio) drawFades(ctx, 'clip', c.id, x, lm.y, w, lm.h, isSel);
   });
 
-  // transition markers on the cuts
+  // black gaps between clips (no magnet): shown as an empty dark slot
+  tl().clips.forEach((c, i) => {
+    const prevEnd = i ? starts[i - 1] + clipDuration(tl().clips[i - 1]) : 0;
+    if (starts[i] - prevEnd < 1) return;
+    const gx = msToX(prevEnd), gw = msToX(starts[i]) - gx;
+    if (gx + gw < 0 || gx > W || gw < 2) return;
+    ctx.save();
+    roundRect(ctx, gx + 1, lm.y + 4, gw - 2, lm.h - 8, 7);
+    ctx.fillStyle = '#050606'; ctx.fill();
+    ctx.setLineDash([4, 4]); ctx.strokeStyle = 'rgba(255,255,255,.14)'; ctx.lineWidth = 1; ctx.stroke(); ctx.setLineDash([]);
+    if (gw > 46) { ctx.fillStyle = 'rgba(255,255,255,.38)'; ctx.font = `600 10px ${TL_FONT}`; ctx.fillText(`hitam ${tc(starts[i] - prevEnd, true)}`, gx + 8, lm.y + lm.h / 2 + 3); }
+    ctx.restore();
+  });
+  if (clipGhost) {
+    ctx.save();
+    roundRect(ctx, clipGhost.x + 1, lm.y, clipGhost.w - 2, lm.h, 9);
+    ctx.fillStyle = 'rgba(63,194,204,.22)'; ctx.fill();
+    ctx.strokeStyle = '#3fc2cc'; ctx.lineWidth = 2; ctx.stroke();
+    ctx.fillStyle = '#e8fbfc'; ctx.font = `700 10px ${TL_FONT}`; ctx.fillText(tc(clipGhost.ms, true), clipGhost.x + 6, lm.y + 14);
+    ctx.restore();
+  }
+
+  // transition markers on the cuts (only where two clips touch)
   cutMarkers = [];
   for (let i = 1; i < tl().clips.length; i++) {
+    if (Math.abs(starts[i] - (starts[i - 1] + clipDuration(tl().clips[i - 1]))) > 1) continue;
     const x = msToX(starts[i]);
     if (x < -10 || x > W + 10) continue;
     const tr = tl().clips[i].trans ?? 'none';
@@ -3432,18 +3625,59 @@ function span(kind: SelKind, id: string): { a: number; b: number; set: (a: numbe
 }
 
 /** Snap a time to the playhead, clip boundaries and item edges when close (8 px). */
-function snapMs(ms: number, ignoreId?: string): number {
-  const pts = [t, 0, ...clipStarts(tl().clips), timelineDuration(tl())];
+function snapPoints(ignoreId?: string): number[] {
+  const st = clipStarts(tl().clips);
+  const pts = [t, 0, timelineDuration(tl())];
+  tl().clips.forEach((c, i) => { if (c.id !== ignoreId) pts.push(st[i], st[i] + clipDuration(c)); });
   for (const x of tl().texts) if (x.id !== ignoreId) pts.push(x.startMs, x.endMs);
   for (const x of images()) if (x.id !== ignoreId) pts.push(x.startMs, x.endMs);
   for (const x of sounds()) if (x.id !== ignoreId) pts.push(x.startMs, soundEnd(x));
   for (const x of music()) if (x.id !== ignoreId) pts.push(x.startMs, x.startMs + x.lengthMs);
   for (const m of markers()) pts.push(m.ms);
   if (tl().range) pts.push(tl().range!.inMs, tl().range!.outMs);
+  return pts;
+}
+function snapMs(ms: number, ignoreId?: string): number {
+  const pts = snapPoints(ignoreId);
   const tol = (8 / pxPerSec) * 1000;
   let best = ms, d = tol;
   for (const p of pts) if (Math.abs(p - ms) < d) { d = Math.abs(p - ms); best = p; }
   return best;
+}
+
+/** A drag offset that makes `base + delta` (or its end, `base + delta + len`) land on a nearby edge. */
+function snapDelta(base: number, delta: number, ignoreId?: string, len = 0): number {
+  const pts = snapPoints(ignoreId);
+  const tol = (8 / pxPerSec) * 1000;
+  let best = delta, d = tol;
+  for (const p of pts) for (const edge of len ? [base, base + len] : [base]) {
+    const dd = p - edge;
+    if (Math.abs(dd - delta) < d) { d = Math.abs(dd - delta); best = dd; }
+  }
+  return best;
+}
+let clipGhost: { x: number; w: number; ms: number } | null = null;
+/** Drops a main clip at a new time; any clip it lands on is pushed right (nothing is ever covered). */
+function placeClip(id: string, at: number) {
+  const before = clipMap();
+  tl().clips = settleClips(tl().clips);
+  const c = tl().clips.find((q) => q.id === id);
+  if (!c) return;
+  const rest = tl().clips.filter((q) => q !== c);
+  at = Math.max(0, Math.round(at));
+  // landing in the middle of a clip: go before it if over its first half, after it otherwise
+  const st = clipStarts(rest);
+  const hit = rest.findIndex((q, i) => at > st[i] + 1 && at < st[i] + clipDuration(q) - 1);
+  if (hit >= 0) at = at < st[hit] + clipDuration(rest[hit]) / 2 ? Math.max(0, st[hit] - clipDuration(c)) : st[hit] + clipDuration(rest[hit]);
+  // still overlapping something before it: sit right after it
+  const st2 = clipStarts(rest);
+  rest.forEach((q, i) => { if (st2[i] < at && st2[i] + clipDuration(q) > at) at = st2[i] + clipDuration(q); });
+  c.startMs = at;
+  const d = clipDuration(c);
+  const nextStart = st2.find((x) => x >= at) ?? Infinity;
+  if (nextStart < at + d) rest.forEach((q, i) => { if (st2[i] >= at) q.startMs = st2[i] + (at + d - nextStart); });
+  tl().clips = settleClips([...rest, c]);
+  followMainTrack(before);
 }
 
 function setupTimeline() {
@@ -3580,20 +3814,32 @@ function setupTimeline() {
       const c = tl().clips.find((q) => q.id === (drag as { id: string }).id);
       const m = c && mediaOf(c.mediaId);
       if (!c || !m) return;
-      if (drag.edge === 'in') c.inMs = Math.round(clamp(drag.start.inMs + dms * c.speed, 0, c.outMs - 200));
-      else c.outMs = Math.round(clamp(drag.start.outMs + dms * c.speed, c.inMs + 200, m.durationMs));
+      // trim one end only; the other clips stay where they are (no magnet), and it never runs into a neighbour
       const i = tl().clips.indexOf(c);
-      seek(clipStarts(tl().clips)[i] + (drag.edge === 'in' ? 0 : clipDuration(c) - 1));
+      const st = clipStarts(tl().clips);
+      const s0 = drag.start.startMs ?? st[i];
+      const prevEnd = i > 0 ? st[i - 1] + clipDuration(tl().clips[i - 1]) : 0;
+      const nextStart = i + 1 < tl().clips.length ? st[i + 1] : Infinity;
+      if (drag.edge === 'in') {
+        const minIn = Math.max(0, drag.start.inMs - (s0 - prevEnd) * c.speed);
+        c.inMs = Math.round(clamp(drag.start.inMs + snapDelta(s0, dms) * c.speed, minIn, c.outMs - 200));
+        c.startMs = Math.round(s0 + (c.inMs - drag.start.inMs) / c.speed);
+      } else {
+        const e0 = s0 + clipDuration(drag.start);
+        const maxOut = Math.min(m.durationMs, drag.start.outMs + (nextStart - e0) * c.speed);
+        c.outMs = Math.round(clamp(drag.start.outMs + snapDelta(e0, dms) * c.speed, c.inMs + 200, maxOut));
+      }
+      seek((c.startMs ?? s0) + (drag.edge === 'in' ? 0 : clipDuration(c) - 1));
       return;
     }
     if (drag.mode === 'move-clip') {
       if (Math.abs(x - drag.sx) > 4) drag.moved = true;
       if (!drag.moved) return;
-      const starts = clipStarts(tl().clips);
-      const ms = xToMs(x);
-      let gap = starts.findIndex((s, i) => ms < s + clipDuration(tl().clips[i]) / 2);
-      if (gap < 0) gap = tl().clips.length;
-      dropX = msToX(gap < starts.length ? starts[gap] : timelineDuration(tl()));
+      const i = tl().clips.findIndex((q) => q.id === (drag as { id: string }).id);
+      const c = tl().clips[i];
+      const s0 = clipStarts(tl().clips)[i];
+      const ns = Math.max(0, s0 + snapDelta(s0, xToMs(x) - xToMs(drag.sx), c.id, clipDuration(c)));
+      clipGhost = { x: msToX(ns), w: (clipDuration(c) / 1000) * pxPerSec, ms: ns };
       drawTimeline();
       return;
     }
@@ -3639,20 +3885,10 @@ function setupTimeline() {
       if (moved) changed({ left: tab === 'captions' });
       return;
     }
-    if (drag.mode === 'move-clip' && drag.moved) {
-      const { x } = pos(e);
-      const clips = tl().clips;
-      const from = clips.findIndex((c) => c.id === (drag as { id: string }).id);
-      const starts = clipStarts(clips);
-      const ms = xToMs(x);
-      let to = starts.findIndex((s, i) => ms < s + clipDuration(clips[i]) / 2);
-      if (to < 0) to = clips.length;
-      if (to > from) to--;
-      if (to !== from) {
-        const [c] = clips.splice(from, 1);
-        clips.splice(to, 0, c);
-      }
-      dropX = null;
+    if (drag.mode === 'move-clip' && drag.moved && clipGhost) {
+      void pos(e);
+      placeClip((drag as { id: string }).id, clipGhost.ms);
+      clipGhost = null;
     }
     if ((drag.mode === 'move-clip' || drag.mode === 'trim-clip') && clipMapAtDown) followMainTrack(clipMapAtDown);
     clipMapAtDown = null;
@@ -4647,17 +4883,18 @@ function addMainLayer(name = 'Video utama', crop: Crop = { ...NO_CROP }, box?: V
   return ly;
 }
 
-function addMediaLayer(m: MediaEntry) {
+function addMediaLayer(m: MediaEntry, atMs?: number, withSound = false) {
   if (!P) return;
   if (!canPlace()) { toast('Tambahkan video ke timeline dulu, lalu jadikan video lain sebagai layer di atasnya.'); return; }
   snapshot();
   const total = timelineDuration(tl());
-  const start = isBlank() ? Math.floor(t) : Math.floor(clamp(t, 0, Math.max(0, total - 500)));
+  const at0 = atMs ?? t;
+  const start = isBlank() || atMs !== undefined ? Math.max(0, Math.floor(at0)) : Math.floor(clamp(at0, 0, Math.max(0, total - 500)));
   const box = boxFor(NO_CROP, { w: m.width, h: m.height }, m.width >= m.height ? 1 : 0.6);
   if (box.h > 1) { const k = 1 / box.h; box.w *= k; box.h = 1; }
   const ly: VideoLayer = {
-    id: uid(), name: m.name, source: 'media', mediaId: m.id, inMs: 0, startMs: start, endMs: isBlank() ? start + m.durationMs : Math.min(total, start + m.durationMs),
-    crop: { ...NO_CROP }, box, opacity: 1, volume: 0,
+    id: uid(), name: m.name, source: 'media', mediaId: m.id, inMs: 0, startMs: start, endMs: isBlank() || atMs !== undefined ? start + m.durationMs : Math.min(total, start + m.durationMs),
+    crop: { ...NO_CROP }, box, opacity: 1, volume: withSound && m.hasAudio ? 1 : 0,
   };
   layers().push(ly);
   sel = { kind: 'layer', id: ly.id };
@@ -5689,7 +5926,10 @@ function renderExport() {
             renderOverlay: (dir) => renderOverlayTrack(dir, (f) => { btn.textContent = `Menyiapkan teks… ${Math.round(f * 100)}%`; }),
             renderMasks: (dir) => renderMaskFiles(dir),
             fontFilesFor: (families) => (settings.importedFonts ?? []).filter((f) => families.some((x) => x.toLowerCase() === f.name.toLowerCase())).map((f) => f.file),
-            onOverlayError: (msg) => toast(`Teks diekspor pakai cara cadangan, jadi font atau posisinya bisa beda dari preview. Kirim pesan ini ke pembuat aplikasi: ${msg}`, 'error'),
+            onOverlayError: async (msg) => {
+              await writeExportLog(msg);
+              return dialog().ask(`Teks/subtitle tidak bisa digambar persis seperti preview.\n\nAlasan: ${msg}\n\nKalau lanjut, teks dibuat pakai cara cadangan: font bisa terlihat beda (huruf sambung/ligatur hilang). Catatan lengkap disimpan di folder proyek (export-log.txt).\n\nTetap ekspor?`, { title: 'Teks ekspor beda dari preview', kind: 'warning', okLabel: 'Tetap ekspor', cancelLabel: 'Batal' });
+            },
           }).then(() => { exportName = ''; const inp = document.querySelector('#export-pop .name-row input') as HTMLInputElement | null; if (inp) inp.value = ''; });
         } catch (e) { toast((e as Error).message, 'error'); } finally { btn.disabled = false; btn.textContent = 'Ekspor video'; }
       },
@@ -5808,6 +6048,8 @@ function renderQueue() {
     h('div', { class: 'row-between' },
       h('span', { class: 'small' }, j.label),
       h('span', { class: 'muted small' }, j.status === 'queued' ? 'menunggu' : j.status === 'running' ? `${Math.round(j.progress * 100)}%` : j.status === 'done' ? 'selesai' : 'gagal'),
+      j.textMode === 'preview' ? h('span', { class: 'job-tag ok', title: 'Teks dan subtitle digambar dengan cara yang sama persis seperti preview' }, 'teks = preview')
+        : j.textMode === 'cadangan' ? h('span', { class: 'job-tag warn', title: 'Teks dibuat dengan cara cadangan; font bisa beda dari preview' }, 'teks cadangan') : null,
     ),
     h('div', { class: 'bar-track' }, h('div', { class: 'bar-fill', style: `width:${Math.round(j.progress * 100)}%` })),
     j.status === 'failed' ? h('div', { class: 'warn small' }, j.error) : null,
@@ -7007,8 +7249,11 @@ function rippleTrim(which: 'start' | 'end') {
   pause();
   const before = clipMap();
   snapshot();
+  tl().clips = settleClips(tl().clips);
+  const end0 = start + len;
   if (which === 'start') c.inMs = Math.round(c.inMs + off * c.speed);
   else c.outMs = Math.round(c.inMs + off * c.speed);
+  shiftClipsFrom(end0, -(which === 'start' ? off : len - off), c);
   followMainTrack(before);
   changed();
   seek(which === 'start' ? start : t);
@@ -7158,7 +7403,7 @@ function onKey(e: KeyboardEvent) {
   if (e.key === 'Escape' && tfSession) { endTransform(false); return; }
   switch (e.key) {
     case ' ': e.preventDefault(); togglePlay(); break;
-    case 'Delete': case 'Backspace': e.preventDefault(); deleteSelected(); break;
+    case 'Delete': case 'Backspace': e.preventDefault(); deleteSelected(e.shiftKey); break;
     case 'ArrowLeft': e.preventDefault(); pause(); seek(t - (e.shiftKey ? 1000 : frame)); break;
     case 'ArrowRight': e.preventDefault(); pause(); seek(t + (e.shiftKey ? 1000 : frame)); break;
     case 'Home': seek(0); break;

@@ -15,7 +15,7 @@ interface TauriGlobal {
       title?: string;
       filters?: { name: string; extensions: string[] }[];
     }): Promise<string | string[] | null>;
-    ask(message: string, opts?: { title?: string; kind?: 'info' | 'warning' | 'error' }): Promise<boolean>;
+    ask(message: string, opts?: { title?: string; kind?: 'info' | 'warning' | 'error'; okLabel?: string; cancelLabel?: string }): Promise<boolean>;
     message(message: string, opts?: { title?: string; kind?: 'info' | 'warning' | 'error' }): Promise<void>;
   };
   webview: {
@@ -40,9 +40,14 @@ export const invoke = <R>(cmd: string, args?: Record<string, unknown>) => T().co
 export const fileSrc = (path: string) => T().core.convertFileSrc(path);
 export const listen = <P>(ev: string, cb: (p: P) => void) => T().event.listen<P>(ev, (e) => cb(e.payload));
 export const dialog = () => T().dialog;
-export const onDrop = (cb: (paths: string[]) => void) =>
+/** Files dropped from Explorer; `at` is where in the window (CSS pixels), when Tauri reports it. */
+export const onDrop = (cb: (paths: string[], at?: { x: number; y: number }) => void) =>
   T().webview.getCurrentWebview().onDragDropEvent((e) => {
-    if (e.payload.type === 'drop' && e.payload.paths?.length) cb(e.payload.paths);
+    const pl = e.payload as { type: string; paths?: string[]; position?: { x: number; y: number } };
+    if (pl.type === 'drop' && pl.paths?.length) {
+      const k = window.devicePixelRatio || 1;
+      cb(pl.paths, pl.position ? { x: pl.position.x / k, y: pl.position.y / k } : undefined);
+    }
   });
 
 export const join = (...parts: string[]) =>
